@@ -222,25 +222,6 @@ class DataManager:
 
 
 
-# In[469]:
-
-
-R = DataManager()
-
-
-# In[470]:
-
-
-R.read_data_from = r"C:\Users\user\Desktop\OMNI\Re_ repr_Omni_1126"
-
-
-# In[471]:
-
-
-R.data_reader()
-R.plot_generator()
-
-
 # In[430]:
 
 
