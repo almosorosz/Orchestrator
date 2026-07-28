@@ -7,7 +7,8 @@
 import os
 from enum import Enum
 from typing import Optional
-from pure_functions import counter
+from gui_design.pure_functions import counter
+
 import subprocess
 
 class Stage(Enum):

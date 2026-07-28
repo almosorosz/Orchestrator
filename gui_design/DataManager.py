@@ -4,14 +4,15 @@
 # In[343]:
 
 
-from pure_functions import W_pred, corr_func, L_pred, smoother, solub, final_value, SED, file_finder
-from matplotlib.ticker import MaxNLocator
-import matplotlib as mpl
-import pandas as pd
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.optimize import minimize
 
+import matplotlib              as mpl
+import pandas                  as pd
+import matplotlib.pyplot       as plt
+import numpy                   as np
+from scipy.optimize            import minimize
+from matplotlib.ticker         import MaxNLocator
+
+from gui_design.pure_functions import W_pred, corr_func, L_pred, smoother, solub, final_value, SED, file_finder
 
 # In[468]:
 
