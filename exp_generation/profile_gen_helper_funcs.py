@@ -1,5 +1,4 @@
 from dataclasses        import fields
-from profile_gen        import ProfileCreator
 from itertools          import accumulate, chain
 
 import numpy  as np
@@ -23,11 +22,10 @@ def segment_len_correcter(A,n): # Helper function to each unused ProfileCreator(
 def cumulation(A):
     return list(accumulate(A))
 
-def integrator(sections_to_integrate): 
+def integrator(sections_to_integrate,integrated): 
     # ---------------------------------------------------------------------------
     # Integrate sections to form a joint profile
     # ---------------------------------------------------------------------------
-    integrated = ProfileCreator() # create data class
 
     for f in fields(integrated):
         list_to_set = list(chain.from_iterable([getattr(s, f.name) for s in sections_to_integrate]))

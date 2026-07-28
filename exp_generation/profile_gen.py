@@ -4,16 +4,15 @@ import pandas            as pd
 import numpy             as np
 import matplotlib        as mpl
 import copy
-
 from scipy.interpolate   import interp1d
+
 from dataclasses         import dataclass, field
 from itertools           import accumulate, chain
 from dataclasses         import fields, dataclass
 
 # My stuff
-from pump_calibration    import PumpRateConverter
-
-from doe_sampler         import DoESampler
+from exp_generation.pump_calibration    import PumpRateConverter
+from doe_sampling.doe_sampler         import DoESampler
 
 mpl.rcParams.update({'font.size': 7,'axes.labelsize': 7,'axes.titlesize': 7,'xtick.labelsize': 7,'ytick.labelsize': 7,'legend.fontsize': 7,
                      'grid.alpha': 0.5, 'grid.linewidth': 0.7,'grid.linestyle': '-', 'xtick.minor.visible': True, 'ytick.minor.visible': True,})
@@ -550,10 +549,9 @@ class ProfileGenerator():
                                  valve_open,
                                  Eq_final_2]
 
-        integrated = self.helper_funcscs.integrator(sections_to_integrate)
-        
+        integrated = self.helper_funcscs.integrator(sections_to_integrate, ProfileCreator()) # create data class)
         profile    = self.helper_funcscs.generate_pandas_profile(integrated)
-        profile_pd    = self.helper_funcscs.generate_pandas_profile_for_omni(integrated)
+        profile_pd = self.helper_funcscs.generate_pandas_profile_for_omni(integrated)
         
         return profile, profile_pd
 
