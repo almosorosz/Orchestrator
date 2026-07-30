@@ -9,13 +9,13 @@ def counter( folder, filename):
     
     count = 0
     with os.scandir(folder) as entries:
-        for entry in entries:           
-            try:
-                A = int(entry.name[-5])
-                T = A %2 == 0
-            except:
-                T = False
-            if filename in entry.name and T:
+        for entry in entries:  
+            #try:
+                #A = int(entry.name[-5])
+                #T = A %2 == 0
+            #except:
+                #T = False
+            if filename in entry.name:# and T:
                 count += 1
     return count
 
@@ -25,12 +25,12 @@ def file_finder(folder, filename):
         
     with os.scandir(folder) as entries:
         for entry in entries:        
-            try:
-                A = int(entry.name[-5])
-                T = A%2 == 0
-            except:
-                T = False
-            if filename in entry.name and T:
+            #try:
+                #A = int(entry.name[-5])
+                #T = A%2 == 0
+            #except:
+                #T = False
+            if filename in entry.name: # and T:
                 files.append(entry.path)
     return files
 
@@ -56,10 +56,10 @@ def W_pred(X_new):
 
 
 def L_pred(X_new):
-    mu_X = [201.78218686, 736.3733133 ]
+    mu_X    = [201.78218686, 736.3733133 ]
     sigma_X = [ 91.934371,   239.33190586]
-    B = [[30.47983386, 56.41028485, 84.9595095 ], [32.95049616, 60.98284141, 91.84623527]]
-    A = [138.22833333, 290.32783333, 434.75716667]
+    B       = [[30.47983386, 56.41028485, 84.9595095 ], [32.95049616, 60.98284141, 91.84623527]]
+    A       = [138.22833333, 290.32783333, 434.75716667]
     X_new_scaled = (X_new - mu_X) / sigma_X
     Y_scaled_pred_direct = X_new_scaled @ B  
     Y_pred_direct = Y_scaled_pred_direct + A 
@@ -83,16 +83,3 @@ def final_value(T1, WWW_1,finaltime):
 def SED(L,W):
     
     return ((6*L*(W**2))/3.141592653589793)**(1/3)
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-

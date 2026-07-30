@@ -39,7 +39,7 @@ class DataManager:
             pass
 
         else:
-            mpl.rcParams.update({'font.size': 9,'axes.labelsize': 9,'axes.titlesize': 9,'xtick.labelsize': 9,'ytick.labelsize': 9,'legend.fontsize': 9,
+            mpl.rcParams.update({'font.size': 6,'axes.labelsize': 6,'axes.titlesize': 6,'xtick.labelsize': 6,'ytick.labelsize': 6,'legend.fontsize': 6,
                              'grid.alpha': 0.5, 'grid.linewidth': 0.7,'grid.linestyle': '-', 'xtick.minor.visible': True,
                              'ytick.minor.visible': True,})
         
@@ -125,7 +125,10 @@ class DataManager:
                     if len(LLL_1) > 0:
                         ax_L = self.axT[i,2].twinx()    
                         ax_L.plot(T1,LLL_1,self.colors[i%5],linestyle='-',alpha=0.2)
-                        ax_L.plot(T1[mask],LLL_1.iloc[mask,:],self.colors[i%5],linestyle='-',alpha=0.7)   
+                        try:
+                            ax_L.plot(T1[mask],LLL_1.iloc[mask,:],self.colors[i%5],linestyle='-',alpha=0.7) 
+                        except:
+                            continue
                         ax_L.yaxis.set_major_locator(MaxNLocator(nbins=NBINS))
                         ax_L.xaxis.set_major_locator(MaxNLocator(nbins=NBINS))
                         [ax_L.plot(SL1[0],SL1[j],self.colors[i%5], linestyle='-',alpha=0.9) for j in [1,2,3]]
@@ -147,7 +150,10 @@ class DataManager:
                     if len(WWW_1) > 0:
                         ax_W = self.axT[i,3].twinx()
                         ax_W.plot(T1,WWW_1,self.colors[i%5],linestyle='-',alpha=0.2)
-                        ax_W.plot(T1[mask],WWW_1.iloc[mask,:],self.colors[i%5],linestyle='-',alpha=0.9)    
+                        try:
+                            ax_W.plot(T1[mask],WWW_1.iloc[mask,:],self.colors[i%5],linestyle='-',alpha=0.9)  
+                        except:
+                            continue
                         [ax_W.plot(SW1[0],SW1[j],self.colors[i%5], linestyle='-',alpha=0.9) for j in [1,2,3]]
                         ax_W.yaxis.set_major_locator(MaxNLocator(nbins=NBINS))
                         ax_W.xaxis.set_major_locator(MaxNLocator(nbins=NBINS))
@@ -171,13 +177,13 @@ class DataManager:
                 
                 self.axT[i,0].text(self.axT[i,0].get_xlim()[1]*(0.3),self.axT[i,0].get_ylim()[1]*1.05,f'Exp. no:{i : .0f}', color=self.colors[i%5])
                     
-                self.fig.tight_layout()
                 
+        
             for ax in self.axT[-1, :]:
-                
                 self.fig.delaxes(ax)
-            
-            pass
+            self.fig.tight_layout()    
+            # Instead of relying on plt hooks, explicitly return the figure object
+            return self.fig
 
     def data_evaluator(self,E1,k):
         if 'Time' in E1.columns and len(E1['Time']) > 0:
