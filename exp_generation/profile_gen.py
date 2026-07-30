@@ -160,15 +160,104 @@ class ExperimentProfileStorage():
         self.solvent_rate_converter       = solvent_rate_converter
         self.cleaning_sol_rate_converter  = cleaning_sol_rate_converter
 
+        self.COLUMNS_W_BACKPROFILE        = ['seed', 'clean_sol', 'solution', 'solvent']
+        self.COMMON_NAME_OF_TIME_PROFS = 't_'
+        self.EPS = 0.001
+        self.TIME_TO_PUMP_BACK = 60 / 3600 # 60 sec
+
     def add_experiment(self, name, profile, profile_omni):
+        
         self.data[name] = profile
         self.profile[name] = profile_omni
-
         self.convert_to_omni()
-        
         
     def add_doe_stage(self, name, profile):
         self.DoE[name] = profile
+
+    def point_inserter(self, col, df, idx_to_insert_to, t_to_increase_with, row_to_modify, value_reverse):
+        new_row       = row_to_modify.copy()
+        new_row[col]  = value_reverse
+        new_row['t']  = row_to_modify['t'] + t_to_increase_with
+        df.loc[idx_to_insert_to:, 't'] = df.loc[idx_to_insert_to:, 't'] + t_to_increase_with 
+        df = pd.concat([df.iloc[:idx_to_insert_to], pd.DataFrame([new_row]),df.iloc[idx_to_insert_to:] ]).reset_index(drop=True)
+        
+        return df
+
+    def point_inserter_profile(self, col, df, idx_to_insert_to, t_to_increase_with, row_to_modify, value_reverse):
+        new_row         = row_to_modify.copy()
+        new_row[col]    = value_reverse
+        new_row['t_T']  = row_to_modify['t_T'] + t_to_increase_with
+        df.loc[idx_to_insert_to:, 't_T'] = df.loc[idx_to_insert_to:, 't_T'] + t_to_increase_with 
+        df = pd.concat([df.iloc[:idx_to_insert_to], pd.DataFrame([new_row]),df.iloc[idx_to_insert_to:] ]).reset_index(drop=True)
+        
+        return df
+
+    def add_backwards_ramp(self, df, columns):
+        
+        for col in columns:
+            t_diff_0 = 0.001
+            t_diff_1 = 0.001
+            t_diff_2 = 60/3600
+            t_diff_3 = 0.001
+            
+            # Find initial indices based on the CURRENT state of df
+            mask = df[col] != 0
+            if len(df[mask].index) < 2:
+                continue  # Skip if not enough points found
+                
+            idx_to_copy = df[mask].index[1]
+            value_reverse = -df.loc[idx_to_copy, col]
+            
+            idx_to_insert_to = idx_to_copy + 1
+            row_to_modify = df.loc[idx_to_copy].copy()
+
+            df = self.point_inserter(col, df, idx_to_insert_to, t_diff_0, row_to_modify, 0)
+
+            row_to_modify['t'] = df['t'].iloc[idx_to_insert_to + 1]
+            df = self.point_inserter(col, df, idx_to_insert_to + 1, t_diff_1, row_to_modify, value_reverse)
+
+            row_to_modify['t'] = df['t'].iloc[idx_to_insert_to + 2]
+            df = self.point_inserter(col, df, idx_to_insert_to + 2, t_diff_2, row_to_modify, value_reverse)
+
+            row_to_modify['t'] = df['t'].iloc[idx_to_insert_to + 3]
+            df = self.point_inserter(col, df, idx_to_insert_to + 3, t_diff_3, row_to_modify, 0)
+            
+        return df
+
+    def add_backwards_ramp_profile(self, df, columns):
+        t_cols = [i for i in df.columns if i[0:2] == self.COMMON_NAME_OF_TIME_PROFS]
+        for col in columns:
+            t_diff_0 = self.EPS
+            t_diff_1 = self.EPS
+            t_diff_2 = self.TIME_TO_PUMP_BACK
+            t_diff_3 = self.EPS
+            
+            # Find initial indices based on the CURRENT state of df
+            mask = df[col] != 0
+            if len(df[mask].index) < 2:
+                continue  # Skip if not enough points found
+                
+            idx_to_copy = df[mask].index[1]
+            value_reverse = -df.loc[idx_to_copy, col]
+            
+            idx_to_insert_to = idx_to_copy + 1
+            row_to_modify = df.loc[idx_to_copy].copy()
+
+            df = self.point_inserter_profile(col, df, idx_to_insert_to, t_diff_0, row_to_modify, 0)
+
+            row_to_modify['t_T'] = df['t_T'].iloc[idx_to_insert_to + 1]
+            df = self.point_inserter_profile(col, df, idx_to_insert_to + 1, t_diff_1, row_to_modify, value_reverse)
+
+            row_to_modify['t_T'] = df['t_T'].iloc[idx_to_insert_to + 2]
+            df = self.point_inserter_profile(col, df, idx_to_insert_to + 2, t_diff_2, row_to_modify, value_reverse)
+
+            row_to_modify['t_T'] = df['t_T'].iloc[idx_to_insert_to + 3]
+            df = self.point_inserter_profile(col, df, idx_to_insert_to + 3, t_diff_3, row_to_modify, 0)
+
+            for t_col in t_cols:
+                df[t_col] = df['t_T'].copy()
+            
+        return df
 
     def convert_to_omni(self):
 
@@ -193,7 +282,12 @@ class ExperimentProfileStorage():
                 self.profile_omni[exp]['solvent'] = self.solvent_rate_converter.convert_to_rpm(self.profile[exp]['solvent'])
             for exp in self.profile:
                 self.profile_omni[exp]['clean_sol'] = self.cleaning_sol_rate_converter.convert_to_rpm(self.profile[exp]['clean_sol'])
-        
+
+            for i in range(len(self.data)):
+                self.data_omni[f'exp{i+1}'] = self.add_backwards_ramp(self.data_omni[f'exp{i+1}'],self.COLUMNS_W_BACKPROFILE)
+            for i in range(len(self.profile)):
+                self.profile_omni[f'exp{i+1}'] = self.add_backwards_ramp_profile(self.profile_omni[f'exp{i+1}'],self.COLUMNS_W_BACKPROFILE)
+
         else:
 
             raise ValueError('generate data first!')
@@ -221,7 +315,8 @@ class ExpComponentGen():
         section_datastruct.stirring_rate = [ExpParams.stir_r.value]*len(section_datastruct.t)
 
         if ExpParams.if_opening:
-            initial_struct          = [1e-10, ExpParams.be_opened_until.value, 0.001, ExpParams.t_h_open.value] # ExpParams.AS_add_max is in g / min
+            initial_struct          = [self.AVOID_ZERO_DIFF, ExpParams.be_opened_until.value, 
+                                       self.AVOID_ZERO_DIFF, ExpParams.t_h_open.value] # ExpParams.AS_add_max is in g / min
             N = len(initial_struct)
             self.helper_funcscs.segment_len_correcter(section_datastruct,N) # correct unused profiles to have [0]*N length
 
@@ -240,7 +335,9 @@ class ExpComponentGen():
         initial_sol_add.stirring_rate = [ExpParams.stir_r.value]*len(initial_sol_add.t)
 
         if ExpParams.if_sol_initial:
-            initial_sol          = [1e-10, abs(ExpParams.Initial_sol_amount.value)/(60*ExpParams.sol_add_max), 0.001, ExpParams.t_h_solution.value] # ExpParams.AS_add_max is in g / min
+            initial_sol          = [self.AVOID_ZERO_DIFF, abs(ExpParams.Initial_sol_amount.value)/(60*ExpParams.sol_add_max), 
+                                    self.AVOID_ZERO_DIFF, ExpParams.t_h_solution.value] # ExpParams.AS_add_max is in g / min
+            
             N                    = len(initial_sol)
 
             self.helper_funcscs.segment_len_correcter(initial_sol_add,N) # correct unused profiles to have [0]*N length
@@ -340,7 +437,7 @@ class ExpComponentGen():
 
         if ExpParams.if_AS:
 
-            AS_t    = [self.AVOID_ZERO_DIFF, ExpParams.AS_add_time.value, 0.001, ExpParams.t_h_AS.value]
+            AS_t    = [self.AVOID_ZERO_DIFF, ExpParams.AS_add_time.value, self.AVOID_ZERO_DIFF, ExpParams.t_h_AS.value]
             N       = len(AS_t)
             self.helper_funcscs.segment_len_correcter(AS,N) # correct unused profiles to have [0]*N length
             AS.t    = AS_t 
