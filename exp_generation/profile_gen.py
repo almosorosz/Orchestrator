@@ -34,6 +34,7 @@ class DefineProcessParameter():
     max_val        : float
     if_in_doe      : bool
     if_only_minmax : bool 
+    name           : str
 
 @dataclass
 class ProfileCreator():
@@ -41,15 +42,17 @@ class ProfileCreator():
     # Each method represents an 'experimental profile type' that create the parallel profiles for the devices
     # -------------------------------------------------------------------------------------------------------
 
-    t              : list = field(default_factory=list)
-    T              : list = field(default_factory=list)
-    AS             : list = field(default_factory=list)
-    seed           : list = field(default_factory=list)
-    clean_sol      : list = field(default_factory=list)
-    solution       : list = field(default_factory=list)
-    solvent        : list = field(default_factory=list)
-    valve_state    : list = field(default_factory=list)
-    stirring_rate  : list = field(default_factory=list)
+    t                  : list = field(default_factory=list)
+    T                  : list = field(default_factory=list)
+    AS                 : list = field(default_factory=list)
+    seed               : list = field(default_factory=list)
+    clean_sol          : list = field(default_factory=list)
+    solution           : list = field(default_factory=list)
+    solvent            : list = field(default_factory=list)
+    valve_state        : list = field(default_factory=list)
+    stirring_rate      : list = field(default_factory=list)
+    stirring_rate_seed : list = field(default_factory=list)
+    stirring_rate_sol  : list = field(default_factory=list)
 
 # Store process parameters
 @dataclass
@@ -71,74 +74,77 @@ class ExperimentProfileParameters():
 
     # Valve actuation
     if_opening          : bool = True
-    t_h_open            : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.05,  0.0331, 0.1,   False, False))
-    be_opened_until     : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.03,  0.01,   0.2,   False, False)) # h
+    t_h_open            : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.05,  0.0331, 0.1,   False, False, 't_h_open'))
+    be_opened_until     : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.03,  0.01,   0.2,   False, False, 'be_opened_until')) # h
 
     # Cleaning solvent addition
     if_cleaning         : bool = True
-    cleaning_sol_amount : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(400 ,  190,     210,   False, False)) 
-    t_h_clean           : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.05 , 0.0332,  0.1  , False, False))
+    clean_sol           : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(400 ,  190,     210,   False, False, 'clean_sol')) 
+    t_h_clean           : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.05 , 0.0332,  0.1  , False, False, 't_h_clean'))
 
     # Solvent rinse
     if_solv_rinse       : bool = True
-    solv_amount         : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(400 , 190,   210, False, False)) 
-    t_h_solv            : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.05, 0.033, 0.1, False, False))
+    solvent             : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(400 , 190,   210, False, False,'solvent')) 
+    t_h_solv            : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.05, 0.033, 0.1, False, False,'t_h_solv'))
 
-    # Initial Solution addition step  - - - (!!!) changing Initial_sol_amount changes everything in the experiment ratios - - - - 
+    # Initial Solution addition step  - - - (!!!) changing solution changes everything in the experiment ratios - - - - 
     if_sol_initial      : bool = True
-    Initial_sol_amount  : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(200 ,190,  210 ,  False, False)) 
-    t_h_solution        : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.1 ,0.03, 0.15 , False, False))
+    solution  : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(200 ,190,  210 ,  False, False,'solution')) 
+    t_h_solution        : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.1 ,0.03, 0.15 , False, False,'t_h_solution'))
 
     # Stirring rate 
-    stir_r              : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(350, 100, 400, False, False))
+    stirring_rate       : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(350, 100, 400, False, False,'stirring_rate'))
+    stirring_rate_seed  : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(310, 100, 400, False, False,'stirring_rate_seed'))
+    stirring_rate_sol   : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(200, 100, 400, False, False,'stirring_rate_sol'))
 
     # Initial dissolution step (T_diss) and  Aproaching initial stage (T_0)
     if_diss_initial     : bool = True
-    T_diss              : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(70 ,  70   ,  50  , False, False))
-    t_diss              : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.3,  0.1  ,   0.9, False, False))
-    T_0                 : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(65 ,  50   ,   55 , False, False))
-    t_h_0               : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(1  ,  0.336, 1    ,  False, False))
+    T_diss              : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(70 ,  70   ,  50  , False, False,'T_diss'))
+    t_diss              : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.3,  0.1  ,   0.9, False, False,'t_diss'))
+    T_0                 : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(65 ,  50   ,   55 , False, False,'T_0'))
+    t_h_0               : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(1  ,  0.336, 1    ,  False, False,'t_h_0'))
 
     # Adding initial AS prior to crystallization to set Ssat
     if_AS_initial       : bool = False
-    AS_initial          : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(5,   1,      10,   False, False))
-    t_h_as_initial      : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(0.1, 0.337,  1 ,   False, False))
+    AS_initial          : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(5,   1,      10,   False, False,'AS_initial'))
+    t_h_as_initial      : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(0.1, 0.337,  1 ,   False, False,'t_h_as_initial'))
 
     # Seeding
     if_seed             : bool = True
-    seed                : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(2, 0,       5 , True, False))
+    seed                : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(2, 0,       5 , True, False,'seed'))
     seeding_rpm         : float                  = 50.0 # rpm with which the pump was calibrated for seeding 
     seed_rate           : float                  = 1 # rpm
     seed_time           : float                  = 1 
-    t_h_seed            : DefineProcessParameter = field(default_factory=lambda: DefineProcessParameter(1, 0.338,   1 , False, False))  
+    t_h_seed            : DefineProcessParameter = field(default_factory = lambda: DefineProcessParameter(1, 0.338,   1 , False, False,'t_h_seed'))  
     
 
-    seed_calibration_parameters: list = field(default_factory = lambda  : [ 0.11196005,  0.42810161, 29.11837123] ) # parameters of a second order polinomial
+    seed_cal_pars: list = field(default_factory = lambda  : [ 6.87848122,  0.84736203, 38.45192597] ) # As:parameters of a second order polinomial
+                                                                                                                    # As[0]*x^2 + As[1]*x^1 + As[2]*x^0  
 
     # ARRANGEMENT
     if_ARR              : bool = True
     ARR                 : str                     = "T"
-    ARR_types           : list[str]               = field(default_factory=lambda: ['AS', 'SIM', 'T'])
+    ARR_types           : list[str]               = field(default_factory = lambda: ['AS', 'SIM', 'T'])
 
     # AS addition
     if_AS               : bool = True
-    AS_am               : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(230, 200 ,  250, False, False))
-    AS_add_time         : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(4,   2 ,    8,   True, False))
-    t_h_AS              : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(0.1, 0.339, 1,   False, False))
+    AS_am               : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(230, 200 ,  250, False, False,'AS_am'))
+    AS_add_time         : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(4,   2 ,    8,   True, False,'AS_add_time'))
+    t_h_AS              : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.1, 0.339, 1,   False, False,'t_h_AS'))
 
     # Cooling
     if_cool_in_exp      : bool = True
-    t_cool              : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(2,   1,      10,  True, False ))
-    T_final             : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(25,  10,     30,  True, False))
-    t_h_cool            : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(0.1, 0.3310, 1,   False, False))
+    t_cool              : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(2,   1,      10,  True, False,'t_cool'))
+    T_final             : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(25,  10,     30,  True, False,'T_final'))
+    t_h_cool            : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.1, 0.3310, 1,   False, False,'t_h_cool'))
 
     # Equillibrium time
-    t_eq                : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(2,   1,       3,  False, False))
+    t_eq                : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(2,   1,       3,  False, False,'t_eq'))
     
     # Final boiling out
     if_boil             : bool = False
-    t_boil              : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False ))
-    t_h_boil            : DefineProcessParameter  = field(default_factory=lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False )) 
+    t_boil              : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False,'t_boil'))
+    t_h_boil            : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False,'t_h_boil')) 
 
 # In[194]:
 
@@ -312,7 +318,6 @@ class ExpComponentGen():
         self.helper_funcscs.initialize(section_datastruct) # initialize all segments
 
         section_datastruct.T             = [ExpParams.T_room]
-        section_datastruct.stirring_rate = [ExpParams.stir_r.value]*len(section_datastruct.t)
 
         if ExpParams.if_opening:
             initial_struct          = [self.AVOID_ZERO_DIFF, ExpParams.be_opened_until.value, 
@@ -323,19 +328,19 @@ class ExpComponentGen():
             section_datastruct.t    = initial_struct
             setattr(section_datastruct, 'valve_state', [1, 1, 0, 0])
             section_datastruct.T    = [ExpParams.T_room]*N
-            section_datastruct.stirring_rate = [ExpParams.stir_r.value]*len(section_datastruct.t)
+        
+        section_datastruct = self.helper_funcscs.set_stirring(section_datastruct, ExpParams)
 
         return section_datastruct
 
-    def sol_add_gen(self,fieldname,ExpParams): # by fieldname, it can be changed to generate profiles for solv, solu, or cleaning
+    def sol_add_gen(self,to_be_modified,condition,ExpParams): # by fieldname, it can be changed to generate profiles for solv, solu, or cleaning
 
         initial_sol_add      = ProfileCreator() # create data class
         self.helper_funcscs.initialize(initial_sol_add) # initialize all segments
         initial_sol_add.T             = [ExpParams.T_room]
-        initial_sol_add.stirring_rate = [ExpParams.stir_r.value]*len(initial_sol_add.t)
-
-        if ExpParams.if_sol_initial:
-            initial_sol          = [self.AVOID_ZERO_DIFF, abs(ExpParams.Initial_sol_amount.value)/(60*ExpParams.sol_add_max), 
+        
+        if condition:
+            initial_sol          = [self.AVOID_ZERO_DIFF, abs(to_be_modified.value)/(60*ExpParams.sol_add_max), 
                                     self.AVOID_ZERO_DIFF, ExpParams.t_h_solution.value] # ExpParams.AS_add_max is in g / min
             
             N                    = len(initial_sol)
@@ -344,10 +349,11 @@ class ExpComponentGen():
 
             initial_sol_add.t    = initial_sol
 
-            setattr(initial_sol_add,fieldname,[60*ExpParams.sol_add_max, 60*ExpParams.sol_add_max, 0, 0])
+            setattr(initial_sol_add,to_be_modified.name,[60*ExpParams.sol_add_max, 60*ExpParams.sol_add_max, 0, 0])
 
             initial_sol_add.T    = [ExpParams.T_room]*N
-            initial_sol_add.stirring_rate = [ExpParams.stir_r.value]*len(initial_sol_add.t)
+        
+        initial_sol_add = self.helper_funcscs.set_stirring(initial_sol_add, ExpParams)
 
         return initial_sol_add
 
@@ -359,7 +365,6 @@ class ExpComponentGen():
         initial_T      = ProfileCreator() # create data class
         self.helper_funcscs.initialize(initial_T) # initialize all segments
         initial_T.T    = [preceeding_proc.T[-1]]
-        initial_T.stirring_rate = [ExpParams.stir_r.value]*len(initial_T.t)
 
         if if_occ_temp:
             init_T_prof    = [T_start, T_higher, T_higher, T_final, T_final]
@@ -371,8 +376,9 @@ class ExpComponentGen():
                               t_h]
 
             initial_T.T    = init_T_prof
-            initial_T.stirring_rate = [ExpParams.stir_r.value]*len(initial_T.t)
-
+        
+        initial_T = self.helper_funcscs.set_stirring(initial_T, ExpParams)
+        
         return initial_T
 
     def initial_antisolv_gen(self,preceedeing_sect,ExpParams):   
@@ -383,21 +389,21 @@ class ExpComponentGen():
         initial_AS      = ProfileCreator() # create data class
         self.helper_funcscs.initialize(initial_AS) # set every to [0]
         initial_AS.T    = [preceedeing_sect.T[-1]]
-        initial_AS.stirring_rate = [ExpParams.stir_r.value]*len(initial_AS.t)
 
         if ExpParams.if_AS_initial:
 
-            initial_AS_t    = [self.AVOID_ZERO_DIFF, 
-                               abs(ExpParams.AS_initial.value)/(60*ExpParams.AS_add_max),
-                               self.AVOID_ZERO_DIFF, 
-                               ExpParams.t_h_as_initial.value] # ExpParams.AS_add_max is in g / min
+            initial_AS_t    = [self.AVOID_ZERO_DIFF, abs(ExpParams.AS_initial.value)/(60*ExpParams.AS_add_max),
+                               self.AVOID_ZERO_DIFF, ExpParams.t_h_as_initial.value] # ExpParams.AS_add_max is in g / min
 
             N               = len(initial_AS_t)
+            
             self.helper_funcscs.segment_len_correcter(initial_AS,N) # correct unused profiles to have [0]*N length
             initial_AS.t    = initial_AS_t
             initial_AS.AS   = [60*ExpParams.AS_add_max, 60*ExpParams.AS_add_max, 0, 0]
             initial_AS.T    = [preceedeing_sect.T[-1]]*N
-            initial_AS.stirring_rate = [ExpParams.stir_r.value]*len(initial_AS.t)
+        
+        initial_AS = self.helper_funcscs.set_stirring(initial_AS, ExpParams)
+        
         return initial_AS
 
     def seed_prof_gen(self,preceedeing_sect,ExpParams):
@@ -409,8 +415,7 @@ class ExpComponentGen():
         self.helper_funcscs.initialize(seed_prof)
         seed_prof.T    = [preceedeing_sect.T[-1]]
 
-        t_seed         = self.seed_pred(ExpParams.seed_calibration_parameters, ExpParams.seed.value) # convert the seed amount to seed pumping time in s
-        seed_prof.stirring_rate = [ExpParams.stir_r.value]*len(seed_prof.t)
+        t_seed         = self.seed_pred(ExpParams.seed_cal_pars, ExpParams.seed.value) # convert the seed amount to seed pumping time in s
 
         if ExpParams.if_seed:
 
@@ -421,7 +426,8 @@ class ExpComponentGen():
             seed_prof.t    = seed_prof_t
             seed_prof.seed = [50, 50, 0, 0]
             seed_prof.T    = [preceedeing_sect.T[-1]]*N
-            seed_prof.stirring_rate = [ExpParams.stir_r.value]*len(seed_prof.t)
+        
+        seed_prof = self.helper_funcscs.set_stirring(seed_prof, ExpParams)
 
         return seed_prof
 
@@ -433,7 +439,6 @@ class ExpComponentGen():
         AS      = ProfileCreator() # create data class
         self.helper_funcscs.initialize(AS)
         AS.T    = [preceeding_sect.T[-1]]
-        AS.stirring_rate = [ExpParams.stir_r.value]*len(AS.t)
 
         if ExpParams.if_AS:
 
@@ -446,8 +451,9 @@ class ExpComponentGen():
                        0,
                        0]
             AS.T    = [preceeding_sect.T[-1]]*N
-            AS.stirring_rate = [ExpParams.stir_r.value]*len(AS.t)
 
+        AS = self.helper_funcscs.set_stirring(AS, ExpParams)
+        
         return AS
 
     def temp_prof_gen(self,preceeding_sect,ExpParams):   
@@ -458,7 +464,6 @@ class ExpComponentGen():
         T_prof      = ProfileCreator() # create data class
         self.helper_funcscs.initialize(T_prof)
         T_prof.T    = [preceeding_sect.T[-1]]
-        T_prof.stirring_rate = [ExpParams.stir_r.value]*len(T_prof.t)    
 
         if ExpParams.if_cool_in_exp:
             T_prof_t    = [self.AVOID_ZERO_DIFF, ExpParams.t_cool.value, ExpParams.t_h_cool.value]
@@ -466,7 +471,8 @@ class ExpComponentGen():
             self.helper_funcscs.segment_len_correcter(T_prof,N) # correct unused profiles to have [0]*N length
             T_prof.t    = T_prof_t
             T_prof.T    = [preceeding_sect.T[-1], ExpParams.T_final.value,ExpParams.T_final.value]
-            T_prof.stirring_rate = [ExpParams.stir_r.value]*len(T_prof.t)    
+
+        T_prof = self.helper_funcscs.set_stirring(T_prof, ExpParams)
 
         return T_prof
 
@@ -482,7 +488,8 @@ class ExpComponentGen():
 
         Eq.t    = Eq_t
         Eq.T    = [preceeding_sect.T[-1]] * 2
-        Eq.stirring_rate = [ExpParams.stir_r.value]*len(Eq.t) 
+        
+        Eq = self.helper_funcscs.set_stirring(Eq, ExpParams)
 
         return Eq
 
@@ -554,9 +561,11 @@ class ProfileGenerator():
         Initial_cond = ProfileCreator()
         Initial_cond.T = [exp_params.T_room]
         Eq_in = self.exp_component_gen.eq_gen(Initial_cond, exp_params,exp_params.time_to_wait_prior_exp)
+        
+
 
         # (0): Initial section: add solution at room T
-        initial_sol_add = self.exp_component_gen.sol_add_gen('solution',exp_params)
+        initial_sol_add = self.exp_component_gen.sol_add_gen(exp_params.solution,exp_params.if_sol_initial,exp_params)
 
         # (1): Generate initial_T T segment (heat up, dissolve + holding time, cool to T0) + holding time
         initial_T = self.exp_component_gen.occasional_temp_prof_gen(exp_params.T_room,
@@ -620,13 +629,13 @@ class ProfileGenerator():
                                                                             exp_params,Eq)             
         Eq_final          = self.exp_component_gen.eq_gen(T_prof_back_to_RT, exp_params, 0.5) 
         valve_open        = self.exp_component_gen.valve_prof_gen(exp_params)            
-        cleaning_sol_add  = self.exp_component_gen.sol_add_gen('clean_sol',exp_params)   
+        cleaning_sol_add  = self.exp_component_gen.sol_add_gen(exp_params.clean_sol,exp_params.if_cleaning,exp_params)   
         T_boil_out_clean  = self.exp_component_gen.occasional_temp_prof_gen(cleaning_sol_add.T[-1],
                                                                             exp_params.aceton_boil_out_T,
                                                                             exp_params.T_room,exp_params.t_boil.value,exp_params.t_h_boil.value,exp_params,Eq)             
         
         valve_open_1      = self.exp_component_gen.valve_prof_gen(exp_params)            
-        solvent_rinse     = self.exp_component_gen.sol_add_gen('solvent',exp_params)    
+        solvent_rinse     = self.exp_component_gen.sol_add_gen(exp_params.solvent,exp_params.if_solv_rinse,exp_params)    
         Eq_final_2        = self.exp_component_gen.eq_gen(solvent_rinse, exp_params, exp_params.wait_after_exp)     
 
         sections_to_integrate = [Eq_in,

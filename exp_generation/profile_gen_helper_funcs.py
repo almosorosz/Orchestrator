@@ -4,6 +4,13 @@ from itertools          import accumulate, chain
 import numpy  as np
 import pandas as pd
 
+def set_stirring(A,ExpParams):
+    
+    A.stirring_rate      = [ExpParams.stirring_rate.value]*len(A.t)    
+    A.stirring_rate_seed = [ExpParams.stirring_rate_seed.value]*len(A.t)    
+    A.stirring_rate_sol  = [ExpParams.stirring_rate_sol.value]*len(A.t) 
+    
+    return A
 def initialize(A): # Helper function to set each new ProfileCreator() components to [0] at beginning
     for f in fields(A):
         setattr(A, f.name, [0])
@@ -110,16 +117,14 @@ def exp_par_condition_corr(exp_par):
 
     conditions = [
         (exp_par.if_opening,     [exp_par.t_h_open, exp_par.be_opened_until]),
-        (exp_par.if_cleaning,    [exp_par.cleaning_sol_amount, exp_par.t_h_clean]),
-        (exp_par.if_solv_rinse,  [exp_par.cleaning_sol_amount, exp_par.t_h_clean]),
-        (exp_par.if_solv_rinse,  [exp_par.solv_amount, exp_par.t_h_solv]),
-        (exp_par.if_sol_initial, [exp_par.Initial_sol_amount, exp_par.t_h_solution]),
+        (exp_par.if_cleaning,    [exp_par.clean_sol, exp_par.t_h_clean]),
+        (exp_par.if_solv_rinse,  [exp_par.solvent, exp_par.t_h_solv]),
+        (exp_par.if_sol_initial, [exp_par.solution, exp_par.t_h_solution]),
         (exp_par.if_AS_initial,  [exp_par.AS_initial, exp_par.t_h_as_initial]),
         (exp_par.if_seed,        [exp_par.seed, exp_par.t_h_seed]),
         (exp_par.if_AS,          [exp_par.AS_am, exp_par.AS_add_time, exp_par.t_h_AS]),
         (exp_par.if_cool_in_exp, [exp_par.t_cool, exp_par.T_final, exp_par.t_h_cool, exp_par.t_eq]),
         (exp_par.if_boil,        [exp_par.t_boil, exp_par.t_h_boil])
-        
     ]
 
     for condition, vars_ in conditions:
