@@ -1,0 +1,8 @@
+0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+cmp1,cmp1,cmp2,cmp2,cmp11,cmp11,cmp12,cmp12,cmp13,cmp13,cmp14,cmp14,cmp16,cmp16,cmp17,cmp17,cmp18,cmp18,cmp19,cmp19
+Device,Huber Controller,Device,Text File,Device,Stirrer J-KEM,Device,Masterflex pump,Device,Masterflex pump,Device,Masterflex pump,Device,Masterflex pump|P04,Device,Text File|,Device,Stirrer J-KEM|P02,Device,Stirrer J-KEM|P03
+Label,MAIN-TEMP,Label,AS,Label,MAIN-STR,Label,SOLUTION,Label,SOLVENT,Label,SEED,Label,CLEANING,Label,VALVE,Label,SEED-STIR,Label,SOLUTION-STIR
+Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1,Calibration A,1
+Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0,Calibration B,0
+Start time,0,Start time,0,Start time,0,Start time,0,Start time,0,Start time,0,Start time,0,Start time,0,Start time,0,Start time,0
+Time (min),Temperature (C),Time (min),Value,Time (min),Stirrer speed (RPM),Time (min),Pump speed (RPM),Time (min),Pump speed (RPM),Time (min),Pump speed (RPM),Time (min),Pump speed (RPM),Time (min),Value,Time (min),Stirrer speed (RPM),Time (min),Stirrer speed (RPM)
