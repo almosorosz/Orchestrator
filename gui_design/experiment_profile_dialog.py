@@ -53,8 +53,8 @@ class DataclassEditor(QWidget):
                 w.setValue(value)
 
             # string
-            elif isinstance(value, str):
-                w = QLineEdit(value)
+            #elif isinstance(value, str):
+                #w = QLineEdit(value)
 
             else:
                 continue

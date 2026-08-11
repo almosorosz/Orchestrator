@@ -4,6 +4,8 @@ import pandas            as pd
 import numpy             as np
 import matplotlib        as mpl
 import copy
+import exp_generation.profile_gen_helper_funcs
+
 from scipy.interpolate   import interp1d
 
 from dataclasses         import dataclass, field
@@ -307,8 +309,8 @@ class ExpComponentGen():
     # II. Generate the segments one-by-one
     # ----------------------------------------------------------
 
-    def __init__(self,helper_funcscs):
-        self.helper_funcscs = helper_funcscs
+    def __init__(self):
+        self.helper_funcscs = exp_generation.profile_gen_helper_funcs
         self.seed_pred = lambda X, m_seed: X[0] + m_seed**X[1]*X[2] # function to convert mass of seed to pumping %%time
         self.AVOID_ZERO_DIFF = 1.0e-3 # 'epsilon' to avid zero t-diff
         
@@ -335,9 +337,9 @@ class ExpComponentGen():
 
     def sol_add_gen(self,to_be_modified,condition,ExpParams): # by fieldname, it can be changed to generate profiles for solv, solu, or cleaning
 
-        initial_sol_add      = ProfileCreator() # create data class
-        self.helper_funcscs.initialize(initial_sol_add) # initialize all segments
-        initial_sol_add.T             = [ExpParams.T_room]
+        pumping_profile      = ProfileCreator() # create data class
+        self.helper_funcscs.initialize(pumping_profile) # initialize all segments
+        pumping_profile.T             = [ExpParams.T_room]
         
         if condition:
             initial_sol          = [self.AVOID_ZERO_DIFF, abs(to_be_modified.value)/(60*ExpParams.sol_add_max), 
@@ -345,17 +347,17 @@ class ExpComponentGen():
             
             N                    = len(initial_sol)
 
-            self.helper_funcscs.segment_len_correcter(initial_sol_add,N) # correct unused profiles to have [0]*N length
+            self.helper_funcscs.segment_len_correcter(pumping_profile,N) # correct unused profiles to have [0]*N length
 
-            initial_sol_add.t    = initial_sol
+            pumping_profile.t    = initial_sol
 
-            setattr(initial_sol_add,to_be_modified.name,[60*ExpParams.sol_add_max, 60*ExpParams.sol_add_max, 0, 0])
+            setattr(pumping_profile,to_be_modified.name,[60*ExpParams.sol_add_max, 60*ExpParams.sol_add_max, 0, 0])
 
-            initial_sol_add.T    = [ExpParams.T_room]*N
+            pumping_profile.T    = [ExpParams.T_room]*N
         
-        initial_sol_add = self.helper_funcscs.set_stirring(initial_sol_add, ExpParams)
+        pumping_profile = self.helper_funcscs.set_stirring(pumping_profile, ExpParams)
 
-        return initial_sol_add
+        return pumping_profile
 
     def occasional_temp_prof_gen(self,T_start,T_higher,T_final,t_at_high, t_h, ExpParams, preceeding_proc, if_occ_temp=True):
         # ---------------------------------------------------------------------------------
@@ -536,11 +538,11 @@ class ProfileGenerator():
     # __init__ -->
     # ---------------------------------------------------------- 
 
-    def __init__(self, exp_params,exp_component_gen,helper_funcscs):
+    def __init__(self, exp_params,exp_component_gen):
         self.description       = 'Using the class for creating simultaneous T, AS, and seeding profiles'
         self.exp_params        = exp_params
         self.exp_component_gen = exp_component_gen
-        self.helper_funcscs    = helper_funcscs
+        self.helper_funcscs    = exp_generation.profile_gen_helper_funcs
 
     # ----------------------------------------------------------
     # III. Integrate the segments
@@ -633,12 +635,12 @@ class ProfileGenerator():
         T_boil_out_clean  = self.exp_component_gen.occasional_temp_prof_gen(cleaning_sol_add.T[-1],
                                                                             exp_params.aceton_boil_out_T,
                                                                             exp_params.T_room,exp_params.t_boil.value,exp_params.t_h_boil.value,exp_params,
-                                                                            Eq,exp_params.if_boil)             
+                                                                            cleaning_sol_add,exp_params.if_boil)             
         
         valve_open_1      = self.exp_component_gen.valve_prof_gen(exp_params)            
         solvent_rinse     = self.exp_component_gen.sol_add_gen(exp_params.solvent,exp_params.if_solv_rinse,exp_params)    
         Eq_final_2        = self.exp_component_gen.eq_gen(solvent_rinse, exp_params, exp_params.wait_after_exp)     
-
+        
         sections_to_integrate = [Eq_in,
                                  initial_sol_add,
                                  initial_T,

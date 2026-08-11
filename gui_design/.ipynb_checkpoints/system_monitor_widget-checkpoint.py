@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit
 )
 from PySide6.QtCore import Qt
+from gui_design.stylish_widgets import MetricCard
 # ==========================================================
 # Background worker
 # ==========================================================
@@ -108,68 +109,46 @@ class MonitorWorker(QObject):
 
 class SystemMonitorWidget(QWidget):
 
-    def __init__(self,parent=None):
-
+    def __init__(self, parent=None):
         super().__init__(parent)
 
-        self.cpu = QProgressBar()
-        self.ram = QProgressBar()
-        self.info = QLabel()
-        self.net = QLabel()
-        self.disk = QTextEdit()
-        self.disk.setMaximumHeight(60)
-        self.proc = QTextEdit()
-        self.proc.setMaximumHeight(80)
+        self.cpu_card = MetricCard("CPU", "--%", "🖥")
+        self.ram_card = MetricCard("RAM", "--%", "💾")
+        self.net_card = MetricCard("NET", "--", "🌐")
 
         layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
 
-
-        self.cpu_label = QLabel("CPU\n--%")
-        self.ram_label = QLabel("RAM\n--%")
-        self.net_label = QLabel("NET\n--")
-        self.disk_label = QLabel("DISK\n--")
-        
-        
-        for w in [
-            self.cpu_label,
-            self.ram_label,
-            self.net_label,
-            self.disk_label
-        ]:
-            w.setAlignment(
-                Qt.AlignCenter
-            )
-            layout.addWidget(w)
+        layout.addWidget(self.cpu_card)
+        layout.addWidget(self.ram_card)
+        layout.addWidget(self.net_card)
 
         self.thread = QThread(self)
         self.worker = MonitorWorker()
+
         self.worker.moveToThread(self.thread)
+
         self.thread.started.connect(self.worker.run)
         self.worker.update.connect(self.refresh)
+
         self.thread.start()
 
     @Slot(dict)
-    def refresh(self,d):
-    
-        self.cpu_label.setText(
-            f"CPU\n{d['cpu']}%"
-        )
-    
-        self.ram_label.setText(
-            f"RAM\n{d['ram']}%"
-        )
-    
-        self.net_label.setText(
-            f"NET\n↓{d['down']:.1f}\n↑{d['up']:.1f}"
-        )
-    
-        self.disk_label.setText(
-            d["disk"].split("\n")[0]
-        )
-    
+    def refresh(self, d):
 
-    def closeEvent(self,e):
+        cpu = d["cpu"]
+        ram = d["ram"]
+        net = (f"↓ {d['down']:.2f} MB/s  "f"↑ {d['up']:.2f} MB/s")
+        
+        self.cpu_card.update_value(f"{cpu:.2f}%", "Normal" if cpu < 80 else "High", "#22c55e" if cpu < 80 else "#facc15")
+        self.ram_card.update_value(f"{ram:.2f}%","Normal" if ram < 80 else "High","#22c55e" if ram < 80 else "#facc15")
+        self.net_card.update_value(net,"Active" if d["down"] > 0 or d["up"] > 0 else "Idle","#22c55e" if d["down"] > 0 or d["up"] > 0 else "#64748b")
+
+    def closeEvent(self, e):
         self.worker.stop()
         self.thread.quit()
         self.thread.wait()
         e.accept()
+
+

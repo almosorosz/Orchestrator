@@ -1,4 +1,4 @@
-from PySide6.QtWidgets  import (QDialog, QWidget, QFormLayout, 
+from PySide6.QtWidgets  import (QDialog, QWidget, QFormLayout, QTableWidget,
                                 QGroupBox,QVBoxLayout,QCheckBox,QSpinBox,
                                 QDoubleSpinBox,QLineEdit,QDialogButtonBox,
                                 QVBoxLayout,QScrollArea)
@@ -53,8 +53,8 @@ class DataclassEditor(QWidget):
                 w.setValue(value)
 
             # string
-            elif isinstance(value, str):
-                w = QLineEdit(value)
+            #elif isinstance(value, str):
+                #w = QLineEdit(value)
 
             else:
                 continue
@@ -80,6 +80,7 @@ class DataclassEditor(QWidget):
     
             elif isinstance(widget, QLineEdit):
                 setattr(self.obj, name, widget.text())
+                
 
 class ExperimentProfileDialog(QDialog):
 
