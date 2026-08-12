@@ -122,7 +122,7 @@ class DoESampler:
         elif types == 'GREEDY':
             points = self.greedy_minimax(target_n, n_dims)
         elif types == 'FACT':
-            points = self.Factorial_Design(n_dims, Fraction)
+            points = self.factorial_design(n_dims, Fraction)
             greedy_reduce = False
         else:
             raise ValueError(f"Unknown type: {types}")

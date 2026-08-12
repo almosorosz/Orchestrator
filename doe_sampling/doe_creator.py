@@ -31,7 +31,7 @@ class ExperimentCreator():
         self.samples      = 1        # to be set by user !!
         self.Fract        = 0        # to be set by user !!
         self.TYPE         = 'GREEDY' # to be set by user !!
-
+        
         self.DoE_val = dict()
         self.DoE_samples = np.array([])
         self.DoE_sampled_scaled = np.array([])
@@ -52,13 +52,15 @@ class ExperimentCreator():
         self.dimensions  = self.doe_sampler.dim_counter(exp_par)
 
         if self.dimensions < 1 or self.samples < 2:
-            print(f'Dimensions:{self.dimensions}, samples {self.samples} !')
-            print(f'Generating {self.samples} sample(s) using the identical, default settings !')
+            #print(f'Dimensions:{self.dimensions}, samples {self.samples} !')
+            #print(f'Generating {self.samples} sample(s) using the identical, default settings !')
             self.if_sampling  = False 
         elif self.Fract > 2 and self.TYPE == 'FACT':
-            print('Select Fract to be: 0>=Fract>=2}')
+            #print('Select Fract to be: 0>=Fract>=2}') # !!!!!
+            self.if_sampling  = False 
+            
         else:
-            print(f'Dimensions:{self.dimensions}, samples {self.samples} !')
+            #print(f'Dimensions:{self.dimensions}, samples {self.samples} !')
             self.if_sampling = True
 
     def generate_experiments(self):
@@ -69,7 +71,7 @@ class ExperimentCreator():
             self.DoE_samples = self.doe_sampler.doe_generator(1,self.samples,self.dimensions,self.weights,self.TYPE,self.Fract)[0]
             # scale the sample points between [0;1] to cover entire variable space
             self.DoE_sampled_scaled = self.doe_sampler.scaler(self.DoE_samples)
-        for i in range(self.samples): # take a sample
+        for i in range(len(self.DoE_samples)): # take a sample
             dim_index = 0
             if self.if_sampling: # sampling is True then take the optimal samples otherwise just use the default .values
                 
@@ -77,7 +79,7 @@ class ExperimentCreator():
                 for f in fields(self.exp_par):
                     if f.type.__name__ == "DefineProcessParameter" and getattr(self.exp_par, f.name).if_in_doe: # take one sub-sample from every dim.
                         param = getattr(self.exp_par, f.name)
-                        print(f.name)
+                        #print(f.name)
                         
                         if param.if_only_minmax: # if if_only_minmax == True don't ge\t the samples, only take min or max alternating
                             if i % 2 == 0:
@@ -106,7 +108,7 @@ class ExperimentCreator():
             # Store the changed parameters of the DoE
             self.exp_storage.add_doe_stage( f'exp{i+1}', pd.DataFrame(self.DoE_val)) # this is empty when only one sample is taken
 
-        for i in range(self.samples):
+        for i in range(len(self.DoE_samples)):
             exp_key = f'exp{i+1}'
             self.exp_storage.profile_omni[exp_key] = self.exp_storage.profile_omni[exp_key].drop_duplicates()
 
@@ -114,12 +116,11 @@ class ExperimentCreator():
         if self.DoE_samples.size:
             self.doe_sampler.two_dim_plotter([self.doe_sampler.scaler(self.DoE_samples)],[self.TYPE])
             self.doe_sampler.three_dim_plotter(self.doe_sampler.scaler(self.DoE_samples))
-        else:
-            print('Generate samples first')
+        
 
     def export_generated_expts(self,loc_to_save_expts):
 
-        for i in range(self.samples):
+        for i in range(len(self.DoE_samples)):
             DAT = pd.DataFrame(self.exp_storage.profile_omni[f'exp{i+1}'])
 
             try:
@@ -135,7 +136,7 @@ class ExperimentCreator():
 
         reordered_exps = {}
         
-        for i in range(self.samples):
+        for i in range(len(self.DoE_samples)):
             reordered_data = {}
             for key, value in mapping.items():
                 reordered_data[f't_{value}'] = self.exp_storage.profile_omni[f'exp{i+1}'][f't_{key}']
@@ -164,7 +165,7 @@ class ExperimentCreator():
             wb.create_sheet(title=f"subexp{1}")
             wb.save(name_to_save_expts)
 
-        for i in range(self.samples):
+        for i in range(len(self.DoE_samples)):
 
             DAT = pd.DataFrame(reordered_exps[f"exp{i+1}"])
             with pd.ExcelWriter(name_to_save_expts, engine="openpyxl", mode="a",if_sheet_exists='replace') as writer:
@@ -188,7 +189,7 @@ class ExperimentCreator():
 
     def plot_doe_experiments(self):
 
-        for i in range(self.samples):
+        for i in range(len(self.DoE_samples)):
             fig, ax = plt.subplots(figsize=(4,2))
             ax_AS   = ax.twinx()
 
