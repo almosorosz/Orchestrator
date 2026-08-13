@@ -10,6 +10,8 @@ import pandas            as pd
 import matplotlib        as mpl
 import matplotlib.pyplot as plt
 
+from matplotlib.figure import Figure
+
 from joblib                 import Parallel, delayed
 from mpl_toolkits.mplot3d   import Axes3D
 from scipy.spatial.distance import pdist      
@@ -44,10 +46,7 @@ class DoESampler:
         weighted_min = np.mean([weights[ii] * self.dist_calculator(np.array(points[:,ii]).reshape(-1,1),n_sample)[0].min() for ii in range(n_dims)])
         weighted_std = np.mean([weights[ii] * self.dist_calculator(np.array(points[:,ii]).reshape(-1,1),n_sample)[0].std() for ii in range(n_dims)])
 
-        #return sum([default_weights[0]*float(np.mean(distances)), default_weights[1]*float(np.min(distances)), -default_weights[2]*float(np.std(distances))] ) 
         return sum([default_weights[0]*weighted_av, default_weights[1]*weighted_min, -default_weights[2]*weighted_std] ) 
-
-
 
     def greedy_minimax(self,n_samples, n_dims, n_candidates=1000): 
         sampler = qmc.Sobol(d=n_dims, scramble=True, seed=42)
@@ -62,7 +61,6 @@ class DoESampler:
             points.append(candidates[next_idx]) 
 
         return np.array(points)
-
 
     def dist_calculator(self,A,n_sample):
         dist = cdist(A, A,metric='euclidean') # Calculate the distance between the points and the candidates
@@ -80,30 +78,80 @@ class DoESampler:
 
         return ddist.mean(), ddist.min(), ddist.std()
 
-    def two_dim_plotter(self,POINTS,names):
-        n_dims = POINTS[0].shape[1]
+    def two_dim_plotter(self, POINTS, names, name_strings=[],fig=None):
+        n_dims   = POINTS[0].shape[1]
         n_sample = POINTS[0].shape[0]
-        fig, ax = plt.subplots(1,n_dims,figsize=(n_dims*4,3))
-        if n_dims == 1:
-            ax = [ax]
-        collor = ['k','b','r','b','orange','green','b','r','r','b','k']
-        markerr = ['x','^','s','x','s','x','^','s','x','^','s']
+    
+        # --- 1. DYNAMIC FIGURE SIZE (Fixes Compression) ---
+        # Give each factor ~0.85 inches of width so factors never squash
+        fig_width = max(3.5, n_dims * 0.5)
+        #fig_width = 4.5
+        fig_height = 3.0
+    
+        # --- 2. DYNAMIC LEGEND COLUMNS ---
+        # Automatically split legend into 1, 2, or 3 columns as factors grow
+        legend_cols = 1 if n_dims <= 6 else (2 if n_dims <= 12 else 3)
+    
+        BG_COLOR = "#111827"
+        if fig is None:
+            fig = Figure(figsize=(fig_width, fig_height),facecolor=BG_COLOR)
+        ax = fig.subplots(1, 1)
+    
+        collor = ["#3b82f6","#ef4444","#10b981","#f59e0b","#8b5cf6","#06b6d4","#ec4899","#f97316","#14b8a6","#6366f1","#d946ef",]
+        markerr = ["x", "^", "s", "x", "s", "x", "^", "s", "x", "^", "s"]
+    
+        if not name_strings:
+            name_strings = [f"X{i}" for i in range(n_dims)]
 
         for i in range(n_dims):
+            disp_name = name_strings[i][:8]
+            sp = ''
+            if len(name_strings[i]) < 8:
+                
+                diff = 8 - len(name_strings[i])
+                sp = ''.join([' ']*diff)
+                
             for j in range(len(POINTS)):
-                D = self.dist_calculator( np.array(POINTS[j][:,i]).reshape(-1,1), n_sample)[0] 
-                A,B,C = self.dist_eval(POINTS[j],names[j],n_sample,False)
+                D = self.dist_calculator(np.array(POINTS[j][:, i]).reshape(-1, 1), n_sample)[0]
 
-                ax[i].scatter(POINTS[j][:,i],[j+1]*len(POINTS[j][:,i]),color=collor[j],marker=markerr[j],label=f'{names[j]}, {np.min(D):.3f},{np.mean(D):.3f}')
-
-            ax[i].set_xlabel(f'X{i:.0f}')
-            ax[i].grid(which='major', alpha=0.25)
-            ax[i].grid(which='minor', alpha=0.1)
-            ax[i].set_ylim([0,len(POINTS) + 10])
-            ax[i].legend(fontsize = 9 , loc = 'upper right',ncol = 1)
-
-        fig.tight_layout()
-        pass
+                
+                label_text = f"{disp_name}{sp}, Min: {np.min(D):.3f}, Avg: {np.mean(D):.3f}"
+    
+                ax.scatter([i + 1] * len(POINTS[j][:, i]),POINTS[j][:, i],color=collor[i % len(collor)],
+                               marker=markerr[i % len(markerr)],alpha=0.8,label=label_text if j == 0 else "",)
+    
+        # --- 4. AXIS CONFIGURATION & PADDING ---
+        ax.set_xlim(0.5, n_dims + 0.5)  # Adds clean padding on left and right
+        ax.set_ylim([-0.1, 1.1])
+        ax.set_xticks(range(1, n_dims + 1))
+    
+        # Truncate long X-tick labels to prevent overlapping when rotated
+        ax.set_xticklabels(name_strings, rotation=25, ha="right", color="#9ca3af", fontsize=8)
+        ax.set_xlabel("Samples by factors", color="#9ca3af",fontsize=8)  
+        
+        if names:
+            ax.set_ylabel(f"Sampling strategy: {names}", color="#e5e7eb", fontsize=8)
+    
+        ax.grid(which="major", alpha=0.2)
+        ax.grid(which="minor", alpha=0.075)
+        ax.tick_params(axis="y", left=False, right=False, labelleft=False, labelright=False)
+    
+        # --- 5. LEGEND POSITIONING ---
+        legend = ax.legend(fontsize=7,loc="lower center",bbox_to_anchor=(0.5, 1.02),ncol=legend_cols,frameon=True,)
+        legend.get_frame().set_facecolor("#1f2937")
+        legend.get_frame().set_edgecolor("#9ca3af")
+        for text in legend.get_texts():
+            text.set_color("#9ca3af")
+    
+        # --- 6. DARK MODE STYLING ---
+        fig.patch.set_facecolor(BG_COLOR)
+        ax.set_facecolor("#1f2937")
+        for spine in ax.spines.values():
+            spine.set_color("#9ca3af")
+        ax.tick_params(colors="#9ca3af")
+        ax.xaxis.label.set_color("#9ca3af")
+        fig.subplots_adjust(top=0.72, bottom=0.22, left=0.08, right=0.95)
+        return fig
 
     def generate_and_evaluate(self,n_samples, n_dims, weights, types,Fraction=0):
         greedy_reduce = n_samples <= n_dims
@@ -195,21 +243,49 @@ class DoESampler:
                     dim_c += 1
         return dim_c
 
-    def three_dim_plotter(self,A):
-        fig = plt.figure(figsize=(5,3))
-        ax = fig.add_subplot(111, projection='3d')
-        
+    def three_dim_plotter(
+        self, A, dimname1="X0", dimname2="X1", dimname3="X2", title_text="",fig=None):
+        BG_COLOR = "#111827"
+        if fig is None: 
+            fig = Figure(figsize=(4.2, 4.2), facecolor=BG_COLOR, layout="constrained")
+        ax = fig.add_subplot(111, projection="3d")
+    
+        # --- TITLE WITH BACKGROUND BOX ---
+        ax.set_title(
+            " Representation of\nfirst three factors in 3D. ",
+            color="#e5e7eb",
+            fontsize=7,
+            y=0.96,  # Height positioning
+            pad=-1,  # Pull down slightly
+            bbox=dict(boxstyle="round,pad=0.8",facecolor="#1f2937",edgecolor="#4b5563", linewidth=0.7,alpha=0.95,),
+        )
+    
+        # ... rest of your 3D plot code ...
         if np.shape(A)[1] >= 3:
-            ax.scatter(A[:,0],A[:,1],A[:,-1])
-            ax.set_xlabel('X0')
-            ax.set_ylabel('X1')
-            ax.set_zlabel('X2')
-            fig.tight_layout()
-            ax.text(0,0,0,f'No. of exp: {np.shape(A)[0]}',fontsize=20)
-        else:
-            ax.text(0,0,0,'n_dims < 3 ! ',fontsize=20)
-        plt.show()
-        return fig, ax
+            ax.scatter(A[:, 0], A[:, 1], A[:, 2], color="#3b82f6", alpha=0.85, s=30)
+            ax.set_xlabel(dimname1, labelpad=8)
+            ax.set_ylabel(dimname2, labelpad=8)
+            ax.set_zlabel(dimname3, labelpad=8)
+            ax.set_xlim([-0.1, 1.1])
+            ax.set_ylim([-0.1, 1.1])
+            ax.set_zlim([-0.1, 1.1])
+    
+        # Dark mode pane styling
+        ax.set_facecolor(BG_COLOR)
+        pane_color = (31 / 255, 41 / 255, 55 / 255, 1.0)
+        ax.xaxis.set_pane_color(pane_color)
+        ax.yaxis.set_pane_color(pane_color)
+        ax.zaxis.set_pane_color(pane_color)
+    
+        for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
+            axis.line.set_color("#9ca3af")
+    
+        ax.tick_params(colors="#9ca3af", pad=2)
+        ax.xaxis.label.set_color("#9ca3af")
+        ax.yaxis.label.set_color("#9ca3af")
+        ax.zaxis.label.set_color("#9ca3af")
+    
+        return fig
 
     def scaler(self,A):
         B = A - np.min(A,axis=0)

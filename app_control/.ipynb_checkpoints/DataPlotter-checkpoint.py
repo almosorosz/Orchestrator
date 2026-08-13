@@ -50,7 +50,7 @@ class DataPlotter:
         num_rows = len(self.EVAL) # Exact count of experiments
     
         fig_width = 13.0
-        fig_height = max(2.0, num_rows * 2.0)
+        fig_height = max(3.0, num_rows * 2.5)
     
         self.fig = Figure(
             figsize=(fig_width, fig_height), 

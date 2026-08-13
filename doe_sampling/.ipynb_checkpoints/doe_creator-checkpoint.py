@@ -102,7 +102,6 @@ class ExperimentCreator():
                     if self.exp_par.if_ARR:
                         self.exp_par.ARR = self.exp_par.ARR_types[i%len(self.exp_par.ARR_types)]
 
-
             self.exp_storage.add_experiment(f'exp{i+1}', self.profiles.generate_profiles()[0],self.profiles.generate_profiles()[1])
 
             # Store the changed parameters of the DoE
@@ -112,12 +111,22 @@ class ExperimentCreator():
             exp_key = f'exp{i+1}'
             self.exp_storage.profile_omni[exp_key] = self.exp_storage.profile_omni[exp_key].drop_duplicates()
 
-    def plot_sampled_points(self):
-        if self.DoE_samples.size:
-            self.doe_sampler.two_dim_plotter([self.doe_sampler.scaler(self.DoE_samples)],[self.TYPE])
-            self.doe_sampler.three_dim_plotter(self.doe_sampler.scaler(self.DoE_samples))
+    def plot_sampled_points(self, fig_2d=None, fig_3d=None):
+        dim_names = [k for k in self.DoE_val.keys()]
         
-
+        try:
+            fig_2D = self.doe_sampler.two_dim_plotter([self.doe_sampler.scaler(self.DoE_samples)],self.TYPE,dim_names,fig=fig_2d)
+        except:
+            fig_2D = []
+            
+        try:    
+            fig_3D = self.doe_sampler.three_dim_plotter(self.doe_sampler.scaler(self.DoE_samples),
+                                               dimname1=dim_names[0],dimname2=dim_names[1],dimname3=dim_names[2],fig=fig_3d)
+        except: 
+            fig_3D = []
+            
+        return fig_2D, fig_3D
+        
     def export_generated_expts(self,loc_to_save_expts):
 
         for i in range(len(self.DoE_samples)):
