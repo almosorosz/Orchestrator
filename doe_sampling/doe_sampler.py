@@ -81,17 +81,18 @@ class DoESampler:
     def two_dim_plotter(self, POINTS, names, name_strings=[],fig=None):
         n_dims   = POINTS[0].shape[1]
         n_sample = POINTS[0].shape[0]
-    
+        
         # --- 1. DYNAMIC FIGURE SIZE (Fixes Compression) ---
         # Give each factor ~0.85 inches of width so factors never squash
-        fig_width = max(3.5, n_dims * 0.5)
-        #fig_width = 4.5
+        fig_width = max(1.5, n_dims * 0.3)
         fig_height = 3.0
     
         # --- 2. DYNAMIC LEGEND COLUMNS ---
         # Automatically split legend into 1, 2, or 3 columns as factors grow
-        legend_cols = 1 if n_dims <= 6 else (2 if n_dims <= 12 else 3)
-    
+        legend_cols = 1 if n_dims <= 4 else (2 if n_dims <= 12 else 3)
+        
+        bbox_2 = dict(facecolor="white",edgecolor="black",boxstyle="round,pad=0.3",alpha=0.8)
+        
         BG_COLOR = "#111827"
         if fig is None:
             fig = Figure(figsize=(fig_width, fig_height),facecolor=BG_COLOR)
@@ -105,28 +106,25 @@ class DoESampler:
 
         for i in range(n_dims):
             disp_name = name_strings[i][:8]
-            sp = ''
-            if len(name_strings[i]) < 8:
-                
-                diff = 8 - len(name_strings[i])
-                sp = ''.join([' ']*diff)
-                
+
+            ax.text(i + 0.8,0.0, name_strings[i],rotation=90, ha="center",va="bottom",color="k",fontsize=6,clip_on=False,bbox = bbox_2)
+            
             for j in range(len(POINTS)):
                 D = self.dist_calculator(np.array(POINTS[j][:, i]).reshape(-1, 1), n_sample)[0]
 
                 
-                label_text = f"{disp_name}{sp}, Min: {np.min(D):.3f}, Avg: {np.mean(D):.3f}"
-    
+                label_text = f"{disp_name:<8}, Min: {np.min(D):.3f}, Avg: {np.mean(D):.3f}"
                 ax.scatter([i + 1] * len(POINTS[j][:, i]),POINTS[j][:, i],color=collor[i % len(collor)],
-                               marker=markerr[i % len(markerr)],alpha=0.8,label=label_text if j == 0 else "",)
+                               marker=markerr[i % len(markerr)],alpha=0.8,label=label_text if j == 0 else "")
+                
     
         # --- 4. AXIS CONFIGURATION & PADDING ---
         ax.set_xlim(0.5, n_dims + 0.5)  # Adds clean padding on left and right
         ax.set_ylim([-0.1, 1.1])
         ax.set_xticks(range(1, n_dims + 1))
-    
+        ax.set_xticklabels(['' for i in range(n_dims)])
         # Truncate long X-tick labels to prevent overlapping when rotated
-        ax.set_xticklabels(name_strings, rotation=25, ha="right", color="#9ca3af", fontsize=8)
+        #ax.set_xticklabels(name_strings, rotation=25, ha="right", color="#9ca3af", fontsize=8)
         ax.set_xlabel("Samples by factors", color="#9ca3af",fontsize=8)  
         
         if names:
@@ -152,7 +150,7 @@ class DoESampler:
         ax.xaxis.label.set_color("#9ca3af")
         fig.subplots_adjust(top=0.72, bottom=0.22, left=0.08, right=0.95)
         return fig
-
+        
     def generate_and_evaluate(self,n_samples, n_dims, weights, types,Fraction=0):
         greedy_reduce = n_samples <= n_dims
         target_n = n_dims + 5 if greedy_reduce else n_samples
@@ -246,6 +244,8 @@ class DoESampler:
     def three_dim_plotter(
         self, A, dimname1="X0", dimname2="X1", dimname3="X2", title_text="",fig=None):
         BG_COLOR = "#111827"
+        bbox_2 = dict(facecolor="white",edgecolor="black",boxstyle="round,pad=0.3",alpha=0.8)
+        
         if fig is None: 
             fig = Figure(figsize=(4.2, 4.2), facecolor=BG_COLOR, layout="constrained")
         ax = fig.add_subplot(111, projection="3d")
@@ -263,11 +263,10 @@ class DoESampler:
         # ... rest of your 3D plot code ...
         if np.shape(A)[1] >= 3:
             ax.scatter(A[:, 0], A[:, 1], A[:, 2], color="#3b82f6", alpha=0.85, s=30)
-            ax.set_xlabel(dimname1, labelpad=8)
-            ax.set_ylabel(dimname2, labelpad=8)
-            ax.set_zlabel(dimname3, labelpad=8)
+            ax.text(0.5, 0, 0, dimname1, bbox=bbox_2, rotation=15, ha="center", va="center")
+            ax.text(1, 0.5, 0, dimname2, bbox=bbox_2, rotation=-15, ha="center", va="center")
+            ax.text(1, 1, 0.5, dimname3, bbox=bbox_2, rotation=90, ha="center", va="center")
             ax.set_xlim([-0.1, 1.1])
-            ax.set_ylim([-0.1, 1.1])
             ax.set_zlim([-0.1, 1.1])
     
         # Dark mode pane styling
@@ -281,9 +280,9 @@ class DoESampler:
             axis.line.set_color("#9ca3af")
     
         ax.tick_params(colors="#9ca3af", pad=2)
-        ax.xaxis.label.set_color("#9ca3af")
-        ax.yaxis.label.set_color("#9ca3af")
-        ax.zaxis.label.set_color("#9ca3af")
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_zlabel("")
     
         return fig
 

@@ -137,7 +137,7 @@ class ExperimentProfileParameters():
     # Cooling
     if_cool_in_exp      : bool = True
     t_cool              : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(2,   1,      10,  True, False,'t_cool'))
-    T_final             : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(25,  10,     30,  True, False,'T_final'))
+    T_final             : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(25,  10,     30,  False, False,'T_final'))
     t_h_cool            : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.1, 0.3310, 1,   False, False,'t_h_cool'))
 
     # Equillibrium time
@@ -147,8 +147,6 @@ class ExperimentProfileParameters():
     if_boil             : bool = False
     t_boil              : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False,'t_boil'))
     t_h_boil            : DefineProcessParameter  = field(default_factory = lambda: DefineProcessParameter(0.5,   0.1,      1,  False, False,'t_h_boil')) 
-
-# In[194]:
 
 
 # Store experimental profiles and convert them into OMNI inputs
@@ -533,11 +531,6 @@ class ProfileGenerator():
     # ========================================================================
     # Generate T, AS, seed profiles from generating informations
     # =======================================================================
-
-    # ----------------------------------------------------------
-    # __init__ -->
-    # ---------------------------------------------------------- 
-
     def __init__(self, exp_params,exp_component_gen):
         self.description       = 'Using the class for creating simultaneous T, AS, and seeding profiles'
         self.exp_params        = exp_params
@@ -552,13 +545,11 @@ class ProfileGenerator():
         # --------------------------------------------------------------------------------------------------------------------------------------
         # Generate the T-, AS-, and Seeding profiles based on the predefined variables
         # --------------------------------------------------------------------------------------------------------------------------------------
-
         exp_params = self.exp_params
 
         # ---------------------------------------------------------------------------------
         # 1. Load the set parameters to generate profiles
         # --------------------------------------------------------------------------------- 
-
         # (-1): Initial equillibrium
         Initial_cond = ProfileCreator()
         Initial_cond.T = [exp_params.T_room]
@@ -649,7 +640,7 @@ class ProfileGenerator():
                                  first_action,
                                  second_action,
                                  Eq,
-                                 #T_prof_back_to_RT,
+                                 T_prof_back_to_RT,
                                  valve_open,
                                  cleaning_sol_add,
                                  T_boil_out_clean,

@@ -137,23 +137,39 @@ class StatusBadge(QLabel):
 
 class LogViewer(QTextEdit):
 
-    def __init__(self):
+    def __init__(self,style='dark'):
         super().__init__()
 
-        self.setReadOnly(True)
+        #self.setReadOnly(True)
+    def set_theme(self, dark=True):
 
-        self.setStyleSheet("""
-        QTextEdit {
-            background:#081321;
-            border:1px solid #16263d;
-            border-radius:10px;
-            padding:8px;
-            color:#dbe5ef;
-            font-family:Consolas;
-            font-size:12px;
-        }
-        """)
+        if dark:
+            self.setStyleSheet("""
+                QFrame#systemMonitor {
+                    background-color: #1e2228;
+                    border: 1px solid #eeeeee;
+                    border-radius: 10px;
+                    padding:8px;
+                    color:#dbe5ef;
+                    font-family:Consolas;
+                    font-size:12px;
+                }
+            """)
 
+        else:
+            self.setStyleSheet("""
+                QFrame#systemMonitor {
+                    background-color: #f5f6f8;
+                    border: 1px solid #181818;
+                    border-radius: 10px;
+                    padding:8px;
+                    color:#dbe5ef;
+                    font-family:Consolas;
+                    font-size:12px;
+                }
+            """)
+
+        
 
     def add_log(self, message, level="INFO"):
 

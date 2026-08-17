@@ -1,7 +1,9 @@
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
 from PySide6.QtWidgets  import (QDialog, QWidget, QFormLayout, QTableWidget,
                                 QGroupBox,QVBoxLayout,QCheckBox,QSpinBox,
                                 QDoubleSpinBox,QLineEdit,QDialogButtonBox,
-                                QVBoxLayout,QScrollArea)
+                                QVBoxLayout,QScrollArea, QSizePolicy)
 
 
 from dataclasses import fields, is_dataclass
@@ -112,3 +114,43 @@ class ExperimentProfileDialog(QDialog):
     def accept_changes(self):
         self.editor.save()
         self.accept()
+
+
+class DOEPlotsDialog(QDialog):
+
+    def __init__(self, figures, parent=None):
+        super().__init__(parent)
+
+        self.setWindowTitle("DoE Experiment Profiles")
+        self.resize(1000, 800)
+
+        layout = QVBoxLayout(self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+
+        scroll.setWidget(container)
+
+        layout.addWidget(scroll)
+
+        self.canvases = []
+
+        for i, fig in enumerate(figures):
+
+            canvas = FigureCanvas(fig)
+
+            canvas.setSizePolicy(
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed
+            )
+
+            canvas.setMinimumHeight(350)
+
+            container_layout.addWidget(canvas)
+
+            self.canvases.append(canvas)
+
+        container_layout.addStretch()

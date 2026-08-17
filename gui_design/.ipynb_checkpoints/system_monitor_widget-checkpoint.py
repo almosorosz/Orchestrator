@@ -134,6 +134,7 @@ class SystemMonitorWidget(QWidget):
 
         self.thread.start()
 
+
     @Slot(dict)
     def refresh(self, d):
 
