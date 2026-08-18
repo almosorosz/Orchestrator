@@ -13,95 +13,33 @@ class MetricCard(QWidget):
         layout.setSpacing(4)
 
         title_row = QHBoxLayout()
-
         self.icon_label = QLabel(icon)
-        self.icon_label.setStyleSheet(
-            "font-size:18px;"
-        )
-
+        self.icon_label.setStyleSheet( "font-size:18px;" )
+        
         self.title_label = QLabel(title)
-        self.title_label.setStyleSheet(
-            "color:#94a3b8;"
-            "font-size:12px;"
-            "font-weight:600;"
-        )
-
+        self.title_label.setStyleSheet("color:#94a3b8;""font-size:12px;""font-weight:600;")
+        
         title_row.addWidget(self.icon_label)
         title_row.addWidget(self.title_label)
         title_row.addStretch()
-
         self.value_label = QLabel(value)
-        self.value_label.setStyleSheet(
-            "font-size:16px;"
-            "font-weight:700;"
-            "color:white;"
-        )
-
         self.status_label = QLabel("Normal")
-        self.status_label.setStyleSheet(
-            "color:#22c55e;"
-            "font-size:12px;"
-        )
-
+        self.status_label.setStyleSheet("color:#22c55e;""font-size:12px;")
+        
         layout.addLayout(title_row)
         layout.addWidget(self.value_label)
         layout.addWidget(self.status_label)
-
-
+        
+    def set_theme(self, dark=True):
+        if dark:
+            self.value_label.setStyleSheet("font-size:16px;""font-weight:700;""color:white;")
+        else:
+            self.value_label.setStyleSheet("font-size:16px;""font-weight:700;""color:black;")
+            
     def update_value(self,value,status="Normal",color="#22c55e"):
-
         self.value_label.setText(str(value))
-
         self.status_label.setText(status)
-
-        self.status_label.setStyleSheet(
-            f"color:{color}; font-size:12px;"
-        )
-
-class LogViewer(QTextEdit):
-
-    def __init__(self):
-        super().__init__()
-
-        self.setReadOnly(True)
-
-        self.setStyleSheet("""
-        QTextEdit {
-            background:#050b14;
-            color:#dbeafe;
-            font-family:Consolas;
-            font-size:12px;
-            border-radius:10px;
-        }
-        """)
-
-
-    def add_log(self,message,level="INFO"):
-
-        colors = {
-            "INFO":"#60a5fa",
-            "WARNING":"#facc15",
-            "ERROR":"#ef4444",
-            "SUCCESS":"#22c55e"
-        }
-
-        color = colors.get(level,"white")
-
-        timestamp=datetime.now().strftime("%H:%M:%S")
-
-        html=f"""
-        <span style='color:#64748b'>
-        [{timestamp}]
-        </span>
-
-        <span style='color:{color};font-weight:bold'>
-        [{level}]
-        </span>
-
-        {message}
-        """
-
-        self.append(html)
+        self.status_label.setStyleSheet(f"color:{color}; font-size:12px;" )
 
 class StatusBadge(QLabel):
 

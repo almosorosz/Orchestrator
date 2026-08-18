@@ -93,7 +93,7 @@ class DoESampler:
         
         bbox_2 = dict(facecolor="white",edgecolor="black",boxstyle="round,pad=0.3",alpha=0.8)
         
-        BG_COLOR = "#111827"
+        BG_COLOR = "none"
         if fig is None:
             fig = Figure(figsize=(fig_width, fig_height),facecolor=BG_COLOR)
         ax = fig.subplots(1, 1)
@@ -136,7 +136,7 @@ class DoESampler:
     
         # --- 5. LEGEND POSITIONING ---
         legend = ax.legend(fontsize=7,loc="lower center",bbox_to_anchor=(0.5, 1.02),ncol=legend_cols,frameon=True,)
-        legend.get_frame().set_facecolor("#1f2937")
+        legend.get_frame().set_facecolor("none")
         legend.get_frame().set_edgecolor("#9ca3af")
         for text in legend.get_texts():
             text.set_color("#9ca3af")
@@ -243,7 +243,7 @@ class DoESampler:
 
     def three_dim_plotter(
         self, A, dimname1="X0", dimname2="X1", dimname3="X2", title_text="",fig=None):
-        BG_COLOR = "#111827"
+        BG_COLOR = "none"
         bbox_2 = dict(facecolor="white",edgecolor="black",boxstyle="round,pad=0.3",alpha=0.8)
         
         if fig is None: 
@@ -255,9 +255,7 @@ class DoESampler:
             " Representation of\nfirst three factors in 3D. ",
             color="#e5e7eb",
             fontsize=7,
-            y=0.96,  # Height positioning
-            pad=-1,  # Pull down slightly
-            bbox=dict(boxstyle="round,pad=0.8",facecolor="#1f2937",edgecolor="#4b5563", linewidth=0.7,alpha=0.95,),
+            bbox=dict(boxstyle="round,pad=0.8",facecolor="none",edgecolor="#4b5563", linewidth=0.7,alpha=0.95,),
         )
     
         # ... rest of your 3D plot code ...

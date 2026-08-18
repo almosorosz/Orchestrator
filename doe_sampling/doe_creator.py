@@ -205,16 +205,16 @@ class ExperimentCreator():
         # ---------------------------------------------------------
         # GUI / Matplotlib theme
         # ---------------------------------------------------------
-        BG_COLOR       = "#07111f"   # Main GUI background
-        PANEL_COLOR    = "#111d31"   # GroupBox / card background
+        BG_COLOR       = "none"   # Main GUI background
+        PANEL_COLOR    = "none"   # GroupBox / card background
         GRID_COLOR     = "#24364d"
-        TEXT_COLOR     = "#e5e7eb"
+        TEXT_COLOR     = "#95979c"
         MUTED_COLOR    = "#94a3b8"
         BORDER_COLOR   = "#16263d"
     
         # Plot colors
         COLORS = {
-            "T":          "#f8fafc",
+            "T":          "#95979c",
             "AS":         "#ef4444",
             "seed":       "#3b82f6",
             "solution":   "#f59e0b",
@@ -338,7 +338,7 @@ class ExperimentCreator():
             ax_seed.set_ylabel("Wet seed [rpm]",color=COLORS["seed"],fontsize=8)
             ax_solution.set_ylabel("Solution [rpm]",color=COLORS["solution"],fontsize=8)
             ax_solv.set_ylabel("Solvent [rpm]",color=COLORS["solvent"],fontsize=8)
-            ax_cl.set_ylabel("Cleaning [ml/h]",color=COLORS["clean_sol"],fontsize=8)
+            ax_cl.set_ylabel("Cleaning [rpm]",color=COLORS["clean_sol"],fontsize=8)
             ax_valve.set_ylabel("Valve",color=COLORS["valve_state"],fontsize=8)
     
             # -----------------------------------------------------

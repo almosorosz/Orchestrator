@@ -134,6 +134,11 @@ class SystemMonitorWidget(QWidget):
 
         self.thread.start()
 
+    def set_theme(self,if_dark=True):
+        self.cpu_card.set_theme(if_dark)
+        self.ram_card.set_theme(if_dark)
+        self.net_card.set_theme(if_dark)
+
 
     @Slot(dict)
     def refresh(self, d):
