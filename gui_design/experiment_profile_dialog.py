@@ -196,7 +196,7 @@ class ExperimentProfileDialog(QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("Experiment Profile")
-        self.resize(900,700)
+        self.resize(800,500)
 
         self.editor = DataclassEditor(profile)
 
@@ -228,7 +228,7 @@ class DOEPlotsDialog(QDialog):
         super().__init__(parent)
         
         self.setWindowTitle("DoE Experiment Profiles")
-        self.resize(1000, 800)
+        self.resize(1200, 400)
 
         layout = QVBoxLayout(self)
 

@@ -7,12 +7,13 @@
 import sys            
 import os
 import time
+from pathlib import Path
 
 from matplotlib.figure                    import Figure
 from matplotlib.backends.backend_qtagg    import FigureCanvasQTAgg as FigureCanvas
 from datetime                             import datetime
 
-from PySide6.QtGui                        import QPainterPath, QRegion
+from PySide6.QtGui                        import QPainterPath, QRegion, QIcon, QPixmap
 from PySide6.QtCore                       import QTimer, Qt, Slot, QRect
 from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabel, QScrollArea,QFormLayout,QSizePolicy,
                                                    QPushButton,QLineEdit,QMessageBox,QProgressBar,QFrame,
@@ -42,10 +43,12 @@ from app_control.DataPlotter              import DataPlotter
 # In[2]:
 
 
-#gui qt
+BASE_DIR = Path.cwd()
+LOGO_PATH = BASE_DIR / "assets" / "LOGO.png"
+TEXT_PATH = BASE_DIR / "assets" / "TEXT.png"
 
 
-# In[14]:
+# In[ ]:
 
 
 class MainWindow(QMainWindow):
@@ -55,12 +58,13 @@ class MainWindow(QMainWindow):
         self.setWindowFlags( Qt.WindowType.Window |  Qt.WindowType.FramelessWindowHint |  Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
+
         self.SPACING_1 = 8
         self.SPACING_2 = 16
         self.SPACING_3 = 24
         self.SPACING_4 = 32
 
-        self.resize(1100, 500)
+        self.resize(1100, 800)
         self.drag_position = None
         self.resize_position = None
         self.resize_edges = None
@@ -90,12 +94,33 @@ class MainWindow(QMainWindow):
         header_widget.setFixedHeight(50)
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(15, 0, 10, 0)
-        header_layout.setSpacing(8)
+        header_layout.setSpacing(10)
 
         # App Logo & Title
-        logo_label = QLabel("⚛  ECC 1.0 - Experiment Control Center")
-        logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: white; background: transparent;")
+        self.logo_icon_label = QLabel()
+        self.logo_icon_label.setStyleSheet("background: transparent;")
+        if LOGO_PATH.exists():
+            logo_pixmap = QPixmap(str(LOGO_PATH))
+            self.logo_icon_label.setPixmap(
+                logo_pixmap.scaledToHeight(30, Qt.TransformationMode.SmoothTransformation)
+            )
 
+        self.logo_text_label = QLabel()
+        self.logo_text_label.setStyleSheet("background: transparent;")
+        if TEXT_PATH.exists():
+            text_pixmap = QPixmap(str(TEXT_PATH))
+            self.logo_text_label.setPixmap(
+                text_pixmap.scaledToHeight(22, Qt.TransformationMode.SmoothTransformation)
+            )
+
+        # Add both images to the layout
+        header_layout.addWidget(self.logo_icon_label)
+        header_layout.addWidget(self.logo_text_label)
+
+        # Pushes your logos to the far left of the header
+        header_layout.addStretch()
+
+        root_layout.addWidget(header_widget)
         # Theme toggle
         self.theme_toggle = QPushButton("☀")
         self.theme_toggle.setObjectName("themeToggle")
@@ -127,7 +152,7 @@ class MainWindow(QMainWindow):
         self.btn_close.setFixedSize(30, 30)
         self.btn_close.clicked.connect(self.close)
 
-        header_layout.addWidget(logo_label)
+        #header_layout.addWidget(self.logo_label)
         header_layout.addStretch()
 
         # Theme toggle immediately left of System Ready
@@ -605,9 +630,7 @@ class MainWindow(QMainWindow):
         system_box = QGroupBox("💻 System Status")
         system_layout = QVBoxLayout()
         self.system_monitor = SystemMonitorWidget()
-        #self.system_monitor.set_theme(self.dark_mode)
-        #self.system_monitor.worker.update.connect(self.update_system_cards)
-        self.system_monitor.setMaximumHeight(100)
+        self.system_monitor.set_theme(self.dark_mode)
         system_layout.addWidget(self.system_monitor)
         system_box.setLayout(system_layout)
 
@@ -795,11 +818,11 @@ class MainWindow(QMainWindow):
             'Latin Hypercube Sampling + Lloyd-Max optimization',
             'Random sampling',
             'Sobol sampling',
-            'Factorial DoE generation'
+            'Full Factorial DoE generation'
         ])
 
-        form.addRow("Profile", self.profile_button)
-        form.addRow("DoE type", self.doe_type_combo)
+        form.addRow("Process conditions:", self.profile_button)
+        form.addRow("Sampling strategy:", self.doe_type_combo)
         form.addRow(self.generate_button)
 
         exp_group.setLayout(form)
@@ -836,7 +859,7 @@ class MainWindow(QMainWindow):
         # 4. PLOTS AREA
         # ===================================================== #
         plots_group = QGroupBox("📊 Visualizations")
-        plots_group.setMaximumHeight(700)
+        #plots_group.setMaximumHeight(700)
         plots_group.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Preferred )
         plots_layout = QVBoxLayout()
         plots_layout.setSpacing(15)
@@ -858,10 +881,6 @@ class MainWindow(QMainWindow):
 
         self.canvas_2d.setObjectName("plotCanvas")
         self.canvas_3d.setObjectName("plotCanvas")
-
-        self.canvas_2d.setStyleSheet("background-color: #111827;")
-
-        self.canvas_3d.setStyleSheet( "background-color: #111827;")
 
         plots_layout.addWidget(self.canvas_2d, 1)
         plots_layout.addWidget(self.canvas_3d, 1)
@@ -1173,7 +1192,7 @@ class MainWindow(QMainWindow):
 
                 QCheckBox {
                     spacing: 8px;
-                    color: #e2e8f0;
+                    color: white;
                     font-weight: 500;
                 }
 
@@ -1261,6 +1280,8 @@ class MainWindow(QMainWindow):
                     border-radius: 6px;
                 }
 
+
+
                 QLabel#statusCard {
                     background: #111d31;
                     border: 1px solid #16263d;
@@ -1293,7 +1314,7 @@ class MainWindow(QMainWindow):
                 }
 
                 QWidget#topHeader {
-                    background: #081426;
+                    background: #556885;
                     border-top-left-radius: 12px;
                     border-top-right-radius: 12px;
                     border-bottom: 1px solid #17283f;
@@ -1366,7 +1387,7 @@ class MainWindow(QMainWindow):
                 }
                 QPushButton#theme_toggle {
                     background-color: #2b2f36;
-                    color: #ffd166;
+                    color: #f7f7f5;
                     border: 1px solid #4a505a;
                     border-radius: 8px;
                     font-size: 20px;
@@ -1383,11 +1404,34 @@ class MainWindow(QMainWindow):
                     background-color: #22262c;
                 }
                 """)
+            #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: white; background: transparent;")
+
         else:
             self.setStyleSheet("""
                 /* ==================================================
                    LIGHT THEME
                    ================================================== */
+
+                QPushButton#plot_button {
+                    text-align: center;
+                }
+
+                QPushButton#reset_button {
+                    text-align: center;
+                }
+
+                QPushButton#stop_button {
+                    text-align: center;
+                }
+
+                QPushButton#start_button {
+                    text-align: center;
+                }
+
+                QGroupBox QLabel {
+                    background: transparent;
+                    border: none;
+                }
                 QPushButton#theme_toggle {
                     background-color: #f8fafc;
                     color: #1e293b;
@@ -1412,6 +1456,16 @@ class MainWindow(QMainWindow):
                     color: #1e293b;
                     font-family: "Segoe UI";
                     font-size: 13px;
+                }
+
+                QLabel#statusCard {
+                    background: #111d31;
+                    border: 1px solid #16263d;
+                    border-radius: 12px;
+                    color: #000000;
+                    padding: 16px;
+                    font-size: 14px;
+                    font-weight: 700;
                 }
 
                 QWidget#centralContainer {
@@ -1600,11 +1654,13 @@ class MainWindow(QMainWindow):
                     background: transparent;
                 }
             """)
+            #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: black; background: transparent;")
 
 
-      # ====================================================== #
-      # HELPERS & COMMANDS (Unchanged Logic)                   #
-      # ====================================================== #    
+    # ====================================================== #
+    # HELPERS & COMMANDS (Unchanged Logic)                   #
+    # ====================================================== #    
+
     def update_plot_theme(self):
 
         if self.dark_mode:
@@ -1652,6 +1708,7 @@ class MainWindow(QMainWindow):
 
         self.create_style(self.dark_mode)
         self.update_plot_theme()
+        self.system_monitor.set_theme(self.dark_mode)
 
     def show_doe_plots(self):
 
@@ -1694,10 +1751,11 @@ class MainWindow(QMainWindow):
             "Latin Hypercube Sampling + Lloyd-Max optimization": "LHS_OPT",
             "Random sampling"                                  : "RAND"   ,
             "Sobol sampling"                                   : "SOB"    ,
-            "Factorial DoE generation"                         : "FACT"   ,
+            "Full Factorial DoE generation"                    : "FACT"   ,
         }
 
         SAMPLING_STRATEGY_SELECTED = self.doe_type_combo.currentText()
+        print(SAMPLING_STRATEGY_SELECTED)
         strategy_code = dict_for_strategy_selection.get(SAMPLING_STRATEGY_SELECTED, "GREEDY")
 
         # Create experiments generator
@@ -1705,25 +1763,25 @@ class MainWindow(QMainWindow):
         self.create_experiments.set_doe_settings(self.exp_par, self.initial_exp_count, Type = strategy_code)
 
         self.create_experiments.generate_experiments()
-
+        self.initial_exp_count = len(self.create_experiments.exp_storage.data)
         if self.create_experiments.DoE_val.keys():
 
             displayed_text = f"{',\n'.join(self.create_experiments.DoE_val.keys())}"
             self.changed_dimensions_count_label.setText(displayed_text)
 
+            added_comment = ''
+
+            if strategy_code == "FACT":
+                added_comment = f'*\n(*Full Fact. sample number\nis calculated by the\nnumber of dimensions.)'
+
         else:
 
             self.changed_dimensions_count_label.setText("0 dimensions are selected.")
+            added_comment = ' identical sample(s)\nhad been taken.'
+
+        self.experiment_count_label.setText(f"{self.initial_exp_count} {added_comment}")
 
         self.changed_dimensions_label.setText(f"{self.create_experiments.dimensions}")
-        self.initial_exp_count = len(self.create_experiments.exp_storage.data)
-
-        if strategy_code == "FACT":
-
-            self.experiment_count_label.setText(f"{self.initial_exp_count}*\n(*Full Factorial DoE sample number\nis calculated automatically.)")
-        else:
-
-            self.experiment_count_label.setText(f"{self.initial_exp_count}")
 
         self.log_message(f"{self.initial_exp_count} samples in the initial DoE.", "INFO")
         self.log_message( f"{self.create_experiments.dimensions} changed dimensions in the initial DoE.","INFO",)
@@ -1766,6 +1824,7 @@ class MainWindow(QMainWindow):
             self.canvas_3d.draw()
 
         self.log_message("Initial DoE generated.", "SUCCESS")
+        self.update_plot_theme()
 
         self.generate_button.setStyleSheet("""QPushButton#generate_button {background: #3aa662;
                                                 border: 1px solid #2CFF05;color: white;text-align: center;}
@@ -1795,6 +1854,8 @@ class MainWindow(QMainWindow):
         self.CONTROLLER.current_stage = Stage.MODEL
         if self.CONTROLLER.if_model_finished(path):
           self.CONTROLLER.model_count += 1
+          self.log_message(f"Model output no. {self.CONTROLLER.model_count} stored in: {self.CONTROLLER.model_folder}", "INFO")
+
           self.upon_MODEL_finished()
           PATH, exp_count = self.CONTROLLER.pathcreator_omni(self.CONTROLLER.model_count, self.CONTROLLER.omni_folder )
           self.CONTROLLER.current_omni_folder = PATH
@@ -1802,7 +1863,7 @@ class MainWindow(QMainWindow):
           self.monitor_path = PATH
           self.monitor_num = exp_count
           self.timer.start(3000)
-          self.log_message(f"MODEL stage finished. Run count: {self.CONTROLLER.model_count}", "SUCCESS")
+          self.log_message(f"MODEL stage finished - iteration no. {self.CONTROLLER.model_count}", "SUCCESS")
 
           return True
 
@@ -1816,16 +1877,20 @@ class MainWindow(QMainWindow):
         self.CONTROLLER.current_stage = Stage.OMNI
         if self.CONTROLLER.if_omni_finished(path, num):
             PATH = self.CONTROLLER.pathcreator_model(self.CONTROLLER.omni_count, self.CONTROLLER.model_folder)
-            self.CONTROLLER.current_model_folder = PATH
+            self.CONTROLLER.model_folder = PATH
             self.CONTROLLER.omni_count += 1
+            self.log_message(f"EXP output no. {self.CONTROLLER.omni_count} stored in: {self.CONTROLLER.omni_folder}", "INFO")
+
             self.upon_omni_finished()
             self.DATAPROCESSOR.read_data_from = self.CONTROLLER.current_omni_folder
             self.DATAPROCESSOR.data_reader()
             self.monitor_mode = Stage.MODEL
             self.monitor_path = PATH
             self.timer.start(3000)
-            self.log_message(f"OMNI stage finished. Run count: {self.CONTROLLER.omni_count}", "SUCCESS")
+            self.log_message(f"OMNI stage finished - experimental iteration no. {self.CONTROLLER.omni_count}", "SUCCESS")
+
             return True
+
         else:
             return False
 
@@ -1851,6 +1916,7 @@ class MainWindow(QMainWindow):
           self.quick_reset_btn,
           self.generate_button,
           self.profile_button,
+          self.plot_doe_button,
         ]
         for button in buttons:
             button.setEnabled(enabled)
@@ -1871,6 +1937,7 @@ class MainWindow(QMainWindow):
 
         if CURR_EXP_NO != 0 and self.monitor_mode == Stage.OMNI and self.previous_exp_count != CURR_EXP_NO:
             self.conducted_experiments_count += 1
+            self.log_message(f"Experiment no. {self.conducted_experiments_count} stored in: {self.CONTROLLER.current_omni_folder}", "INFO")
 
         self.expts_count_label.setText(f'{self.conducted_experiments_count} runs')
 
@@ -1995,7 +2062,11 @@ class MainWindow(QMainWindow):
           self.exp_status_box.setTitle("🔴 Experiment/Modeling monitoring stopped")
 
     def reset_plots(self):
-        BG_COLOR = "#111827"  # Match your dark UI container hex color
+
+        if self.dark_mode:
+            BG_COLOR = "#111827"  # Match your dark UI container hex color
+        else:
+            BG_COLOR = "white"
 
         fig_2d = self.canvas_2d.figure
         fig_3d = self.canvas_3d.figure
@@ -2003,6 +2074,7 @@ class MainWindow(QMainWindow):
         if fig_2d:
             fig_2d.clear()
             fig_2d.patch.set_facecolor(BG_COLOR)  # Solid fill kills artifacts
+
 
         if fig_3d:
             fig_3d.clear()
@@ -2066,7 +2138,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Error", "No data available yet!")
             return
 
-        self.DATAPROCESSOR.read_data_from = self.CONTROLLER.current_omni_folder
+        try:
+            self.DATAPROCESSOR.read_data_from = self.CONTROLLER.current_omni_folder
+        except Exception as e:
+            self.log_message(f"Possibly deleted fodler, error message: {e}", "ERROR")
 
         # --------------------------------------------------------------------------------------------------------------#
         # FOR TESTING #
@@ -2122,13 +2197,46 @@ class MainWindow(QMainWindow):
 # ========================================================== #
 #                       MAIN                                 #
 # ========================================================== #
+# 1. Set App ID BEFORE creating QApplication instance
+if sys.platform == "win32":
+    import ctypes
+    my_app_id = "crystalloop.controlcenter.1.0"
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(my_app_id)
+    except Exception as e:
+        print(f"Failed to set AppUserModelID: {e}")
+
+# Resolve absolute path to avoid relative path resolution bugs
+try:
+    BASE_DIR = Path(__file__).resolve().parent
+except NameError:
+    BASE_DIR = Path.cwd()
+
+LOGO_PATH = (BASE_DIR / "assets" / "LOGO.png").resolve()
 
 if __name__ == "__main__":
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
+
+    # 2. Check path & set Application Icon globally
+    if LOGO_PATH.exists():
+        app_icon = QIcon(str(LOGO_PATH))
+        app.setWindowIcon(app_icon)
+
     window = MainWindow()
+
+    # 3. Explicitly apply icon directly to MainWindow instance
+    if LOGO_PATH.exists():
+        window.setWindowIcon(QIcon(str(LOGO_PATH)))
+
     window.show()
     app.exec()
+
+
+
+# In[ ]:
+
+
 
 

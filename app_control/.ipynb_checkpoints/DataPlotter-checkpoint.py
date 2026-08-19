@@ -50,7 +50,7 @@ class DataPlotter:
         num_rows = len(self.EVAL) # Exact count of experiments
     
         fig_width = 13.0
-        fig_height = max(3.0, num_rows * 2.5)
+        fig_height = max(3.0, num_rows * 2.2)
     
         self.fig = Figure(
             figsize=(fig_width, fig_height), 
@@ -84,7 +84,7 @@ class DataPlotter:
                 if self.idx_T:
                     ax.plot(E.iloc[:, self.idx_t], E.iloc[:, self.idx_T], 'white', linestyle='--', alpha=0.9)
                     if k == 0:
-                        ax.set_title(f"Experiment no. {i}", color ='white')
+                        ax.set_title(f"Experiment no. {1+i}", color ='white')
                         ax.set_ylabel(f"{self.PRE_COLUMNS[self.idx_T]} [{self.PRO_COLUMNS[self.idx_T]}]", fontsize=6)
     
                 if self.idx_AS and k == 0:

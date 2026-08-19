@@ -84,7 +84,7 @@ class DataPlotter:
                 if self.idx_T:
                     ax.plot(E.iloc[:, self.idx_t], E.iloc[:, self.idx_T], 'white', linestyle='--', alpha=0.9)
                     if k == 0:
-                        ax.set_title(f"Experiment no. {i}", color ='white')
+                        ax.set_title(f"Experiment no. {1+i}", color ='white')
                         ax.set_ylabel(f"{self.PRE_COLUMNS[self.idx_T]} [{self.PRO_COLUMNS[self.idx_T]}]", fontsize=6)
     
                 if self.idx_AS and k == 0:
