@@ -4,9 +4,17 @@
 # In[1]:
 
 
+
+
+
+
+# In[2]:
+
+
 import sys            
 import os
 import time
+
 from pathlib import Path
 
 from matplotlib.figure                    import Figure
@@ -20,42 +28,48 @@ from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabe
                                                    QWidget,QDialog,QVBoxLayout,QHBoxLayout,QStyle,QComboBox,
                                                    QStackedWidget,QGroupBox,QTextEdit,QGridLayout)
 
-from gui_design.system_monitor_widget     import SystemMonitorWidget
-from gui_design.experiment_profile_dialog import ExperimentProfileDialog, DOEPlotsDialog
-from gui_design.stylish_widgets           import MetricCard, LogViewer, StatusBadge, LogViewer
+from gui.system_monitor_widget            import SystemMonitorWidget
+from gui.experiment_profile_dialog        import ExperimentProfileDialog, DOEPlotsDialog
+from gui.stylish_widgets                  import MetricCard, LogViewer, StatusBadge
 
-from doe_sampling.doe_sampler             import DoESampler
-from doe_sampling.doe_creator             import ExperimentCreator
-
-from exp_generation.profile_gen           import DefineProcessParameter
-from exp_generation.profile_gen           import ProfileCreator
-from exp_generation.profile_gen           import ExperimentProfileParameters
-from exp_generation.profile_gen           import ExperimentProfileStorage
-from exp_generation.profile_gen           import ExpComponentGen
-from exp_generation.profile_gen           import ProfileGenerator
-from exp_generation.pump_calibration      import PumpRateConverter
-
-from app_control.pure_functions           import counter
-from app_control.Controller               import Controller, Stage
-from app_control.DataPlotter              import DataPlotter
+from gui.pages.dashboard_page             import DashboardPage
+from gui.pages.experiment_page            import ExperimentPage
+from gui.pages.plots_page                 import PlotsPage
+from gui.pages.brain_page                 import BrainPage
+from gui.pages.modeling_page              import ModelingPage
+from gui.pages.control_panel_page         import ControlPanelPage
+from gui.pages.settings_page              import SettingsPage
 
 
-# In[2]:
+from experiment.experiment_service        import ExperimentService
+
+from experiment.execution_coordinator     import (ExperimentCoordinator,
+                                                 )
+from hardware_devices.hardware_manager    import HardwareBusyError
+
+from experiment.profiles.profile_gen      import (
+                                                 DefineProcessParameter,
+                                                 ProfileCreator,
+                                                 )
+
+from app.paths                            import (
+                                                 BASE_DIR,
+                                                 ASSETS_DIR,
+                                                 DATA_DIR,
+                                                 LOGO_PATH,
+                                                 TEXT_PATH,
+                                                 ICON_PATH,
+                                                 )
 
 
-BASE_DIR = Path.cwd()
-LOGO_PATH = BASE_DIR / "assets" / "LOGO.png"
-TEXT_PATH = BASE_DIR / "assets" / "TEXT.png"
-ICON_PATH = BASE_DIR / "assets" / "ICON.png"
-
-
-# In[3]:
-
+from app.controller                       import Controller, Stage
+from app.data_plotter                     import DataPlotter
 
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+
         self.setWindowFlags( Qt.WindowType.Window |  Qt.WindowType.FramelessWindowHint |  Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
@@ -82,99 +96,16 @@ class MainWindow(QMainWindow):
         self.setMouseTracking(True)
         self.centralWidget().setMouseTracking(True)
 
-        # 1. Root layout is a VERTICAL layout to stack the Header on top
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        # ----------------------------------------------------------------- #
-        # TOP HEADER BAR                                                    #
-        # ----------------------------------------------------------------- #
-        header_widget = QWidget()
-        header_widget.setObjectName("topHeader")
-        header_widget.setFixedHeight(50)
-        header_layout = QHBoxLayout(header_widget)
-        header_layout.setContentsMargins(15, 0, 10, 0)
-        header_layout.setSpacing(10)
-
-        # App Logo & Title
-        self.logo_icon_label = QLabel()
-        self.logo_icon_label.setStyleSheet("background: transparent;")
-        if LOGO_PATH.exists():
-            logo_pixmap = QPixmap(str(LOGO_PATH))
-            self.logo_icon_label.setPixmap(
-                logo_pixmap.scaledToHeight(30, Qt.TransformationMode.SmoothTransformation)
-            )
-
-        self.logo_text_label = QLabel()
-        self.logo_text_label.setStyleSheet("background: transparent;")
-        if TEXT_PATH.exists():
-            text_pixmap = QPixmap(str(TEXT_PATH))
-            self.logo_text_label.setPixmap(
-                text_pixmap.scaledToHeight(22, Qt.TransformationMode.SmoothTransformation)
-            )
-
-        # Add both images to the layout
-        header_layout.addWidget(self.logo_icon_label)
-        header_layout.addWidget(self.logo_text_label)
-
-        # Pushes your logos to the far left of the header
-        header_layout.addStretch()
-
-        root_layout.addWidget(header_widget)
-        # Theme toggle
-        self.theme_toggle = QPushButton("☀")
-        self.theme_toggle.setObjectName("themeToggle")
-        self.theme_toggle.setCheckable(True)
-        self.theme_toggle.setChecked(False)
-        self.theme_toggle.setFixedSize(36, 30)
-        self.theme_toggle.setToolTip("Switch to light theme")
-        self.theme_toggle.setCursor(Qt.PointingHandCursor)
-        self.theme_toggle.clicked.connect(self.toggle_theme)
-        self.theme_toggle.setObjectName("theme_toggle")
-
-        # System Ready Status Pill
-        status_pill = QLabel("● System Ready")
-        status_pill.setObjectName("statusPill")
-        status_pill.setFixedSize(120, 30)
-
-        self.btn_minimize = QPushButton("—")
-        self.btn_minimize.setObjectName("windowControlBtn")
-        self.btn_minimize.setFixedSize(30, 30)
-        self.btn_minimize.clicked.connect(self.showMinimized)
-
-        self.btn_maximize = QPushButton("□")
-        self.btn_maximize.setObjectName("windowControlBtn")
-        self.btn_maximize.setFixedSize(30, 30)
-        self.btn_maximize.clicked.connect(self.toggle_maximize)
-
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setObjectName("windowCloseBtn")
-        self.btn_close.setFixedSize(30, 30)
-        self.btn_close.clicked.connect(self.close)
-
-        #header_layout.addWidget(self.logo_label)
-        header_layout.addStretch()
-
-        # Theme toggle immediately left of System Ready
-        header_layout.addWidget(self.theme_toggle)
-        header_layout.addWidget(status_pill)
-
-        header_layout.addSpacing(15)
-        header_layout.addWidget(self.btn_minimize)
-        header_layout.addWidget(self.btn_maximize)
-        header_layout.addWidget(self.btn_close)
-
-
-        header_layout.addSpacing(15)
-        header_layout.addWidget(self.btn_minimize)
-        header_layout.addWidget(self.btn_maximize)
-        header_layout.addWidget(self.btn_close)
-
-        root_layout.addWidget(header_widget)
+        # Header
+        header_widget = self._build_header()
+        root_layout.addWidget(header_widget)        
 
         # ----------------------------------------------------------------- #
-        # BODY CONTAINER (Holds Sidebar on left, Content Stack on right)      #
+        # BODY
         # ----------------------------------------------------------------- #
         body_widget = QWidget()
         body_widget.setObjectName("bodyContainer")
@@ -182,154 +113,29 @@ class MainWindow(QMainWindow):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        # ----------------------------------------------------------------- #
-        # 1. LEFT SIDEBAR NAVIGATION PANEL                                  #
-        # ----------------------------------------------------------------- #
-        sidebar_widget = QWidget()
-        sidebar_widget.setObjectName("sidebar")
-        sidebar_widget.setFixedWidth(220)
-        sidebar_layout = QVBoxLayout(sidebar_widget)
-        sidebar_layout.setContentsMargins(15, 20, 15, 20)
-        sidebar_layout.setSpacing(self.SPACING_2)
+        # Sidebar
+        sidebar_widget = self._build_sidebar()
 
-        # Create navigation buttons
-        self.btn_dashboard = QPushButton("🏠  Dashboard")
-        self.btn_experiment = QPushButton("🧪  Experiment")
-        self.btn_plots = QPushButton("📊  Data & Plots")
-        self.btn_brain = QPushButton("🧠  Brain")
-        self.btn_settings = QPushButton("⚙️  Settings")
-
-        nav_buttons = [self.btn_dashboard,self.btn_experiment,self.btn_plots,self.btn_brain,self.btn_settings]
-
-        for btn in nav_buttons:
-            btn.setCheckable(True)
-            sidebar_layout.addWidget(btn)
-
-        sidebar_layout.addSpacing(15)
-
-        quick_label = QLabel("Quick Actions")
-        quick_label.setStyleSheet("color: #64748b; font-size: 11px; font-weight: bold; background: transparent;")
-        sidebar_layout.addWidget(quick_label)
-
-        self.quick_start_btn = QPushButton("▶ Start")
-        self.quick_start_btn.setObjectName("start_button")
-        self.quick_stop_btn = QPushButton("⏹ Stop")
-        self.quick_stop_btn.setObjectName("stop_button")
-        self.quick_reset_btn = QPushButton("🔄 Reset")
-        self.quick_reset_btn.setObjectName("quick_reset_button")
-        self.quick_quit_btn = QPushButton("🔐 Quit")
-        self.quick_quit_btn.setObjectName("quit_button")
-
-        quick_actions = [ self.quick_start_btn, self.quick_stop_btn, self.quick_reset_btn, self.quick_quit_btn]
-
-        for qbtn in quick_actions:
-            sidebar_layout.addWidget(qbtn)
-
-        self.quick_start_btn.clicked.connect(self.start_command)
-        self.quick_stop_btn.clicked.connect(self.stop_command)
-        self.quick_reset_btn.clicked.connect(self.reset_command)
-        self.quick_quit_btn.clicked.connect(self.close)
-        self.bottom_icon_label = QLabel()
-        self.bottom_icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.bottom_icon_label.setStyleSheet("background: transparent;")
-
-        sidebar_icon_path = BASE_DIR / "assets" / "ICON.png"
-        if sidebar_icon_path.exists():
-            pixmap = QPixmap(str(sidebar_icon_path))
-            # Scale to fit comfortably within the 220px fixed sidebar width
-            scaled_pixmap = pixmap.scaledToWidth(120, Qt.TransformationMode.SmoothTransformation)
-            self.bottom_icon_label.setPixmap(scaled_pixmap)
-
-        sidebar_layout.addWidget(self.bottom_icon_label)
-        sidebar_layout.addStretch()
-
-        # ----------------------------------------------------------------- #
-        # 2. RIGHT SIDE: STACKED WIDGET (CONTENT VIEWS)                     #
-        # ----------------------------------------------------------------- #
-        self.stack = QStackedWidget()
-
-        self.dashboard_page = QWidget()
-        self.setup_dashboard_view()
-
-        self.experiment_page = QWidget()
-        self.setup_experiment_view()
-
-        self.plots_page = QWidget()
-        self.setup_plots_view()
-
-        self.brain_page = QWidget()
-        self.setup_brain_view()
-
-        self.settings_page = QWidget()
-        self.setup_settings_view()
-
-        self.stack.addWidget(self.dashboard_page)
-        self.stack.addWidget(self.experiment_page)
-        self.stack.addWidget(self.plots_page)
-        self.stack.addWidget(self.brain_page)
-        self.stack.addWidget(self.settings_page)
-
-        self.btn_dashboard.clicked.connect(lambda: self.switch_page(0))
-        self.btn_experiment.clicked.connect(lambda: self.switch_page(1))
-        self.btn_plots.clicked.connect(lambda: self.switch_page(2))
-        self.btn_brain.clicked.connect(lambda: self.switch_page(3))
-        self.btn_settings.clicked.connect(lambda: self.switch_page(4))
-
-        self.btn_dashboard.setChecked(True)
-        self.stack.setCurrentIndex(0)
+        # Main content stack
+        self.stack = self._build_page_stack()
+        self._connect_page_signals()
+        self._connect_navigation()
 
         body_layout.addWidget(sidebar_widget)
-        body_layout.addWidget(self.stack)
+        body_layout.addWidget(self.stack, 1)
 
-        # Add the body container right below the header in the root layout
         root_layout.addWidget(body_widget)
 
         # ----------------------------------------------------------------- #
         # CONSTANTS, MODULES, AND INTERNAL VARIABLES                        #
         # ----------------------------------------------------------------- #
 
-        as_pump_cal_location   = r"FILES\pump_calibration\expttsd1_AS.csv"
-        solu_pump_cal_location = r"FILES\pump_calibration\expttsd1_SOLU.csv"
-        solv_pump_cal_location = r"FILES\pump_calibration\expttsd1_SOLV.csv"
-
-        self.as_rate_converter           = PumpRateConverter(as_pump_cal_location,  'File  W: AS ',      'File R: Mass ')  
-        self.solution_rate_converter     = PumpRateConverter(solu_pump_cal_location,'P01:Value (Setpt)', 'File R: Mass ')  
-        self.solvent_rate_converter      = PumpRateConverter(solv_pump_cal_location,'P01:Value (Setpt)', 'File R: Mass ')  
-        self.cleaning_sol_rate_converter = PumpRateConverter(solv_pump_cal_location,'P01:Value (Setpt)', 'File R: Mass ') 
-
-        self.exp_par       = ExperimentProfileParameters() # ...storing the parameters for DoE profile generation
-        self.doe_sampler   = DoESampler()      # ...generating the settings for Experiments
-        self.component_gen = ExpComponentGen() # ...functions for experiment section generation
-        self.profiles      = ProfileGenerator(self.exp_par, self.component_gen)       
-        self.exp_storage   = ExperimentProfileStorage(self.as_rate_converter, self.solution_rate_converter, self.solvent_rate_converter, self.cleaning_sol_rate_converter) 
-
-        self.omni_filename  = "expttsd"
-        self.MODEL_filename = "MODEL"
-
-        self.variables_set               = False
-        self.process_stop                = False
-        self.CONTROLLER                  = None
-        self.DATAPROCESSOR               = None
-        self.create_experiments          = None
-
-        self.initial_exp_count           = 0
-        self.conducted_experiments_count = 0
-        self.previous_exp_count          = 0
-        self.MODEL_run_count             = 0
-        self.omni_run_count              = 0
-
-        self.omni_folder                 = ""
-        self.model_folder                = ""
-
-        self.timer                       = QTimer(self)
-
         self.create_style()
 
-        self.timer.timeout.connect(self.monitoring_loop)
+        self._initialize_experiment_services()
 
-        self.monitor_mode = None
-        self.monitor_path = None
-        self.monitor_num  = None
+        self._initialize_runtime_state()
+
         self.log_message("🌟 App opened up successfully.", "INFO")
 
     def toggle_maximize(self):
@@ -343,12 +149,11 @@ class MainWindow(QMainWindow):
             self.btn_maximize.setToolTip("Restore")
 
     def switch_page(self, index):
-        """Switches the active page in the stack and manages button states."""
-        self.stack.setCurrentIndex(index)
-        buttons = [self.btn_dashboard,self.btn_experiment,self.btn_plots,self.btn_brain,self.btn_settings]
+        """Switch the active page and update navigation button states."""
 
-        for i, btn in enumerate(buttons):
-          if i < self.stack.count():
+        self.stack.setCurrentIndex(index)
+
+        for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
 
     def resizeEvent(self, event):
@@ -450,6 +255,39 @@ class MainWindow(QMainWindow):
 
         super().mousePressEvent(event)
 
+    @Slot(dict)
+    def on_experiment_progress(self, progress):
+        """
+        Update the GUI when new OMNI experiment files
+        have been detected.
+        """
+
+        new_experiments = progress["new_experiments"]
+        total_experiments = progress["total_experiments"]
+
+        self.log_message(
+            f"{new_experiments} new experiment(s) "
+            f"detected. Total conducted: {total_experiments}",
+            "INFO",
+        )
+
+        self.dashboard_page.set_experiment_count(
+            total_experiments
+        )
+
+    def _initialize_runtime_state(self):
+
+        self.CONTROLLER = None
+        self.DATAPROCESSOR = None
+        self.create_experiments = None
+
+        self.execution = ExperimentCoordinator(parent=self)
+
+        self.execution.omni_completed.connect(self.on_omni_completed)
+        self.execution.model_completed.connect(self.on_model_completed)
+        self.execution.stage_changed.connect(self.on_stage_changed)
+        self.execution.experiment_progress.connect(self.on_experiment_progress)
+        self.execution.error_occurred.connect(self.on_execution_error)
 
     def mouseMoveEvent(self, event):
 
@@ -532,6 +370,44 @@ class MainWindow(QMainWindow):
 
         event.accept()
 
+    @Slot(dict)
+    def on_execution_error(self, error_info):
+        """
+        Display a backend monitoring failure and restore
+        user access to Reset.
+        """
+
+        stage = error_info["stage"]
+        path = error_info["path"]
+        error_type = error_info["error_type"]
+        message = error_info["message"]
+
+        self.dashboard_page.set_omni_status("Error")
+        self.dashboard_page.set_model_status("Error")
+
+        self.dashboard_page.set_current_stage("None")
+
+        self.dashboard_page.set_monitoring_state(False)
+
+        self.set_buttons_enabled(True)
+
+        self.log_message(
+            f"Execution error during {stage}: "
+            f"{error_type}: {message}. "
+            f"Monitoring path: {path}",
+            "ERROR",
+        )
+
+        QMessageBox.critical(
+            self,
+            "Experiment Execution Error",
+            f"An error occurred during {stage} monitoring.\n\n"
+            f"{error_type}: {message}\n\n"
+            f"Monitoring directory:\n{path}\n\n"
+            f"Execution has been stopped. "
+            f"Reset before starting another experiment.",
+        )
+
     def mouseReleaseEvent(self, event):
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -549,431 +425,12 @@ class MainWindow(QMainWindow):
 
         super().mouseReleaseEvent(event)
 
-    # --- Page layout builders ---
-    def setup_dashboard_view(self):
+    def _initialize_experiment_services(self):
 
-        # Wrap everything in a scroll area to maintain responsiveness
-        scroll_area = QScrollArea(self.dashboard_page)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        self.experiment_service = ExperimentService()
 
-        scroll_content = QWidget()
-        scroll_content.setObjectName("dashboard_content")
-        # Use a QGridLayout for the main content area to support columns & rows
-        main_grid = QGridLayout(scroll_content)
-        main_grid.setContentsMargins(20, 20, 20, 20)
-        main_grid.setSpacing(15)
-
-        # ===================================================== #
-        # 2. EXPERIMENT CONTROLS BOX (Middle-Left)            #
-        # ===================================================== #
-        control_box = QGroupBox("🧪 Experiment Controls")
-        control_layout = QGridLayout()
-
-        # Tighten inner margins and spacing to make it shorter
-        control_layout.setContentsMargins(10, 10, 10, 10)
-        control_layout.setSpacing(self.SPACING_1)
-
-        self.start_button = QPushButton("Start Experiment")
-        self.start_button.setObjectName("start_button")
-        self.stop_button = QPushButton("Stop Experiment")
-        self.stop_button.setObjectName("stop_button")
-        self.reset_button = QPushButton("♻️ Reset System")
-        self.reset_button.setObjectName("reset_button")
-        self.plot_button = QPushButton("📈 Plot Data")
-        self.plot_button.setObjectName("plot_button")
-
-        self.start_button.clicked.connect(self.start_command)
-        self.stop_button.clicked.connect(self.stop_command)
-        self.reset_button.clicked.connect(self.reset_command)
-        self.plot_button.clicked.connect(self.plot_expts)
-
-        self.start_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
-
-        # Place in a compact 2x2 grid configuration
-        control_layout.addWidget(self.start_button, 0, 0)
-        control_layout.addWidget(self.stop_button, 0, 1)
-        control_layout.addWidget(self.reset_button, 1, 0)
-        control_layout.addWidget(self.plot_button, 1, 1)
-
-        control_box.setLayout(control_layout)
-
-        # ===================================================== #
-        # 3. Progress track STATUS BOX (Top-Center)           #
-        # ===================================================== #
-        #exp_status_box = QGroupBox("📈 Progress Track")
-        #exp_status_box.setObjectName("exp_status_box")
-        exp_status_layout = QGridLayout()
-        self.exp_status_box = QGroupBox("📈 Progress Track")
-        self.exp_status_box.setObjectName("exp_status_box")  
-        exp_status_layout.setContentsMargins(5, 5, 5, 5)
-        exp_status_layout.setSpacing(self.SPACING_2)
-
-        self.omni_label = QLabel("Omni")
-        self.MODEL_label = QLabel("MODEL")
-        self.expts_label = QLabel("Experiments")
-
-        self.omni_count_label = QLabel( "0 OMNI  runs")
-        self.model_count_label = QLabel("0 MODEL runs")
-        self.expts_count_label = QLabel("0 EXPTS runs")
-
-        self.dashboard_omni = StatusBadge("Inactive")
-        self.dashboard_model = StatusBadge("Inactive")
-        self.dashboard_runs = QLabel("Runs: 0 / 0")
-        self.dashboard_current = QLabel("Status: Not running")
-        self.variables_label = QLabel("")
-
-        exp_status_layout.addWidget(self.omni_label, 0, 0)
-        exp_status_layout.addWidget(self.MODEL_label, 0, 1)
-        exp_status_layout.addWidget(self.expts_label, 0, 2)
-        exp_status_layout.addWidget(self.omni_count_label, 1, 0)
-        exp_status_layout.addWidget(self.model_count_label, 1, 1)
-        exp_status_layout.addWidget(self.expts_count_label, 1, 2)
-        exp_status_layout.addWidget(self.dashboard_omni, 2, 0)
-        exp_status_layout.addWidget(self.dashboard_model, 2, 1)
-        exp_status_layout.addWidget(self.dashboard_current, 3, 0, 1, 2)
-
-        self.exp_status_box.setLayout(exp_status_layout)
-
-        # ===================================================== #
-        # 4. SYSTEM HEALTH / STATUS BOX (Top-Right)             #
-        # ===================================================== #
-        system_box = QGroupBox("💻 System Status")
-        system_layout = QVBoxLayout()
-        self.system_monitor = SystemMonitorWidget()
-        self.system_monitor.set_theme(self.dark_mode)
-        system_layout.addWidget(self.system_monitor)
-        system_box.setLayout(system_layout)
-
-        # ===================================================== #
-        # 5. LIVE LOG WINDOW (Middle-Right / Bottom)            #
-        # ===================================================== #
-        log_box = QGroupBox("📜 Status Messages")
-        self.dashboard_log = LogViewer()
-        self.dashboard_log.set_theme(self.dark_mode)
-
-        log_layout = QVBoxLayout()
-        log_layout.addWidget(self.dashboard_log)
-        log_box.setLayout(log_layout)
-
-        # ===================================================== #
-        # 6. CONNECTED DEVICES BOX (Bottom-Left)                #
-        # ===================================================== #
-        devices_box = QGroupBox("🔌 Connected Devices")
-        devices_layout = QVBoxLayout()
-        devices_layout.setContentsMargins(10, 10, 10, 10)
-        devices_layout.setSpacing(self.SPACING_2)
-
-        # Example labels for devices (you can connect these to real status logic later)
-        self.device_omni_label = QLabel("❌ OMNIBUS Controller: Inactive")
-        self.device_model_label = QLabel("❌ MODEL Worker: Not Ready")
-
-        devices_layout.addWidget(self.device_omni_label)
-        devices_layout.addWidget(self.device_model_label)
-        devices_box.setLayout(devices_layout)
-
-        # ===================================================== #
-        # GRID PLACEMENT (Assembling the Multi-Column Layout) #
-        # ===================================================== #
-        #main_grid.addWidget(config_box, 0, 0)
-        main_grid.addWidget(self.exp_status_box, 0, 1)
-        main_grid.addWidget(system_box, 0, 0)
-
-        # Row 1: Experiment Controls (col 0), Status Messages / Logs (col 1 & 2)
-        main_grid.addWidget(control_box, 1, 0)
-        main_grid.addWidget(log_box, 2, 0)
-
-        # Row 2: Connected Devices (col 0 underneath controls)
-        main_grid.addWidget(devices_box, 1, 1, 1, 2)
-
-        scroll_area.setWidget(scroll_content)
-        page_layout = QVBoxLayout(self.dashboard_page)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.addWidget(scroll_area)   
-
-    def setup_experiment_view(self):
-        layout = QVBoxLayout(self.experiment_page)
-        layout.addWidget(QLabel("<h1>Live experiment</h1><p>Experimental info plotted here.</p>"))
-
-    def setup_plots_view(self):
-        """Set up Data & Plots page with a scrollable Matplotlib container."""
-
-        layout = QVBoxLayout(self.plots_page)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
-
-        # Title
-        title_label = QLabel("Data & Plots View")
-        title_label.setStyleSheet(
-            "font-size: 18px; "
-            "font-weight: bold; "
-            "color: #f8fafc;"
-        )
-        layout.addWidget(title_label)
-
-        # ---------------------------------------------------------
-        # Scroll area
-        # ---------------------------------------------------------
-        self.plot_scroll_area = QScrollArea()
-        self.plot_scroll_area.setWidgetResizable(True)
-        self.plot_scroll_area.setFrameShape(QFrame.NoFrame)
-
-        # Optional: allow both horizontal and vertical scrolling
-        self.plot_scroll_area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.plot_scroll_area.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-
-        # ---------------------------------------------------------
-        # Widget inside the scroll area
-        # ---------------------------------------------------------
-        self.plot_container = QWidget()
-
-        self.plot_container_layout = QVBoxLayout(
-            self.plot_container
-        )
-
-        self.plot_container_layout.setContentsMargins(
-            5, 5, 5, 5
-        )
-        self.plot_container_layout.setSpacing(10)
-
-        # Placeholder
-        self.plot_placeholder_label = QLabel("No experiment data plotted yet. ""Click 'Plot data' to load.")
-        self.plot_placeholder_label.setStyleSheet("color: #64748b; ""font-size: 13px;")
-        self.plot_container_layout.addWidget(self.plot_placeholder_label)
-
-        # Important: allow contents to expand
-        self.plot_container_layout.addStretch()
-
-        # Put container inside scroll area
-        self.plot_scroll_area.setWidget(self.plot_container)
-
-        # Add scroll area to page
-        layout.addWidget(self.plot_scroll_area, 1)
-
-    def setup_brain_view(self):
-        layout = QVBoxLayout(self.brain_page)
-        layout.addWidget(QLabel("<h1>brain</h1><p>Log info plotted here.</p>"))
-
-    def setup_settings_view(self):
-        # ===================================================== #
-        # 1. EXPERIMENT CONFIGURATION BOX
-        # ===================================================== #
-        config_box = QGroupBox("🌎 Environmental variables' settings")
-        config_layout = QGridLayout()
-        config_layout.setContentsMargins(10, 10, 10, 10)
-        config_layout.setHorizontalSpacing(8)
-        config_layout.setVerticalSpacing(6)
-
-        self.status_label = QLabel("")
-        self.error_label = QLabel("")
-        self.error_label.setStyleSheet("color: #ef4464;")
-
-        self.exp_path_input = QLineEdit()
-        self.exp_path_input.setPlaceholderText(r"C:\Desktop\Current_Experiment")
-
-        self.MODEL_path_input = QLineEdit()
-        self.MODEL_path_input.setPlaceholderText(r"C:\Desktop\Model_Outputs")
-
-        self.exp_number_input = QLineEdit()
-        self.exp_number_input.setPlaceholderText("5")
-
-        self.define_button = QPushButton("Define Variables")
-        self.define_button.setObjectName("define_button")
-        self.define_button.clicked.connect(self.define_command)
-
-        config_layout.addWidget(self.status_label, 0, 0, 1, 2)
-        config_layout.addWidget(self.error_label, 1, 0, 1, 2)
-
-        config_layout.addWidget(QLabel("Experiment Path"), 2, 0)
-        config_layout.addWidget(self.exp_path_input, 2, 1)
-
-        config_layout.addWidget(QLabel("MODEL Path"), 3, 0)
-        config_layout.addWidget(self.MODEL_path_input, 3, 1)
-
-        config_layout.addWidget(QLabel("Number of experiments"), 4, 0)
-        config_layout.addWidget(self.exp_number_input, 4, 1)
-
-        config_layout.addWidget(self.define_button, 5, 0, 1, 2)
-
-        # Input widgets take available width
-        config_layout.setColumnStretch(0, 0)
-        config_layout.setColumnStretch(1, 1)
-
-        config_box.setLayout(config_layout)
-
-        # ===================================================== #
-        # 2. EXPERIMENT SETTINGS BOX
-        # ===================================================== #
-        exp_group = QGroupBox("⚙ Initial DoE Generation")
-
-        form = QFormLayout()
-        form.setContentsMargins(10, 10, 10, 10)
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-        self.profile_button = QPushButton("Edit Experiment Profile")
-
-        self.generate_button = QPushButton("Generate experiments")
-        self.generate_button.setObjectName("generate_button")
-
-        self.generate_button.clicked.connect(self.define_doe)
-        self.profile_button.clicked.connect(self.open_profile_dialog)
-
-        self.doe_type_combo = QComboBox()
-        self.doe_type_combo.addItems([
-            'Greedy minimizataion upon sobol sampling',
-            'Latin Hypercube Sampling',
-            'Latin Hypercube Sampling + Lloyd-Max optimization',
-            'Random sampling',
-            'Sobol sampling',
-            'Full Factorial DoE generation'
-        ])
-
-        form.addRow("Process conditions:", self.profile_button)
-        form.addRow("Sampling strategy:", self.doe_type_combo)
-        form.addRow(self.generate_button)
-
-        exp_group.setLayout(form)
-
-        # ===================================================== #
-        # 3. DoE INFORMATION
-        # ===================================================== #
-        doe_info_group = QGroupBox("🧪 DoE Information")
-
-        doe_info_layout = QFormLayout()
-        doe_info_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.changed_dimensions_count_label = QLabel("")
-        self.changed_dimensions_label = QLabel("")
-        self.experiment_count_label = QLabel("")
-
-        self.plot_doe_button = QPushButton("📊 View DoE Experiment Profiles")
-        self.plot_doe_button.setObjectName("plot_doe_button")
-        self.plot_doe_button.clicked.connect(self.show_doe_plots)
-
-        self.changed_dimensions_label.setWordWrap(True)
-
-        doe_info_layout.addRow("Changed dimensions:",self.changed_dimensions_count_label)
-        doe_info_layout.addRow("Dimensions:",self.changed_dimensions_label)
-        doe_info_layout.addRow("Experiments:",self.experiment_count_label)
-
-        doe_info_layout.addRow(self.plot_doe_button)
-
-        doe_info_group.setLayout(doe_info_layout)
-
-        doe_info_group.setLayout(doe_info_layout)
-
-        # ===================================================== #
-        # 4. PLOTS AREA
-        # ===================================================== #
-        plots_group = QGroupBox("📊 Visualizations")
-        #plots_group.setMaximumHeight(700)
-        plots_group.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Preferred )
-        plots_layout = QVBoxLayout()
-        plots_layout.setSpacing(15)
-        plots_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.fig_2d = Figure(figsize=(4, 4), facecolor='none')
-        self.fig_3d = Figure(figsize=(4, 4), facecolor='none')
-
-        self.canvas_2d = FigureCanvas(self.fig_2d)
-        self.canvas_3d = FigureCanvas(self.fig_3d)
-
-        # Allow canvases to consume all available space
-        self.canvas_2d.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Expanding    )
-
-        self.canvas_3d.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Expanding    )
-
-        self.canvas_2d.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        self.canvas_3d.setAttribute(Qt.WA_OpaquePaintEvent, True)
-
-        self.canvas_2d.setObjectName("plotCanvas")
-        self.canvas_3d.setObjectName("plotCanvas")
-
-        plots_layout.addWidget(self.canvas_2d, 1)
-        plots_layout.addWidget(self.canvas_3d, 1)
-
-        plots_group.setLayout(plots_layout)
-
-        # ===================================================== #
-        # 5. LEFT COLUMN
-        # ===================================================== #
-        inputs_container = QWidget()
-
-        # IMPORTANT:
-        # This makes the left side capable of being narrow.
-        inputs_container.setMinimumWidth(0)
-        inputs_container.setMaximumWidth(350)
-
-        inputs_container.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Maximum    )
-
-        inputs_layout = QVBoxLayout(inputs_container)
-        inputs_layout.setContentsMargins(0, 0, 0, 0)
-        inputs_layout.setSpacing(10)
-
-        inputs_layout.addWidget(config_box)
-        inputs_layout.addWidget(exp_group)
-        inputs_layout.addWidget(doe_info_group)
-        inputs_layout.addStretch()
-
-        # ===================================================== #
-        # 6. SCROLLABLE CONTENT
-        # ===================================================== #
-        container_widget = QWidget()
-        container_widget.setMinimumWidth(0)
-
-        container_layout = QGridLayout(container_widget)
-
-
-        container_layout.setContentsMargins(10, 10, 10, 10)
-        container_layout.setHorizontalSpacing(10)
-        container_layout.setVerticalSpacing(10)
-
-        # LEFT
-        container_layout.addWidget(inputs_container,0,0,Qt.AlignTop    )
-
-        # RIGHT
-        container_layout.addWidget(plots_group,0,1    )
-
-        # ===================================================== #
-        # THIS IS THE IMPORTANT PART
-        # ===================================================== #
-
-        # Left column gets a controlled width.
-        # Right column gets ALL remaining width.
-        container_layout.setColumnMinimumWidth(0, 250)
-        container_layout.setColumnStretch(0, 0)
-
-        container_layout.setColumnMinimumWidth(1, 0)
-        container_layout.setColumnStretch(1, 1)
-
-        # Make the plot area expand vertically
-        container_layout.setRowStretch(0, 0)
-
-        # ===================================================== #
-        # 7. SCROLL AREA
-        # ===================================================== #
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-
-        # Don't force the scroll area's child to have a huge minimum width
-        scroll_area.setMinimumWidth(0)
-
-        scroll_area.setWidget(container_widget)
-
-        # ===================================================== #
-        # 8. MAIN LAYOUT
-        # ===================================================== #
-        main_layout = QVBoxLayout(self.settings_page)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        main_layout.addWidget(scroll_area)
+        self.omni_filename = "expttsd"
+        self.MODEL_filename = "MODEL"
 
     # ====================================================== #
     # STYLE                                                  #
@@ -1407,6 +864,13 @@ class MainWindow(QMainWindow):
                     padding: 0px;
                 }
 
+                QPushButton[sidebarCompact="true"] {
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                    padding-left: 10px;
+                    padding-right: 10px;
+                }
+
                 QPushButton#theme_toggle:hover {
                     background-color: #363b44;
                     border: 1px solid #6b7280;
@@ -1426,6 +890,13 @@ class MainWindow(QMainWindow):
 
                 QPushButton#plot_button {
                     text-align: center;
+                }
+
+                QPushButton[sidebarCompact="true"] {
+                    padding-top: 2px;
+                    padding-bottom: 2px;
+                    padding-left: 10px;
+                    padding-right: 10px;
                 }
 
                 QPushButton#reset_button {
@@ -1561,20 +1032,6 @@ class MainWindow(QMainWindow):
                     font-weight: 600;
                 }
 
-                QPushButton#themeToggle {
-                    background: #f1f5f9;
-                    color: #475569;
-                    border: 1px solid #cbd5e1;
-                    border-radius: 7px;
-                    padding: 0px;
-                    font-size: 16px;
-                    font-weight: 600;
-                }
-
-                QPushButton#themeToggle:hover {
-                    background: #e2e8f0;
-                    border: 1px solid #94a3b8;
-                }
 
                 QPushButton#windowControlBtn {
                     background: transparent;
@@ -1673,40 +1130,151 @@ class MainWindow(QMainWindow):
     # HELPERS & COMMANDS (Unchanged Logic)                   #
     # ====================================================== #    
 
-    def update_plot_theme(self):
 
-        if self.dark_mode:
-            bg = "#111827"
-            fg = "#e5e7eb"
-            grid = "#334155"
-        else:
-            bg = "#ffffff"
-            fg = "#1e293b"
-            grid = "#cbd5e1"
 
-        for fig in [self.canvas_2d.figure, self.canvas_3d.figure]:
+    def _build_header(self):
+        header_widget = QWidget()
+        header_widget.setObjectName("topHeader")
+        header_widget.setFixedHeight(50)
 
-            fig.patch.set_facecolor(bg)
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(15, 0, 10, 0)
+        header_layout.setSpacing(10)
 
-            for ax in fig.axes:
-                ax.set_facecolor(bg)
-                ax.tick_params(colors=fg)
+        # ----------------------------------------------------------
+        # LOGO
+        # ----------------------------------------------------------
 
-                ax.xaxis.label.set_color(fg)
-                ax.yaxis.label.set_color(fg)
-                ax.title.set_color(fg)
+        self.logo_icon_label = QLabel()
+        self.logo_icon_label.setStyleSheet(
+            "background: transparent;"
+        )
 
-                for spine in ax.spines.values():
-                    spine.set_color(grid)
+        if LOGO_PATH.exists():
+            logo_pixmap = QPixmap(str(LOGO_PATH))
 
-                ax.grid(
-                    True,
-                    color=grid,
-                    alpha=0.35
+            self.logo_icon_label.setPixmap(
+                logo_pixmap.scaledToHeight(
+                    30,
+                    Qt.TransformationMode.SmoothTransformation,
                 )
+            )
 
-        self.canvas_2d.draw_idle()
-        self.canvas_3d.draw_idle()
+        self.logo_text_label = QLabel()
+        self.logo_text_label.setStyleSheet(
+            "background: transparent;"
+        )
+
+        if TEXT_PATH.exists():
+            text_pixmap = QPixmap(str(TEXT_PATH))
+
+            self.logo_text_label.setPixmap(
+                text_pixmap.scaledToHeight(
+                    22,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+
+        header_layout.addWidget(self.logo_icon_label)
+        header_layout.addWidget(self.logo_text_label)
+
+        header_layout.addStretch()
+
+        # ----------------------------------------------------------
+        # THEME
+        # ----------------------------------------------------------
+
+        self.theme_toggle = QPushButton("☀")
+        self.theme_toggle.setObjectName("theme_toggle")
+        self.theme_toggle.setCheckable(True)
+        self.theme_toggle.setChecked(False)
+        self.theme_toggle.setFixedSize(36, 30)
+        self.theme_toggle.setToolTip("Switch to light theme")
+        self.theme_toggle.setCursor(Qt.PointingHandCursor)
+
+        self.theme_toggle.clicked.connect(
+            self.toggle_theme
+        )
+
+        header_layout.addWidget(self.theme_toggle)
+
+        # ----------------------------------------------------------
+        # SYSTEM STATUS
+        # ----------------------------------------------------------
+
+        self.status_pill = QLabel("● 0/0 Connected")
+        self.status_pill.setObjectName("statusPill")
+        self.status_pill.setFixedSize(155, 30)
+
+        header_layout.addWidget(self.status_pill)
+
+        # ----------------------------------------------------------
+        # WINDOW CONTROLS
+        # ----------------------------------------------------------
+
+        header_layout.addSpacing(15)
+
+        self.btn_minimize = QPushButton("—")
+        self.btn_minimize.setObjectName("windowControlBtn")
+        self.btn_minimize.setFixedSize(30, 30)
+        self.btn_minimize.setToolTip("Minimize")
+        self.btn_minimize.clicked.connect(
+            self.showMinimized
+        )
+
+        self.btn_maximize = QPushButton("□")
+        self.btn_maximize.setObjectName("windowControlBtn")
+        self.btn_maximize.setFixedSize(30, 30)
+        self.btn_maximize.setToolTip("Maximize")
+        self.btn_maximize.clicked.connect(
+            self.toggle_maximize
+        )
+
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("windowCloseBtn")
+        self.btn_close.setFixedSize(30, 30)
+        self.btn_close.setToolTip("Close")
+        self.btn_close.clicked.connect(
+            self.close
+        )
+
+        header_layout.addWidget(self.btn_minimize)
+        header_layout.addWidget(self.btn_maximize)
+        header_layout.addWidget(self.btn_close)
+
+        return header_widget
+
+    def update_hardware_status(self, all_connected, connected, total):
+
+        self._hardware_status = (
+            all_connected,
+            connected,
+            total
+        )
+
+        if all_connected:
+            self.status_pill.setText("● All Connected")
+            background = "#064e3b" if self.dark_mode else "#dcfce7"
+            foreground = "#34d399" if self.dark_mode else "#15803d"
+
+        else:
+            self.status_pill.setText(
+                f"● {connected}/{total} Connected"
+            )
+
+            background = "#7f1d1d" if self.dark_mode else "#fee2e2"
+            foreground = "#fca5a5" if self.dark_mode else "#b91c1c"
+
+        self.status_pill.setStyleSheet(f"""
+            QLabel#statusPill {{
+                background: {background};
+                color: {foreground};
+                border-radius: 10px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+        """)
 
     def toggle_theme(self):
         self.dark_mode = not self.dark_mode
@@ -1714,13 +1282,25 @@ class MainWindow(QMainWindow):
         if self.dark_mode:
             self.theme_toggle.setText("☀")
             self.theme_toggle.setToolTip("Switch to light theme")
+
         else:
             self.theme_toggle.setText("☾")
             self.theme_toggle.setToolTip("Switch to dark theme")
 
         self.create_style(self.dark_mode)
-        self.update_plot_theme()
-        self.system_monitor.set_theme(self.dark_mode)
+        if hasattr(self, "_hardware_status"):
+            self.update_hardware_status(
+                *self._hardware_status
+            )
+        self.settings_page.update_plot_theme(self.dark_mode)
+        self.dashboard_page.set_theme(self.dark_mode)
+        self.control_panel_page.control_panel.set_theme(self.dark_mode)
+
+        # Update embedded ExperimentDashboard
+        dashboard = getattr( self.experiment_page, "dashboard", None )
+
+        if dashboard is not None:
+            dashboard.set_theme(self.dark_mode)
 
     def show_doe_plots(self):
 
@@ -1731,10 +1311,17 @@ class MainWindow(QMainWindow):
         self.doe_plot_dialog.show()
 
     def open_profile_dialog(self):
-        self.create_experiments = ExperimentCreator(self.doe_sampler, self.component_gen, self.exp_par, self.profiles, self.exp_storage)
-        dlg = ExperimentProfileDialog(self.exp_par,self)
+
+        dlg = ExperimentProfileDialog(
+            self.experiment_service.exp_par,
+            self
+        )
+
         if dlg.exec():
-            self.log_message("Experiment profile dialog opened/updated.", "INFO")
+            self.log_message(
+                "Experiment profile dialog opened/updated.",
+                "INFO"
+            )
 
     def define_doe(self):
 
@@ -1743,16 +1330,10 @@ class MainWindow(QMainWindow):
             self.log_message("Environment variables not set. Set environment variables first.","ERROR",)
             return
 
-        self.doe_sampler   = DoESampler()                                             # ...generating the settings for Experiments
-        self.component_gen = ExpComponentGen() # ...functions for experiment section generation
-        self.profiles      = ProfileGenerator(self.exp_par, self.component_gen)       
-        self.exp_storage   = ExperimentProfileStorage(self.as_rate_converter, self.solution_rate_converter, self.solvent_rate_converter, self.cleaning_sol_rate_converter) 
 
         self.define_command()
 
-        self.changed_dimensions_count_label.setText("------⏳ Generating DoE ------")
-        self.changed_dimensions_label.setText(      "------⏳ Generating DoE ------")
-        self.experiment_count_label.setText(        "------⏳ Generating DoE ------")
+        self.settings_page.show_doe_generating()
 
         QApplication.processEvents()
 
@@ -1766,172 +1347,82 @@ class MainWindow(QMainWindow):
             "Full Factorial DoE generation"                    : "FACT"   ,
         }
 
-        SAMPLING_STRATEGY_SELECTED = self.doe_type_combo.currentText()
-        print(SAMPLING_STRATEGY_SELECTED)
+        SAMPLING_STRATEGY_SELECTED = (self.settings_page.get_sampling_strategy())
         strategy_code = dict_for_strategy_selection.get(SAMPLING_STRATEGY_SELECTED, "GREEDY")
 
         # Create experiments generator
-        self.create_experiments = ExperimentCreator(self.doe_sampler,self.component_gen,self.exp_par,self.profiles,self.exp_storage)
-        self.create_experiments.set_doe_settings(self.exp_par, self.initial_exp_count, Type = strategy_code)
+        self.create_experiments = (
+            self.experiment_service.generate_initial_doe(
+                self.CONTROLLER.initial_exp_count,
+                strategy_code
+            )
+        )
 
-        self.create_experiments.generate_experiments()
-        self.initial_exp_count = len(self.create_experiments.exp_storage.data)
+        self.execution.set_experiment_creator(
+            self.create_experiments
+        )
+
+        self.CONTROLLER.exp_num(
+            len(self.create_experiments.exp_storage.data)
+        )
+
         if self.create_experiments.DoE_val.keys():
 
-            displayed_text = f"{',\n'.join(self.create_experiments.DoE_val.keys())}"
-            self.changed_dimensions_count_label.setText(displayed_text)
+            displayed_text = ( f"{',\n'.join(self.create_experiments.DoE_val.keys())}" )
 
-            added_comment = ''
+            added_comment = ""
 
             if strategy_code == "FACT":
-                added_comment = f'*\n(*Full Fact. sample number\nis calculated by the\nnumber of dimensions.)'
+                added_comment = (
+                    "*\n"
+                    "(*Full Fact. sample number\n"
+                    "is calculated by the\n"
+                    "number of dimensions.)"
+                )
 
         else:
 
-            self.changed_dimensions_count_label.setText("0 dimensions are selected.")
-            added_comment = ' identical sample(s)\nhad been taken.'
+            displayed_text = (
+                "0 dimensions are selected."
+            )
 
-        self.experiment_count_label.setText(f"{self.initial_exp_count} {added_comment}")
+            added_comment = (
+                " identical sample(s)\n"
+                "had been taken."
+            )
 
-        self.changed_dimensions_label.setText(f"{self.create_experiments.dimensions}")
+        self.settings_page.set_doe_info( displayed_text, self.create_experiments.dimensions, f"{self.CONTROLLER.initial_exp_count} {added_comment}")
 
-        self.log_message(f"{self.initial_exp_count} samples in the initial DoE.", "INFO")
+        self.log_message(f"{self.CONTROLLER.initial_exp_count} samples in the initial DoE.", "INFO")
         self.log_message( f"{self.create_experiments.dimensions} changed dimensions in the initial DoE.","INFO",)
         self.log_message( f"Sampling strategy selected: {self.create_experiments.TYPE}.", "INFO",)
-        self.reset_plots()
 
-        try:
-            self.create_experiments.plot_sampled_points(fig_2d=self.canvas_2d.figure, fig_3d=self.canvas_3d.figure)
-            dims = getattr(self.create_experiments, "dimensions", 1)
-            min_width = max(350, dims * 85)
-            self.canvas_2d.setMinimumWidth(min_width)
-            self.canvas_2d.draw()
+        self.settings_page.reset_plots(self.dark_mode)
 
-        except Exception as e:
-
-            msg = "With these settings plotting is unavailable"
-            self.canvas_2d.figure.clear()
-            self.canvas_2d.figure.patch.set_facecolor("#111827")  # Dark background
-            ax2d = self.canvas_2d.figure.add_subplot(111)
-            ax2d.set_facecolor("#1f2937")
-            ax2d.axis("off")  # Hide axis borders & ticks
-            ax2d.text(0.5,0.5,msg,color="#ef4444", fontsize=10,fontweight="bold",ha="center",va="center",wrap=True)
-            self.canvas_2d.draw()
-
-        try:
-
-            self.create_experiments.plot_sampled_points(fig_2d=self.canvas_2d.figure, fig_3d=self.canvas_3d.figure)
-            self.canvas_3d.setMinimumSize(300, 300)
-            self.canvas_3d.draw()
-
-        except Exception as e:
-
-            msg = "With these settings plotting is unavailable"
-            self.canvas_3d.figure.clear()
-            self.canvas_3d.figure.patch.set_facecolor("#111827")
-            ax3d = self.canvas_3d.figure.add_subplot(111)
-            ax3d.set_facecolor("#1f2937")
-            ax3d.axis("off")
-            ax3d.text(0.5,0.5,msg,color="#ef4444",fontsize=10,fontweight="bold",ha="center",va="center",wrap=True)
-            self.canvas_3d.draw()
+        self.settings_page.render_doe_plots(self.create_experiments,self.dark_mode)
 
         self.log_message("Initial DoE generated.", "SUCCESS")
-        self.update_plot_theme()
+        self.settings_page.update_plot_theme(self.dark_mode)
 
-        self.generate_button.setStyleSheet("""QPushButton#generate_button {background: #3aa662;
-                                                border: 1px solid #2CFF05;color: white;text-align: center;}
-                                              QPushButton#generate_button:hover {background: #88E788;}""")
+        self.settings_page.set_generate_success()
 
 
-    def log_message(self,message,level="INFO"):
-        if hasattr(self,"dashboard_log"):
-            self.dashboard_log.add_log(message,level)
-
-    def upon_omni_finished(self):
-        self.dashboard_omni.set_status("Inactive")
-        self.dashboard_model.set_status("Running")
-        self.omni_run_count = self.CONTROLLER.omni_count
-        self.omni_count_label.setText(f'{self.omni_run_count} runs')
-
-    def upon_MODEL_finished(self):
-        self.dashboard_omni.set_status("Running")
-        self.dashboard_model.set_status("Inactive")
-        self.MODEL_run_count = self.CONTROLLER.model_count
-        self.model_count_label.setText(f'{self.MODEL_run_count} runs')
-
-    def monitoring_MODEL(self, path, num):
-        if self.CONTROLLER.process_stop:
-          return True
-
-        self.CONTROLLER.current_stage = Stage.MODEL
-        if self.CONTROLLER.if_model_finished(path):
-          self.CONTROLLER.model_count += 1
-          self.log_message(f"Model output no. {self.CONTROLLER.model_count} stored in: {self.CONTROLLER.model_folder}", "INFO")
-
-          self.upon_MODEL_finished()
-          PATH, exp_count = self.CONTROLLER.pathcreator_omni(self.CONTROLLER.model_count, self.CONTROLLER.omni_folder )
-          self.CONTROLLER.current_omni_folder = PATH
-          self.monitor_mode = Stage.OMNI
-          self.monitor_path = PATH
-          self.monitor_num = exp_count
-          self.timer.start(3000)
-          self.log_message(f"MODEL stage finished - iteration no. {self.CONTROLLER.model_count}", "SUCCESS")
-
-          return True
-
-        else:
-
-          return False
-
-    def monitoring_omni(self, path, num):
-        if self.CONTROLLER.process_stop:
-            return True
-        self.CONTROLLER.current_stage = Stage.OMNI
-        if self.CONTROLLER.if_omni_finished(path, num):
-            PATH = self.CONTROLLER.pathcreator_model(self.CONTROLLER.omni_count, self.CONTROLLER.model_folder)
-            self.CONTROLLER.model_folder = PATH
-            self.CONTROLLER.omni_count += 1
-            self.log_message(f"EXP output no. {self.CONTROLLER.omni_count} stored in: {self.CONTROLLER.omni_folder}", "INFO")
-
-            self.upon_omni_finished()
-            self.DATAPROCESSOR.read_data_from = self.CONTROLLER.current_omni_folder
-            self.DATAPROCESSOR.data_reader()
-            self.monitor_mode = Stage.MODEL
-            self.monitor_path = PATH
-            self.timer.start(3000)
-            self.log_message(f"OMNI stage finished - experimental iteration no. {self.CONTROLLER.omni_count}", "SUCCESS")
-
-            return True
-
-        else:
-            return False
-
-    def update_dashboard_status(self):
-        if self.CONTROLLER is None:
-            self.dashboard_omni.setText("OMNI: -")
-            self.dashboard_model.setText("MODEL: -")
-            self.dashboard_runs.setText("Runs: 0 / 0")
-            self.dashboard_current.setText("Stage: None")
-        else:
-            #self.dashboard_omni.setText(f"OMNI runs: {self.omni_run_count}")
-            #self.dashboard_model.setText(f"MODEL runs: {self.MODEL_run_count}")
-            self.dashboard_runs.setText(f"Runs: {self.omni_run_count + self.MODEL_run_count}")
-            self.dashboard_current.setText(f"Stage: {self.CONTROLLER.current_stage.value}")
-
+    def log_message(self, message, level="INFO"):
+        if hasattr(self, "dashboard_page"):
+            self.dashboard_page.add_log(message, level)
 
     def set_buttons_enabled(self, enabled):
         buttons = [
-          self.start_button,
-          self.define_button,
-          self.reset_button,
-          self.quick_start_btn,
-          self.quick_reset_btn,
-          self.generate_button,
-          self.profile_button,
-          self.plot_doe_button,
+            self.dashboard_page.start_button,
+            self.dashboard_page.reset_button,
+            self.quick_start_btn,
+            self.quick_reset_btn,
         ]
+
         for button in buttons:
             button.setEnabled(enabled)
+
+        self.settings_page.set_controls_enabled( enabled)
 
     @Slot(dict)
     def update_system_cards(self, data):
@@ -1942,208 +1433,579 @@ class MainWindow(QMainWindow):
         up   = data["up"  ]
         self.log_message(f"CPU:{cpu}%, RAM:{ram}%, Net Down:{down:.2f} MB/s")
 
-    def monitoring_loop(self):
+    @Slot(dict)
+    def on_omni_completed(self, result):
+        """
+        Update GUI after OMNI completion.
+        """
 
-        self.update_dashboard_status()
-        CURR_EXP_NO = counter(self.monitor_path, self.omni_filename)
+        self.dashboard_page.set_omni_count(
+            result["omni_run_count"]
+        )
 
-        if CURR_EXP_NO != 0 and self.monitor_mode == Stage.OMNI and self.previous_exp_count != CURR_EXP_NO:
-            self.conducted_experiments_count += 1
-            self.log_message(f"Experiment no. {self.conducted_experiments_count} stored in: {self.CONTROLLER.current_omni_folder}", "INFO")
+        self.log_message(
+            f"OMNI stage finished - "
+            f"experimental iteration no. "
+            f"{result['omni_run_count']}. "
+            f"Experiments are stored in: "
+            f"{self.CONTROLLER.current_omni_folder}",
+            "SUCCESS",
+        )
 
-        self.expts_count_label.setText(f'{self.conducted_experiments_count} runs')
+    @Slot(dict)
+    def on_model_completed(self, result):
 
-        if self.CONTROLLER is None:
-          return
+        self.dashboard_page.set_model_count(result["model_run_count"])    
+        self.log_message(f"Model output no. {result['model_run_count']} stored in: {self.CONTROLLER.current_model_folder}","INFO")    
+        self.log_message(f"MODEL stage finished - iteration no. {result['model_run_count']}","SUCCESS")
 
-        if self.process_stop:
-          self.timer.stop()
-          return
+    @Slot(object)
+    def on_stage_changed(self, stage):
 
-        if self.monitor_mode == Stage.OMNI:
-          self.monitoring_omni(self.monitor_path, self.monitor_num)
+        if stage == Stage.OMNI:
 
-        elif self.monitor_mode == Stage.MODEL:
-          self.monitoring_MODEL(self.monitor_path, self.monitor_num)
-        self.previous_exp_count = counter(self.monitor_path, self.omni_filename)
+            self.dashboard_page.set_omni_status("Running")
+            self.dashboard_page.set_model_status("Inactive")
+
+        elif stage == Stage.MODEL:
+
+            self.dashboard_page.set_omni_status("Inactive")
+            self.dashboard_page.set_model_status("Running")
+
+        else:
+            # Stop/Reset handles the individual status labels.
+            self.dashboard_page.set_current_stage("None")
+            return
+
+        self.dashboard_page.set_current_stage(stage.value)
+        self.dashboard_page.set_total_runs( self.execution.omni_run_count + self.execution.model_run_count)
+
 
     def define_command(self):
 
-        self.status_label.clear()
-        self.error_label.clear()
+        self.settings_page.set_message()
 
-        folder_loc = self.exp_path_input.text().strip()
-        folder_MODEL_loc = self.MODEL_path_input.text().strip()
-        no_exp = self.exp_number_input.text().strip()
+        folder_loc, folder_MODEL_loc, no_exp = (
+            self.settings_page.get_environment_inputs()
+        )
 
         if not folder_loc or not folder_MODEL_loc or not no_exp:
+            self.settings_page.set_message(
+                message="Please fill all fields"
+            )
+            return
 
-          self.status_label.setText("Please fill all fields")
-          self.status_label.setVisible(True)
-          return
         if not os.path.isdir(folder_loc):
+            self.settings_page.set_message(
+                error="Invalid OMNI folder"
+            )
+            return
 
-          self.error_label.setText("Invalid OMNI folder")
-          self.error_label.setVisible(True)
-          return
         if not os.path.isdir(folder_MODEL_loc):
-
-          self.error_label.setText("Invalid MODEL folder")
-          self.error_label.setVisible(True)
-          return
+            self.settings_page.set_message(
+                error="Invalid MODEL folder"
+            )
+            return
 
         try:
-          no_exp = int(no_exp)
+            no_exp = int(no_exp)
 
-          if no_exp <= 0:
-
-            raise ValueError
+            if no_exp <= 0:
+                raise ValueError
 
         except ValueError:
+            self.settings_page.set_message(
+                error="Enter a positive integer"
+            )
+            return
 
-          self.error_label.setText("Enter a positive integer")
-          self.error_label.setVisible(True)
-          return
+        self.settings_page.set_message()
 
-        self.status_label.setVisible(False)
-        self.error_label.setVisible(False)
+        self.CONTROLLER = Controller(
+            folder_loc,
+            folder_MODEL_loc,
+            no_exp,
+            self.omni_filename,
+            self.MODEL_filename,
+        )
 
-        self.omni_folder       = folder_loc
-        self.model_folder      = folder_MODEL_loc
-        self.initial_exp_count = no_exp
-        self.CONTROLLER        = Controller(self.omni_folder,self.model_folder,self.initial_exp_count,self.omni_filename,self.MODEL_filename)
+        # Give the coordinator the SAME controller instance.
+        self.execution.set_controller(self.CONTROLLER)
 
-        self.CONTROLLER.exp_num(no_exp)
+        self.settings_page.set_define_success()
 
-        self.variables_set     = True
-        self.define_button.setStyleSheet("""QPushButton#define_button {background: #3aa662;border: 1px solid #2CFF05;color: white;}
-                                            QPushButton#define_button:hover {background: #88E788;}""")
-
-        self.log_message("🌎 Environment variables set.", "SUCCESS")
+        self.log_message(
+            "🌎 Environment variables set.",
+            "SUCCESS",
+        )
 
     def start_command(self):
 
-        if not self.variables_set:
-          QMessageBox.warning(self, "Error", "Please define environment variables first!")
-          self.log_message("Controller not initialized. Define environment variables first.", "ERROR")
-          return
-        if counter(self.omni_folder, self.omni_filename) != 0:
-          QMessageBox.warning(self, "Error", "Files already in experiment folder")
-          self.log_message("Files already in experiment folder.", "ERROR")
-          return
-        if counter(self.model_folder, self.MODEL_filename) != 0:
-          QMessageBox.warning(self, "Error", "Files already in MODEL folder")
-          self.log_message("Files already in MODEL folder.", "ERROR")
-          return
+        if self.CONTROLLER is None:
+            QMessageBox.warning(self,"Error", "Please define environment variables first!")
+            self.log_message("Controller not initialized. Define environment variables first.","ERROR")
+            return
+
+        # Check for existing OMNI experiment directories
+        if any(
+            entry.is_dir()
+            for entry in os.scandir(self.CONTROLLER.omni_folder)
+        ):
+            QMessageBox.warning(
+                self,
+                "Error",
+                "OMNI folder already contains experiment directories"
+            )
+            self.log_message(
+                "OMNI root folder is not empty.",
+                "ERROR"
+            )
+            return
+
+        # Check for existing MODEL directories
+        if any(
+            entry.is_dir()
+            for entry in os.scandir(self.CONTROLLER.model_folder)
+        ):
+            QMessageBox.warning(
+                self,
+                "Error",
+                "MODEL folder already contains experiment directories"
+            )
+            self.log_message(
+                "MODEL root folder is not empty.",
+                "ERROR"
+            )
+            return
 
         if self.create_experiments is None:
-          QMessageBox.warning(self, "Error", "Generate the initial DoE first!")
-          self.log_message("Initial DoE not defined.", "ERROR")
-          return
+            QMessageBox.warning(  self,   "Error",  "Generate the initial DoE first!" )
+            self.log_message( "Initial DoE not defined.",  "ERROR" )
+            return
+
+        if self.CONTROLLER.process_stop:
+            QMessageBox.warning(
+                self,
+                "Reset Required",
+                "The previous execution was stopped. "
+                "Please Reset and configure a new experiment "
+                "before starting again."
+            )
+            return
 
         self.set_buttons_enabled(False)
-        self.CONTROLLER.process_stop = False
-        self.DATAPROCESSOR = DataPlotter(self.omni_filename, self.MODEL_filename)
-        self.monitor_mode = Stage.OMNI
 
-        PATH, exp_count = self.CONTROLLER.pathcreator_omni( self.CONTROLLER.model_count, self.CONTROLLER.omni_folder )
-        self.CONTROLLER.current_omni_folder = PATH
-        self.monitor_path = PATH
-        self.monitor_num = self.initial_exp_count
+        self.DATAPROCESSOR = DataPlotter( self.omni_filename,  self.MODEL_filename )
 
-        self.create_experiments.export_OMNI_expts(self.monitor_path)
+        self.execution.set_data_processor(self.DATAPROCESSOR)
 
-        self.CONTROLLER.start()
-        self.exp_status_box.setStyleSheet("""QGroupBox#exp_status_box {background:  #3aa662;border: 2px solid #2CFF05;border-radius: 12px;}""")
-        self.exp_status_box.setTitle("🟢 Experiment/Modeling monitoring active")
-        self.timer.start(5000)
-        self.log_message("Experiment started", "INFO")
-        self.dashboard_omni.set_status("Running")
-        self.dashboard_model.set_status("Inactive")
+        self.execution.start_execution(
+            omni_root=self.CONTROLLER.omni_folder,
+            initial_exp_count=self.CONTROLLER.initial_exp_count
+        )
+
+        self.dashboard_page.set_monitoring_state( True )
+
+        self.log_message( "Experiment started", "INFO", )
+
+
+
         self.switch_page(0)
 
     def stop_command(self):
-        if self.CONTROLLER:
-          self.CONTROLLER.stop()
-          self.timer.stop()
-          self.set_buttons_enabled(True)
-          self.dashboard_omni.set_status("Stopped")
-          self.dashboard_model.set_status("Stopped")
-          self.log_message("Experiment process stopped by user.", "WARNING")
-          self.exp_status_box.setStyleSheet("""QGroupBox#exp_status_box {background:  #ff5b5b;border: 2px solid #FF3131;border-radius: 12px;}""")
-          self.exp_status_box.setTitle("🔴 Experiment/Modeling monitoring stopped")
 
-    def reset_plots(self):
+        if self.CONTROLLER is None:
+            return
 
-        if self.dark_mode:
-            BG_COLOR = "#111827"  # Match your dark UI container hex color
-        else:
-            BG_COLOR = "white"
+        self.execution.stop_execution()
 
-        fig_2d = self.canvas_2d.figure
-        fig_3d = self.canvas_3d.figure
+        # ----------------------------------------------------------
+        # GUI ONLY
+        # ----------------------------------------------------------
 
-        if fig_2d:
-            fig_2d.clear()
-            fig_2d.patch.set_facecolor(BG_COLOR)  # Solid fill kills artifacts
+        self.set_buttons_enabled(True)
+
+        self.dashboard_page.set_omni_status("Stopped")
+
+        self.dashboard_page.set_model_status("Stopped")
+
+        self.dashboard_page.set_monitoring_state(False)
+
+        self.log_message( "Experiment process stopped by user.", "WARNING")
 
 
-        if fig_3d:
-            fig_3d.clear()
-            fig_3d.patch.set_facecolor(BG_COLOR)  # Solid fill kills artifacts
-
-        self.canvas_2d.draw()
-        self.canvas_3d.draw() 
 
     def reset_command(self):
-        if self.CONTROLLER:
-          self.CONTROLLER.stop()    
-        self.exp_profile_parameters = ExperimentProfileParameters()  
 
-        self.create_experiments          = None
+        # ----------------------------------------------------------
+        # BACKEND TEARDOWN
+        # ----------------------------------------------------------
 
-        self.variables_set               = False
-        self.CONTROLLER                  = None
-        self.DATAPROCESSOR               = None
-        self.conducted_experiments_count = 0
-        self.previous_exp_count          = 0
-        self.MODEL_run_count             = 0
-        self.omni_run_count              = 0
+        self.execution.reset()
 
-        self.exp_path_input.clear()
-        self.MODEL_path_input.clear()
-        self.exp_number_input.clear()
-        self.dashboard_omni.set_status("Inactive")
-        self.dashboard_model.set_status("Inactive")
-        self.omni_count_label.setText( "0 OMNI  runs")
-        self.model_count_label.setText("0 MODEL runs")
-        self.expts_count_label.setText("0 EXPTS runs")
+        self.experiment_service.reset()
 
-        self.changed_dimensions_count_label.setText("")
-        self.changed_dimensions_label.setText("")
-        self.experiment_count_label.setText("")
+        # ----------------------------------------------------------
+        # MAIN WINDOW REFERENCES
+        # ----------------------------------------------------------
 
-        self.generate_button.setStyleSheet("")
-        self.define_button.setStyleSheet("")
-        self.variables_label.setText("")
-        self.exp_status_box.setTitle("📈 Progress Track")
-        self.exp_status_box.setStyleSheet("")
-        self.reset_plots()
-        self.exp_par = ExperimentProfileParameters()   
+        self.create_experiments = None
+        self.CONTROLLER = None
+        self.DATAPROCESSOR = None
 
-        try:
-            self.status_label.clear()
-            self.error_label.clear()
-        except: 
-            print('')
 
-        while self.plot_container_layout.count():
-            item = self.plot_container_layout.takeAt(0)
+        # ----------------------------------------------------------
+        # GUI RESET
+        # ----------------------------------------------------------
+
+        self.dashboard_page.reset_status()
+
+        self.settings_page.reset_ui()
+
+        self.settings_page.reset_plots(self.dark_mode)
+
+        while self.plots_page.plot_container_layout.count():
+            item = (self.plots_page.plot_container_layout.takeAt(0))
+
             widget = item.widget()
-            if widget and widget not in (self.canvas_2d, self.canvas_3d):
+
+            if widget:
                 widget.deleteLater()
 
-        self.log_message("Reset settings", "SUCCESS")
+        self.log_message("Reset settings","SUCCESS",)
+
+    def _build_page_stack(self):
+        self.stack = QStackedWidget()
+
+        # ----------------------------------------------------------
+        # CREATE PAGES
+        # ----------------------------------------------------------
+
+        self.dashboard_page = DashboardPage(dark_mode=self.dark_mode,spacing_1=self.SPACING_1,spacing_2=self.SPACING_2,parent=self)
+
+        self.experiment_page    = ExperimentPage( parent=self)    
+        self.plots_page         = PlotsPage(parent=self)
+        self.brain_page         = BrainPage(parent=self)    
+        self.modeling_page      = ModelingPage(parent=self)    
+        self.control_panel_page = ControlPanelPage(parent=self)
+        self.control_panel_page.control_panel.set_theme(
+            self.dark_mode
+        )
+        self.control_panel = (self.control_panel_page.control_panel)
+        self.control_panel.dashboard_host = self.embed_experiment_dashboard
+
+        self.hardware = (self.control_panel_page.hardware)
+
+        self.settings_page = SettingsPage(parent=self)
+
+        # ----------------------------------------------------------
+        # ALLOW PAGES TO SHRINK
+        # ----------------------------------------------------------
+
+        pages = [
+            self.dashboard_page,
+            self.experiment_page,
+            self.plots_page,
+            self.brain_page,
+            self.modeling_page,
+            self.control_panel_page,
+            self.settings_page,
+        ]
+
+        for page in pages:
+            page.setMinimumWidth(0)
+            page.setMinimumHeight(0)
+            self.stack.addWidget(page)
+
+        self.stack.setMinimumWidth(0)
+        self.stack.setMinimumHeight(0)
+
+        return self.stack
+
+    def embed_experiment_dashboard(self, dashboard):
+
+        dashboard.set_theme(self.dark_mode)
+
+        self.experiment_page.attach_dashboard(dashboard)
+
+        self.switch_page(1)
+
+    def end_experiment_session(self):
+        """
+        End the embedded ExperimentDashboard session safely.
+
+        The dashboard remains attached if its experiment
+        worker cannot be stopped.
+        """
+
+        page = self.experiment_page
+        dashboard = page.dashboard
+
+        if dashboard is None:
+            return
+
+        panel = self.control_panel_page.control_panel
+
+        print("[MAIN WINDOW] Ending experiment session...")
+
+        # --------------------------------------------------
+        # 1. Stop worker and close dashboard
+        # --------------------------------------------------
+
+        try:
+            closed = dashboard.close()
+
+        except RuntimeError as error:
+            QMessageBox.warning(
+                self,
+                "Session Cleanup Error",
+                f"Could not close ExperimentDashboard:\n\n{error}"
+            )
+            return
+
+        if not closed:
+            QMessageBox.warning(
+                self,
+                "Experiment Still Running",
+                "The ExperimentDashboard could not finish "
+                "its shutdown.\n\n"
+                "The session remains open. "
+                "Wait for the worker to stop and try again."
+            )
+            return
+
+        # --------------------------------------------------
+        # 2. Verify experiment ownership has been released
+        # --------------------------------------------------
+
+        manager = panel.hardware_manager
+
+        try:
+            manager.require_idle()
+
+        except HardwareBusyError as error:
+            QMessageBox.warning(
+                self,
+                "Hardware Still Busy",
+                "The experiment dashboard closed, but "
+                "hardware ownership is still active.\n\n"
+                f"{error}"
+            )
+            return
+
+        # --------------------------------------------------
+        # 3. Remove dashboard from Experiment page
+        # --------------------------------------------------
+
+        page.detach_dashboard()
+
+        if panel.experiment_window is dashboard:
+            panel.experiment_window = None
+
+        print(
+            "[MAIN WINDOW] Experiment session ended. "
+            "Hardware connections remain available "
+            "to Control Panel."
+        )
+
+    def _connect_page_signals(self):
+
+        # Dashboard
+        self.dashboard_page.start_requested.connect(self.start_command)
+
+        self.dashboard_page.stop_requested.connect(self.stop_command)
+
+        self.dashboard_page.reset_requested.connect(self.reset_command)
+
+        self.dashboard_page.plot_requested.connect(self.plot_expts)
+
+        # Settings
+        self.settings_page.define_requested.connect(self.define_command)
+
+        self.settings_page.generate_requested.connect(self.define_doe)
+
+        self.settings_page.profile_requested.connect(self.open_profile_dialog)
+
+        self.settings_page.plot_doe_requested.connect(self.show_doe_plots)
+
+        # Experiment
+        self.experiment_page.end_session_button.clicked.connect(self.end_experiment_session)
+
+        # control panel
+        self.control_panel.connection_status_changed.connect(
+            self.update_hardware_status
+        )
+
+        # Initialize from the existing device state.
+        panel = self.control_panel
+
+        states = [
+            widget.is_connected()
+            for widget in panel.device_widgets.values()
+        ]
+
+        self.update_hardware_status(
+            bool(states) and all(states),
+            sum(states),
+            len(states)
+        )
+
+    def _build_sidebar(self):
+        sidebar_widget = QWidget()
+        sidebar_widget.setObjectName("sidebar")
+
+        sidebar_widget.setMinimumWidth(218)
+        sidebar_widget.setMaximumWidth(218)
+
+        sidebar_layout = QVBoxLayout(sidebar_widget)
+        sidebar_layout.setContentsMargins(12, 12, 12, 12)
+        sidebar_layout.setSpacing(self.SPACING_2)
+
+        # ----------------------------------------------------------
+        # NAVIGATION
+        # ----------------------------------------------------------
+
+        self.btn_dashboard = QPushButton("🏠  Dashboard")
+        self.btn_experiment = QPushButton("🧪  Experiment")
+        self.btn_plots = QPushButton("📊  Data & Plots")
+        self.btn_brain = QPushButton("🧠  Brain")
+        self.btn_modeling = QPushButton("📐  Modeling")
+        self.btn_control_panel = QPushButton("🎛  Control Panel")
+        self.btn_settings = QPushButton("⚙️  Settings")
+
+        self.nav_buttons = [
+            self.btn_dashboard,
+            self.btn_experiment,
+            self.btn_plots,
+            self.btn_brain,
+            self.btn_modeling,
+            self.btn_control_panel,
+            self.btn_settings,
+        ]
+
+        for btn in self.nav_buttons:
+            btn.setProperty("sidebarCompact", True)
+            btn.setCheckable(True)
+            btn.setFixedHeight(36)
+            sidebar_layout.addWidget(btn)
+
+        sidebar_layout.addSpacing(8)
+
+        # ----------------------------------------------------------
+        # QUICK ACTIONS
+        # ----------------------------------------------------------
+
+        quick_label = QLabel("Quick Actions")
+        quick_label.setStyleSheet(
+            "color: #64748b;"
+            "font-size: 11px;"
+            "font-weight: bold;"
+            "background: transparent;"
+        )
+
+        sidebar_layout.addWidget(quick_label)
+
+        self.quick_start_btn = QPushButton("▶ Start")
+        self.quick_start_btn.setObjectName("start_button")
+
+        self.quick_stop_btn = QPushButton("⏹ Stop")
+        self.quick_stop_btn.setObjectName("stop_button")
+
+        self.quick_reset_btn = QPushButton("🔄 Reset")
+        self.quick_reset_btn.setObjectName("quick_reset_button")
+
+        self.quick_quit_btn = QPushButton("🔐 Quit")
+        self.quick_quit_btn.setObjectName("quit_button")
+
+        quick_actions = [
+            self.quick_start_btn,
+            self.quick_stop_btn,
+            self.quick_reset_btn,
+            self.quick_quit_btn,
+        ]
+
+        for btn in quick_actions:
+            btn.setProperty("sidebarCompact", True)
+            btn.setFixedHeight(36)
+            sidebar_layout.addWidget(btn)
+
+        self.quick_start_btn.clicked.connect(
+            self.start_command
+        )
+
+        self.quick_stop_btn.clicked.connect(
+            self.stop_command
+        )
+
+        self.quick_reset_btn.clicked.connect(
+            self.reset_command
+        )
+
+        self.quick_quit_btn.clicked.connect(
+            self.close
+        )
+
+        # ----------------------------------------------------------
+        # BOTTOM ICON
+        # ----------------------------------------------------------
+
+        self.bottom_icon_label = QLabel()
+
+        self.bottom_icon_label.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        self.bottom_icon_label.setStyleSheet(
+            "background: transparent;"
+        )
+
+        if ICON_PATH.exists():
+            pixmap = QPixmap(str(ICON_PATH))
+
+            scaled_pixmap = pixmap.scaledToWidth(
+                120,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+            self.bottom_icon_label.setPixmap(
+                scaled_pixmap
+            )
+
+        sidebar_layout.addWidget(
+            self.bottom_icon_label
+        )
+
+        sidebar_layout.addStretch()
+
+        # ----------------------------------------------------------
+        # SCROLLABLE SIDEBAR
+        # ----------------------------------------------------------
+
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+
+        sidebar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        sidebar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setFixedWidth(220)
+
+        sidebar_scroll.setWidget(sidebar_widget)
+
+        return sidebar_scroll
+
+    def _connect_navigation(self):
+        for index, button in enumerate(self.nav_buttons):
+            button.clicked.connect(
+                lambda checked=False, i=index: self.switch_page(i)
+            )
+
+        self.switch_page(0)
 
     def plot_expts(self):
         if self.DATAPROCESSOR is None:
@@ -2169,8 +2031,8 @@ class MainWindow(QMainWindow):
             self.log_message("Data plotted successfully.", "SUCCESS")
 
         # Remove existing plot
-        while self.plot_container_layout.count():
-            item = self.plot_container_layout.takeAt(0)
+        while self.plots_page.plot_container_layout.count():
+            item = self.plots_page.plot_container_layout.takeAt(0)
             widget = item.widget()
 
             if widget:
@@ -2187,13 +2049,12 @@ class MainWindow(QMainWindow):
         self.canvas_embedded.setMinimumSize(800, min_height)
         self.canvas_embedded.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed) # Fixed height allows QScrollArea to handle overflow)
 
-        self.canvas_embedded.setMinimumSize(0, 0)
 
         # Transparent Qt background
         self.canvas_embedded.setStyleSheet("background: transparent;")
 
         # Add to layout
-        self.plot_container_layout.addWidget(self.canvas_embedded,1)
+        self.plots_page.plot_container_layout.addWidget(self.canvas_embedded,1)
 
         # Draw after adding to layout
         self.canvas_embedded.draw_idle()
@@ -2201,10 +2062,54 @@ class MainWindow(QMainWindow):
         self.switch_page(2)
 
     def closeEvent(self, event):
+
+        # --------------------------------------------------
+        # 0. Block MainWindow close while session is attached
+        # --------------------------------------------------
+
+        if (
+            hasattr(self, "experiment_page")
+            and self.experiment_page.dashboard is not None
+        ):
+
+            QMessageBox.warning(
+                self,
+                "Experiment Session Open",
+                "An experiment session is still open.\n\n"
+                "Go to the Experiment page and select "
+                "'End Session' before closing MainWindow."
+            )
+
+            event.ignore()
+            return
+
+        # --------------------------------------------------
+        # 1. CONTROL PANEL / HARDWARE CLEANUP
+        # --------------------------------------------------
+
+        if hasattr(self, "control_panel_page"):
+
+            control_panel = (
+                self.control_panel_page.control_panel
+            )
+
+            if not control_panel.prepare_shutdown():
+
+                event.ignore()
+                return
+
+        # --------------------------------------------------
+        # 2. Existing MainWindow cleanup
+        # --------------------------------------------------
+
         self.reset_command()
-        if hasattr(self, "system_monitor"):
-            self.system_monitor.closeEvent(event)
-            super().closeEvent(event)
+
+        if hasattr(self, "dashboard_page"):
+            self.dashboard_page.system_monitor.closeEvent(event)
+
+        super().closeEvent(event)
+
+
 
 # ========================================================== #
 #                       MAIN                                 #
@@ -2224,8 +2129,6 @@ try:
 except NameError:
     BASE_DIR = Path.cwd()
 
-LOGO_PATH = (BASE_DIR / "assets" / "LOGO.png").resolve()
-
 if __name__ == "__main__":
     app = QApplication.instance()
     if app is None:
@@ -2241,6 +2144,7 @@ if __name__ == "__main__":
     # 3. Explicitly apply icon directly to MainWindow instance
     if LOGO_PATH.exists():
         window.setWindowIcon(QIcon(str(LOGO_PATH)))
+
 
     window.show()
     app.exec()
