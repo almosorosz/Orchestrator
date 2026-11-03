@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-PI_DIR = Path(__file__).resolve().parents[1] / "brain/pi"
+PI_DIR = Path(__file__).resolve().parents[1] / "sentinel/pi"
 spec = importlib.util.spec_from_file_location("sentinel_autostart_test", PI_DIR / "install_autostart.py")
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)

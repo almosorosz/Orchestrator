@@ -22,9 +22,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from werkzeug.serving import make_server, WSGIRequestHandler
 
-from gui.pages.brain_page import BrainPage
+from gui.pages.sentinel_page import SentinelPage
 from gui.sentinel_archive_ui import ArchiveSettingsDialog
-from test_brain_page import LocalOnlyRequests
+from test_sentinel_page import LocalOnlyRequests
 from test_sentinel_history import reading, HistoryStore, PI_DIR, utc_timestamp
 
 
@@ -69,7 +69,7 @@ class HistoryUITests(unittest.TestCase):
         (self.root / "cloud").mkdir()
         self.settings.setValue("sentinel/archive/cloud_enabled", True)
         self.settings.setValue("sentinel/archive/cloud_directory", str(self.root / "cloud"))
-        self.page = BrainPage(settings=self.settings)
+        self.page = SentinelPage(settings=self.settings)
         self.page._auto_started = True
         self.page.resize(1200, 900)
         self.page.show()
@@ -78,7 +78,7 @@ class HistoryUITests(unittest.TestCase):
         self.interceptor = LocalOnlyRequests(self.page)
         self.page._profile.setUrlRequestInterceptor(self.interceptor)
         self.page.address_input.setText(self.url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait(lambda: self.page._page_loaded)
         self.js('openView("mod3")')
         self.wait_js('logState.pi && logState.desktop && logState.desktop.pc === "Saved" && document.getElementById("logRows").children.length > 0')
@@ -124,7 +124,7 @@ class HistoryUITests(unittest.TestCase):
         self.wait_js('!logState.controller && logState.rows.length === 1 && logState.rows[0].type === "thermal"')
         self.assertIn("Center 25", self.js('document.getElementById("logRows").textContent'))
         destination = self.root / "selected-thermal.csv"
-        with patch("gui.pages.brain_page.QFileDialog.getSaveFileName", return_value=(str(destination), "")):
+        with patch("gui.pages.sentinel_page.QFileDialog.getSaveFileName", return_value=(str(destination), "")):
             self.js('document.getElementById("logExport").click()')
             self.wait(lambda: self.page.download_label.text().startswith("Saved:"))
         with destination.open(encoding="utf-8-sig", newline="") as source:
@@ -165,17 +165,17 @@ class HistoryUITests(unittest.TestCase):
         dataset = self.store.status()["dataset_id"]
         replica = ArchiveReplica(self.root / "pc", dataset)
         original = replica.cursor()
-        self.page.disconnect_from_brain()
+        self.page.disconnect_from_sentinel()
         self.store.capture([reading(value=31, level="alert", detail="31.00 °C")])
         self.assertEqual(replica.cursor(), original)
         self.page.shutdown()
         self.page.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.app.processEvents()
-        self.page = BrainPage(settings=self.settings)
+        self.page = SentinelPage(settings=self.settings)
         self.page._auto_started = True
         self.page.address_input.setText(self.url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait(lambda: self.page._archive.state()["pc"] == "Saved")
         self.assertEqual(replica.cursor(), self.store.status()["latest_seq"])
         with replica.connection() as con:

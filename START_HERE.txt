@@ -4,10 +4,10 @@ Extract this complete project into your PC project folder. New modules in gui/ a
 Run in the existing PC environment:
     python MAIN_WINDOW.py
 Standalone Sentinel:
-    python -m gui.pages.brain_page
+    python -m gui.pages.sentinel_page
 No new third-party dependencies are required beyond the existing full PySide6 installation.
 
-Update the Pi with the separate Sentinel-Pi-History.zip package, or the files in brain/pi/.
+Update the Pi with the separate Sentinel-Pi-History.zip package, or the files in sentinel/pi/.
 Connect Sentinel using your saved Ethernet/Wi-Fi profile, then open History.
 PC backup is enabled by default, saving every 60 seconds to Documents/Sentinel Logs.
 Choose another location or disable it using Log settings or History > PC > Configure.
@@ -23,5 +23,5 @@ Pi records locally even when the PC is disconnected. Preserve Pi databases, conf
 Pi manual launch: python app.py (TC001 is detected automatically).
 Optional Pi boot setup is retained; it is not required.
 
-Complete update and usage instructions: brain/pi/HISTORY.md
-General setup: brain/README.md
+Complete update and usage instructions: sentinel/pi/HISTORY.md
+General setup: sentinel/README.md

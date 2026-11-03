@@ -12,7 +12,7 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-PI_DIR = Path(__file__).resolve().parents[1] / "brain/pi"
+PI_DIR = Path(__file__).resolve().parents[1] / "sentinel/pi"
 sys.path.insert(0, str(PI_DIR))
 from tc001_reader import TC001Reader, decode_tc001_frame, render_thermal_jpeg, video_devices
 

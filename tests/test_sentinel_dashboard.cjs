@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-const html = fs.readFileSync(path.join(__dirname, '../brain/pi/fumehood_dashboard.html'), 'utf8');
+const html = fs.readFileSync(path.join(__dirname, '../sentinel/pi/fumehood_dashboard.html'), 'utf8');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 new vm.Script(script); // Check the complete dashboard script, not only the harnessed functions.
 assert(!script.includes('demoSensors'));

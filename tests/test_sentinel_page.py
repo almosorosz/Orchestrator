@@ -19,10 +19,10 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 
-from gui.pages import brain_page
+from gui.pages import sentinel_page
 
 
-class BrainHandler(BaseHTTPRequestHandler):
+class SentinelHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
@@ -33,7 +33,7 @@ class BrainHandler(BaseHTTPRequestHandler):
             if mode == "slow":
                 time.sleep(0.6)
             if mode == "error":
-                status, content_type, body = 503, "text/plain", b"Brain unavailable"
+                status, content_type, body = 503, "text/plain", b"Sentinel unavailable"
             elif mode == "invalid":
                 status, content_type, body = 200, "application/json", b'{"wrong":true}'
             elif mode == "empty":
@@ -76,7 +76,7 @@ class LocalOnlyRequests(QWebEngineUrlRequestInterceptor):
             info.block(True)
 
 
-class BrainPageTests(unittest.TestCase):
+class SentinelPageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -87,7 +87,7 @@ class BrainPageTests(unittest.TestCase):
             families = QFontDatabase.applicationFontFamilies(font_id)
             if families:
                 cls.app.setFont(QFont(families[0], 10))
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), BrainHandler)
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), SentinelHandler)
         cls.server.daemon_threads = True
         cls.server.mode = "ok"
         cls.server.dashboard = None
@@ -95,7 +95,7 @@ class BrainPageTests(unittest.TestCase):
         cls.server_thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.server_thread.start()
         cls.url = f"http://127.0.0.1:{cls.server.server_port}"
-        cls.wifi_server = ThreadingHTTPServer(("127.0.0.1", 0), BrainHandler)
+        cls.wifi_server = ThreadingHTTPServer(("127.0.0.1", 0), SentinelHandler)
         cls.wifi_server.daemon_threads = True
         cls.wifi_server.mode = "ok"
         cls.wifi_server.dashboard = None
@@ -114,9 +114,9 @@ class BrainPageTests(unittest.TestCase):
         cls.wifi_thread.join(timeout=2)
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="brain-client-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="sentinel-client-test-")
         self.settings = QSettings(str(Path(self.temp.name) / "settings.ini"), QSettings.Format.IniFormat)
-        self.page = brain_page.BrainPage(settings=self.settings)
+        self.page = sentinel_page.SentinelPage(settings=self.settings)
         self.page.POLL_INTERVAL_MS = 100
         self.page.REQUEST_TIMEOUT_MS = 150
         self.page._timer.setInterval(100)
@@ -147,7 +147,7 @@ class BrainPageTests(unittest.TestCase):
 
     def connect(self):
         self.page.address_input.setText(self.url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
 
     def select_wifi(self):
         self.page.connection_combo.setCurrentIndex(self.page.connection_combo.findData("wifi"))
@@ -156,49 +156,68 @@ class BrainPageTests(unittest.TestCase):
         self.page.shutdown()
         self.page.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        self.page = brain_page.BrainPage(settings=self.settings)
+        self.page = sentinel_page.SentinelPage(settings=self.settings)
         self.page.REQUEST_TIMEOUT_MS = 150
         self.page._timer.setInterval(100)
 
     def test_address_validation(self):
-        self.assertEqual(brain_page.normalize_brain_url(" 192.168.77.2:8000/ "), brain_page.DEFAULT_BRAIN_URL)
-        self.assertEqual(brain_page.normalize_brain_url("https://brain.local:8443"), "https://brain.local:8443")
-        for invalid in ("", "file:///tmp/dashboard.html", "ftp://brain", "http://brain/api/sensors", "http://user:pass@brain", "http://brain?q=1", "http://brain:0"):
+        self.assertEqual(sentinel_page.normalize_sentinel_url(" 192.168.77.2:8000/ "), sentinel_page.DEFAULT_SENTINEL_URL)
+        self.assertEqual(sentinel_page.normalize_sentinel_url("https://sentinel.local:8443"), "https://sentinel.local:8443")
+        for invalid in ("", "file:///tmp/dashboard.html", "ftp://sentinel", "http://sentinel/api/sensors", "http://user:pass@sentinel", "http://sentinel?q=1", "http://sentinel:0"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
-                brain_page.normalize_brain_url(invalid)
+                sentinel_page.normalize_sentinel_url(invalid)
 
     def test_legacy_ethernet_address_survives_upgrade(self):
-        self.settings.setValue("brain/url", self.url)
+        self.settings.setValue("sentinel/url", self.url)
         self.reopen_page()
         self.assertEqual(self.page.connection_combo.currentData(), "ethernet")
         self.assertEqual(self.page.address_input.text(), self.url)
         self.page.show()
         self.wait_until(lambda: self.page._page_loaded)
-        self.assertEqual(self.settings.value("brain/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
+
+    def test_previous_name_settings_migrate_without_overwriting_new_values(self):
+        old_values = {
+            "url": self.wifi_url,
+            "connection_mode": "wifi",
+            "ethernet_url": self.url,
+            "wifi_url": self.wifi_url,
+            "download_directory": self.temp.name,
+        }
+        for key, value in old_values.items():
+            self.settings.setValue(f"brain/{key}", value)
+        self.settings.setValue("sentinel/download_directory", "new-download-folder")
+        self.reopen_page()
+        self.assertEqual(self.page.connection_combo.currentData(), "wifi")
+        self.assertEqual(self.page.address_input.text(), self.wifi_url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/download_directory"), "new-download-folder")
+        for key in old_values:
+            self.assertFalse(self.settings.contains(f"brain/{key}"))
 
     def test_wifi_requires_its_own_address(self):
         self.connect()
         self.wait_until(lambda: self.page._page_loaded)
         self.select_wifi()
         self.assertEqual(self.page.address_input.text(), "")
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.assertFalse(self.page._enabled)
         self.assertFalse(self.page._timer.isActive())
         self.assertIsNone(self.page._reply)
         self.assertIn("Enter the Pi", self.page.address_error_label.text())
-        self.assertEqual(self.settings.value("brain/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
 
     def test_connecting_wifi_first_after_upgrade_keeps_custom_ethernet(self):
-        self.settings.setValue("brain/url", self.url)
+        self.settings.setValue("sentinel/url", self.url)
         self.reopen_page()
         self.select_wifi()
         self.page.address_input.setText(self.wifi_url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page._page_loaded)
         self.reopen_page()
         self.page.connection_combo.setCurrentIndex(0)
         self.assertEqual(self.page.address_input.text(), self.url)
-        self.assertEqual(self.settings.value("brain/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
 
     def test_profiles_save_separate_targets_and_restore_last_connection(self):
         self.connect()
@@ -207,13 +226,13 @@ class BrainPageTests(unittest.TestCase):
         self.assertFalse(self.page._online)
         self.assertIs(self.page.content.currentWidget(), self.page.message_label)
         self.page.address_input.setText(self.wifi_url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page._page_loaded)
         self.assertEqual(self.page.connection_combo.currentData(), "wifi")
         self.assertIn("/api/sensors", self.wifi_server.paths)
         self.assertIn("/", self.wifi_server.paths)
-        self.assertEqual(self.settings.value("brain/ethernet_url"), self.url)
-        self.assertEqual(self.settings.value("brain/wifi_url"), self.wifi_url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/wifi_url"), self.wifi_url)
         self.page.connection_combo.setCurrentIndex(0)
         self.assertEqual(self.page.address_input.text(), self.url)
         self.assertFalse(self.page._enabled)
@@ -227,18 +246,18 @@ class BrainPageTests(unittest.TestCase):
     def test_wifi_first_does_not_overwrite_ethernet_default(self):
         self.select_wifi()
         self.page.address_input.setText(self.wifi_url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page._page_loaded)
         self.reopen_page()
         self.page.connection_combo.setCurrentIndex(0)
-        self.assertEqual(self.page.address_input.text(), brain_page.DEFAULT_BRAIN_URL)
+        self.assertEqual(self.page.address_input.text(), sentinel_page.DEFAULT_SENTINEL_URL)
 
     def test_mode_change_cancels_old_request_before_connecting_wifi(self):
         self.server.mode = "slow"
         self.connect()
         self.select_wifi()
         self.page.address_input.setText(self.wifi_url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page._page_loaded)
         # Keep yielding to the Python HTTP-server threads while late replies settle.
         deadline = time.monotonic() + 0.7
@@ -252,7 +271,7 @@ class BrainPageTests(unittest.TestCase):
         self.wait_until(lambda: self.page._page_loaded)
         self.select_wifi()
         self.page.address_input.setText(self.wifi_url)
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page._page_loaded)
         self.wifi_server.mode = "error"
         self.wait_until(lambda: not self.page._online)
@@ -260,7 +279,7 @@ class BrainPageTests(unittest.TestCase):
         self.assertIn(self.wifi_url, self.page.message_label.text())
         self.wifi_server.mode = "ok"
         self.wait_until(lambda: self.page._page_loaded)
-        self.assertEqual(self.settings.value("brain/ethernet_url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/ethernet_url"), self.url)
         self.assertEqual(self.page._base_url, self.wifi_url)
 
     def test_connect_loads_real_webview_and_saves_address(self):
@@ -268,7 +287,7 @@ class BrainPageTests(unittest.TestCase):
         self.wait_until(lambda: self.page._page_loaded)
         self.assertTrue(self.page._online)
         self.assertIs(self.page.content.currentWidget(), self.page._browser)
-        self.assertEqual(self.settings.value("brain/url"), self.url)
+        self.assertEqual(self.settings.value("sentinel/url"), self.url)
         self.assertIn("1 sensor", self.page.status_label.text())
         self.assertNotEqual(self.page.last_seen_label.text(), "Updated —")
         self.assertIn("/api/sensors", self.server.paths)
@@ -312,7 +331,7 @@ class BrainPageTests(unittest.TestCase):
     def test_manual_disconnect_stops_reconnection_and_discards_pending_reply(self):
         self.server.mode = "slow"
         self.connect()
-        self.page.disconnect_from_brain()
+        self.page.disconnect_from_sentinel()
         self.server.mode = "ok"
         QTest.qWait(700)
         self.assertFalse(self.page._online)
@@ -324,14 +343,14 @@ class BrainPageTests(unittest.TestCase):
         self.server.mode = "slow"
         self.connect()
         self.page.address_input.setText("http://127.0.0.1:1")
-        self.page.connect_to_brain()
+        self.page.connect_to_sentinel()
         self.wait_until(lambda: self.page.status_label.text().startswith("Offline"))
         QTest.qWait(700)
         self.assertFalse(self.page._online)
         self.assertIsNone(self.page._browser)
 
     def test_saved_address_is_reconnected_on_first_show(self):
-        self.settings.setValue("brain/url", self.url)
+        self.settings.setValue("sentinel/url", self.url)
         self.page.address_input.setText(self.url)
         self.page.show()
         self.wait_until(lambda: self.page._page_loaded)
@@ -339,11 +358,11 @@ class BrainPageTests(unittest.TestCase):
         self.page.hide()
 
     def test_missing_webengine_preserves_external_browser_option(self):
-        with patch.object(brain_page, "QWebEngineView", None):
+        with patch.object(sentinel_page, "QWebEngineView", None):
             self.connect()
             self.wait_until(lambda: self.page._online)
             self.assertIn("Web view unavailable", self.page.message_label.text())
-            with patch.object(brain_page.QDesktopServices, "openUrl", return_value=True) as opened:
+            with patch.object(sentinel_page.QDesktopServices, "openUrl", return_value=True) as opened:
                 self.page.open_in_browser()
                 opened.assert_called_once_with(QUrl(self.url + "/"))
 
@@ -351,22 +370,22 @@ class BrainPageTests(unittest.TestCase):
         self.connect()
         self.wait_until(lambda: self.page._page_loaded)
         destination = Path(self.temp.name) / "events.csv"
-        with patch.object(brain_page.QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
+        with patch.object(sentinel_page.QFileDialog, "getSaveFileName", return_value=(str(destination), "")):
             self.page._browser.page().download(QUrl(self.url + "/api/eventlog.csv"))
             self.wait_until(lambda: self.page.download_label.text().startswith("Saved:"))
         self.assertIn("probe-1,warn", destination.read_text())
         self.assertEqual(len(self.page._downloads), 0)
         destination.unlink()
-        with patch.object(brain_page.QFileDialog, "getSaveFileName", return_value=("", "")) as dialog:
+        with patch.object(sentinel_page.QFileDialog, "getSaveFileName", return_value=("", "")) as dialog:
             self.page._browser.page().download(QUrl(self.url + "/api/eventlog.csv"))
             self.wait_until(lambda: dialog.called)
         QTest.qWait(100)
         self.assertFalse(destination.exists())
 
     def test_real_pi_dashboard_runs_inside_desktop_page(self):
-        source = Path(__file__).resolve().parents[1] / "brain/pi/fumehood_dashboard.html"
+        source = Path(__file__).resolve().parents[1] / "sentinel/pi/fumehood_dashboard.html"
         self.server.dashboard = source.read_bytes()
-        if os.environ.get("BRAIN_PREVIEW_CONNECTION") == "wifi":
+        if os.environ.get("SENTINEL_PREVIEW_CONNECTION") == "wifi":
             self.select_wifi()
         self.page._auto_started = True
         self.page.REQUEST_TIMEOUT_MS = 4000
@@ -393,7 +412,7 @@ class BrainPageTests(unittest.TestCase):
         self.assertFalse(data["lost"])
         self.assertIn("24.50", data["tiles"])
         # Optionally save a rendered preview of the actual page for visual inspection.
-        preview = os.environ.get("BRAIN_PREVIEW_OUTPUT")
+        preview = os.environ.get("SENTINEL_PREVIEW_OUTPUT")
         if preview:
             QTest.qWait(1000)
             self.assertTrue(self.page._online)
@@ -403,7 +422,7 @@ class BrainPageTests(unittest.TestCase):
     def test_tc001_card_shows_heatmap_and_clears_offline_readings(self):
         try:
             import numpy as np
-            from brain.pi.tc001_reader import decode_tc001_frame, render_thermal_jpeg
+            from sentinel.pi.tc001_reader import decode_tc001_frame, render_thermal_jpeg
             import cv2
         except ImportError:
             self.skipTest("Install Pi thermal dependencies to run the TC001 browser integration check")
@@ -417,7 +436,7 @@ class BrainPageTests(unittest.TestCase):
         self.server.thermal_jpeg = render_thermal_jpeg(temperatures, valid, stats)
         sensor = {"id": "thermal:tc001", "type": "thermal", "source": "topdon_tc001", "status": "ok", "temp_c": stats["max_c"], **stats}
         self.server.extra_sensors = [sensor]
-        self.server.dashboard = (Path(__file__).resolve().parents[1] / "brain/pi/fumehood_dashboard.html").read_bytes()
+        self.server.dashboard = (Path(__file__).resolve().parents[1] / "sentinel/pi/fumehood_dashboard.html").read_bytes()
         self.page._auto_started = True
         self.page.REQUEST_TIMEOUT_MS = 4000
         self.page._timer.setInterval(5000)

@@ -19,7 +19,7 @@ except ImportError:
     QWebEngineView = None
 
 
-DEFAULT_BRAIN_URL = "http://192.168.77.2:8000"
+DEFAULT_SENTINEL_URL = "http://192.168.77.2:8000"
 
 
 if QWebEngineView is not None:
@@ -41,7 +41,7 @@ if QWebEngineView is not None:
             return super().acceptNavigationRequest(url, navigation_type, is_main_frame)
 
 
-def normalize_brain_url(address):
+def normalize_sentinel_url(address):
     """Accept a server origin, never a local file or an API/page path."""
     address = address.strip()
     if not address:
@@ -59,32 +59,40 @@ def normalize_brain_url(address):
     return url.toString().rstrip("/")
 
 
-class BrainPage(QWidget):
+class SentinelPage(QWidget):
     POLL_INTERVAL_MS = 5000
     REQUEST_TIMEOUT_MS = 4000
 
     def __init__(self, parent=None, *, settings=None):
         super().__init__(parent)
         self._settings = settings if settings is not None else QSettings("Crystalloop", "Orchestrator")
-        saved_mode = str(self._settings.value("brain/connection_mode", "ethernet"))
+        # Migrate saved connection profiles from the previous application name.
+        for key in ("url", "connection_mode", "ethernet_url", "wifi_url", "download_directory"):
+            old_key = f"brain/{key}"
+            new_key = f"sentinel/{key}"
+            if self._settings.contains(old_key):
+                if not self._settings.contains(new_key):
+                    self._settings.setValue(new_key, self._settings.value(old_key))
+                self._settings.remove(old_key)
+        saved_mode = str(self._settings.value("sentinel/connection_mode", "ethernet"))
         self._connection_mode = saved_mode if saved_mode in ("ethernet", "wifi") else "ethernet"
         # The original single-address setting belongs to the Ethernet profile.
-        # Once profiles exist, brain/url is only the last used address, not a fallback.
+        # Once profiles exist, sentinel/url is only the last used address, not a fallback.
         legacy_url = (
-            self._settings.value("brain/url", DEFAULT_BRAIN_URL)
-            if not self._settings.contains("brain/connection_mode") else DEFAULT_BRAIN_URL
+            self._settings.value("sentinel/url", DEFAULT_SENTINEL_URL)
+            if not self._settings.contains("sentinel/connection_mode") else DEFAULT_SENTINEL_URL
         )
         self._addresses = {
-            "ethernet": str(self._settings.value("brain/ethernet_url", legacy_url)),
-            "wifi": str(self._settings.value("brain/wifi_url", "")),
+            "ethernet": str(self._settings.value("sentinel/ethernet_url", legacy_url)),
+            "wifi": str(self._settings.value("sentinel/wifi_url", "")),
         }
         if (
-            self._settings.contains("brain/url")
-            and not self._settings.contains("brain/connection_mode")
-            and not self._settings.contains("brain/ethernet_url")
+            self._settings.contains("sentinel/url")
+            and not self._settings.contains("sentinel/connection_mode")
+            and not self._settings.contains("sentinel/ethernet_url")
         ):
             # Preserve a custom legacy address even if Wi-Fi is used first after upgrade.
-            self._settings.setValue("brain/ethernet_url", self._addresses["ethernet"])
+            self._settings.setValue("sentinel/ethernet_url", self._addresses["ethernet"])
         self._base_url = ""
         self._enabled = False
         self._online = False
@@ -134,14 +142,14 @@ class BrainPage(QWidget):
         self.address_input = QLineEdit()
         self.address_input.setAccessibleName("Pi address")
         self.address_input.setText(self._addresses[self._connection_mode])
-        self.address_input.returnPressed.connect(self.connect_to_brain)
+        self.address_input.returnPressed.connect(self.connect_to_sentinel)
         connection_row.addWidget(self.address_input, 1)
         self.connect_button = QPushButton("Connect")
-        self.connect_button.clicked.connect(self.connect_to_brain)
+        self.connect_button.clicked.connect(self.connect_to_sentinel)
         connection_row.addWidget(self.connect_button)
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setEnabled(False)
-        self.disconnect_button.clicked.connect(self.disconnect_from_brain)
+        self.disconnect_button.clicked.connect(self.disconnect_from_sentinel)
         connection_row.addWidget(self.disconnect_button)
         layout.addLayout(connection_row)
         self.address_error_label = QLabel("")
@@ -186,7 +194,7 @@ class BrainPage(QWidget):
         if self._connection_mode == "wifi":
             self.address_input.setPlaceholderText("http://<Pi Wi-Fi IP>:8000")
         else:
-            self.address_input.setPlaceholderText(DEFAULT_BRAIN_URL)
+            self.address_input.setPlaceholderText(DEFAULT_SENTINEL_URL)
         self._show_message("Connect to view Sentinel.")
 
     def _change_connection_mode(self, index):
@@ -194,7 +202,7 @@ class BrainPage(QWidget):
         if mode not in self._addresses or mode == self._connection_mode:
             return
         self._addresses[self._connection_mode] = self.address_input.text()
-        self.disconnect_from_brain()
+        self.disconnect_from_sentinel()
         self._base_url = ""
         self._auto_started = True
         self._connection_mode = mode
@@ -232,10 +240,10 @@ class BrainPage(QWidget):
         # Only reconnect automatically to an address the user has saved by connecting.
         if not self._auto_started:
             self._auto_started = True
-            has_saved_address = self._settings.contains(f"brain/{self._connection_mode}_url")
-            has_legacy_address = self._connection_mode == "ethernet" and self._settings.contains("brain/url")
+            has_saved_address = self._settings.contains(f"sentinel/{self._connection_mode}_url")
+            has_legacy_address = self._connection_mode == "ethernet" and self._settings.contains("sentinel/url")
             if (has_saved_address or has_legacy_address) and self.address_input.text().strip():
-                self.connect_to_brain()
+                self.connect_to_sentinel()
 
     def _set_status(self, text, color):
         self.status_label.setText(text)
@@ -259,9 +267,9 @@ class BrainPage(QWidget):
             self._browser.stop()
             self._browser.setUrl(QUrl("about:blank"))
 
-    def connect_to_brain(self):
+    def connect_to_sentinel(self):
         try:
-            address = normalize_brain_url(self.address_input.text())
+            address = normalize_sentinel_url(self.address_input.text())
         except ValueError as error:
             self.address_error_label.setText(str(error))
             self.address_error_label.show()
@@ -280,9 +288,9 @@ class BrainPage(QWidget):
         self.address_input.setToolTip("")
         self.address_error_label.hide()
         self._addresses[self._connection_mode] = address
-        self._settings.setValue(f"brain/{self._connection_mode}_url", address)
-        self._settings.setValue("brain/connection_mode", self._connection_mode)
-        self._settings.setValue("brain/url", address)
+        self._settings.setValue(f"sentinel/{self._connection_mode}_url", address)
+        self._settings.setValue("sentinel/connection_mode", self._connection_mode)
+        self._settings.setValue("sentinel/url", address)
         self._settings.sync()
         self._enabled = True
         self._online = False
@@ -295,7 +303,7 @@ class BrainPage(QWidget):
         self._timer.start()
         self._check_connection()
 
-    def disconnect_from_brain(self):
+    def disconnect_from_sentinel(self):
         self._enabled = False
         self._online = False
         self._timer.stop()
@@ -410,7 +418,7 @@ class BrainPage(QWidget):
 
     def open_in_browser(self):
         try:
-            address = normalize_brain_url(self.address_input.text())
+            address = normalize_sentinel_url(self.address_input.text())
         except ValueError as error:
             self.address_error_label.setText(str(error))
             self.address_error_label.show()
@@ -421,7 +429,7 @@ class BrainPage(QWidget):
         QDesktopServices.openUrl(QUrl(address + "/"))
 
     def _download_requested(self, download):
-        directory = self._settings.value("brain/download_directory", "")
+        directory = self._settings.value("sentinel/download_directory", "")
         if not directory:
             directory = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
         suggested = Path(directory) / Path(download.downloadFileName()).name
@@ -432,7 +440,7 @@ class BrainPage(QWidget):
         destination = Path(filename)
         download.setDownloadDirectory(str(destination.parent))
         download.setDownloadFileName(destination.name)
-        self._settings.setValue("brain/download_directory", str(destination.parent))
+        self._settings.setValue("sentinel/download_directory", str(destination.parent))
         self._downloads.add(download)
 
         def updated():
@@ -469,7 +477,7 @@ class BrainPage(QWidget):
 
     def shutdown(self):
         """Stop PC-side work; never stop the remote Pi service."""
-        self.disconnect_from_brain()
+        self.disconnect_from_sentinel()
         self._archive_timer.stop()
         self._archive.shutdown()
         for download in list(self._downloads):
@@ -481,7 +489,7 @@ if __name__ == "__main__":
     from PySide6.QtWidgets import QApplication
 
     application = QApplication(sys.argv)
-    window = BrainPage()
+    window = SentinelPage()
     window.setWindowTitle("Orchestrator — Sentinel")
     window.resize(1100, 800)
     application.aboutToQuit.connect(window.shutdown)

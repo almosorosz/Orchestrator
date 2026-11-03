@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
-PI_DIR = Path(__file__).resolve().parents[1] / "brain/pi"
+PI_DIR = Path(__file__).resolve().parents[1] / "sentinel/pi"
 sys.path.insert(0, str(PI_DIR))
 from history_store import HistoryStore, COLUMNS, utc_timestamp
 from gui.sentinel_archive import ArchiveReplica, replicate
