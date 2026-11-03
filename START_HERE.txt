@@ -1,0 +1,27 @@
+ORCHESTRATOR - SENTINEL HISTORY UPDATE
+
+Extract this complete project into your PC project folder. New modules in gui/ are required.
+Run in the existing PC environment:
+    python MAIN_WINDOW.py
+Standalone Sentinel:
+    python -m gui.pages.brain_page
+No new third-party dependencies are required beyond the existing full PySide6 installation.
+
+Update the Pi with the separate Sentinel-Pi-History.zip package, or the files in brain/pi/.
+Connect Sentinel using your saved Ethernet/Wi-Fi profile, then open History.
+PC backup is enabled by default, saving every 60 seconds to Documents/Sentinel Logs.
+Choose another location or disable it using Log settings or History > PC > Configure.
+Disconnects and restarts resume from the last committed record without duplicates.
+
+Optional cloud folder:
+  Log settings > Also save a copy to a cloud sync folder > Browse an existing synced folder > Save.
+  Copies refresh during a save, at most once every 5 minutes. Sync now forces an update.
+  Your cloud sync client handles actual uploading. Sentinel verifies folder writes only.
+  PC, Orchestrator and your cloud sync client must remain running.
+
+Pi records locally even when the PC is disconnected. Preserve Pi databases, configuration and logs.
+Pi manual launch: python app.py (TC001 is detected automatically).
+Optional Pi boot setup is retained; it is not required.
+
+Complete update and usage instructions: brain/pi/HISTORY.md
+General setup: brain/README.md
