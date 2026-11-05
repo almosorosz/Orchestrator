@@ -1,0 +1,25 @@
+# Build from the repository root: python -m PyInstaller packaging/CrystaLoop.spec
+from pathlib import Path
+from importlib.util import find_spec
+import os
+from PyInstaller.utils.hooks import collect_data_files
+
+root = Path(SPECPATH).parent
+datas = [(str(root / "assets"), "assets"),
+         (str(root / "data" / "pump_calibration"), "data/pump_calibration")]
+datas += collect_data_files("pyDOE3")
+datas += collect_data_files("pyvis")
+hiddenimports = ["MAIN_WINDOW", "matplotlib.backends.backend_qtagg", "matplotlib.backends.backend_agg", "pyDOE3"]
+for optional in ("nidaqmx", "sqlalchemy", "psycopg"):
+    if find_spec(optional):
+        hiddenimports.append(optional)
+a = Analysis([str(root / "launcher.py")], pathex=[str(root)], binaries=[], datas=datas,
+             hiddenimports=hiddenimports, hookspath=[], hooksconfig={}, runtime_hooks=[],
+             excludes=["PyQt5", "PyQt6", "PySide2", "tkinter", "pytest", "tensorflow", "keras",
+                       "torch", "torchvision", "jax", "jaxlib", "numba", "sklearn", "dask", "notebook", "sympy"], noarchive=False)
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="CrystaLoop", debug=False,
+          bootloader_ignore_signals=False, strip=False, upx=False, console=os.environ.get("CRYSTALOOP_BUILD_CONSOLE") == "1",
+          icon=str(root / "assets" / "CrystaLoop.ico"),
+          version=str(root / "packaging" / "windows_version.txt"))
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="CrystaLoop")

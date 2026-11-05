@@ -1,0 +1,408 @@
+{
+  "version": 3,
+  "system_topology": {
+    "version": 1,
+    "modules": [
+      {
+        "code": "m1",
+        "name": "Crystallization system"
+      }
+    ],
+    "unit_operations": [
+      {
+        "code": "C1",
+        "name": "Main crystallizer",
+        "kind": "Crystallizer",
+        "module": "m1"
+      },
+      {
+        "code": "AS1",
+        "name": "Antisolvent container",
+        "kind": "Container",
+        "module": "m1"
+      },
+      {
+        "code": "SOLV1",
+        "name": "Solvent container",
+        "kind": "Container",
+        "module": "m1"
+      },
+      {
+        "code": "CLEN1",
+        "name": "Cleaning solvent container",
+        "kind": "Container",
+        "module": "m1"
+      },
+      {
+        "code": "SOLU1",
+        "name": "Solution container",
+        "kind": "Stirred container",
+        "module": "m1"
+      },
+      {
+        "code": "SEED1",
+        "name": "Seed container",
+        "kind": "Stirred container",
+        "module": "m1"
+      }
+    ],
+    "msi_code": "M_m1{{U_AS1(R_WAS1){}[U_P_PAS1]__U_C1(R_D101,R_D501,R_D901,R_FBRM1,R_IR1){C_T1,C_V1}[]__U_CLEN1(){}[U_P_PCLEN1]__U_P_PAS1(){C_F_PAS1}[U_C1]__U_P_PCLEN1(){C_F_PCLEN1}[U_C1]__U_P_PSEED1(){C_F_PSEED1}[U_C1]__U_P_PSOLU1(){C_F_PSOLU1}[U_C1]__U_P_PSOLV1(){C_F_PSOLV1}[U_C1]__U_SEED1(){}[U_P_PSEED1]__U_SOLU1(){}[U_P_PSOLU1]__U_SOLV1(){}[U_P_PSOLV1]__U_S_SSEED1(R_TQ_SSEED1){C_SR_SSEED1}[U_SEED1]__U_S_SSOLU1(R_TQ_SSOLU1){C_SR_SSOLU1}[U_SOLU1]___S_m1[[]]}}(())"
+  },
+  "recording_folder": "C:\\Users\\abotondo\\OneDrive - purdue.edu\\ECNDATA\\Desktop\\GIT\\Orhcestrator\\data\\control_panel_runs\\crystallization_demo",
+  "devices": {
+    "PAS1": {
+      "name": "Antisolvent pump",
+      "type": "ismatec",
+      "simulated": true,
+      "connection": {
+        "port": ""
+      },
+      "plot_index": 3,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "",
+        "source": "AS1",
+        "target": "C1"
+      },
+      "simulation": {
+        "seed": 100,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0,
+      "defaults": {
+        "stage": "2"
+      }
+    },
+    "PSOLV1": {
+      "name": "Solvent pump",
+      "type": "masterflex",
+      "simulated": true,
+      "connection": {
+        "port": "",
+        "node_address": "P01"
+      },
+      "plot_index": 2,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "",
+        "source": "SOLV1",
+        "target": "C1"
+      },
+      "simulation": {
+        "seed": 101,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0,
+      "defaults": {
+        "direction": "+"
+      }
+    },
+    "PCLEN1": {
+      "name": "Cleaning solvent pump",
+      "type": "masterflex",
+      "simulated": true,
+      "connection": {
+        "port": "",
+        "node_address": "P01"
+      },
+      "plot_index": 2,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "",
+        "source": "CLEN1",
+        "target": "C1"
+      },
+      "simulation": {
+        "seed": 102,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0,
+      "defaults": {
+        "direction": "+"
+      }
+    },
+    "PSOLU1": {
+      "name": "Solution pump",
+      "type": "masterflex",
+      "simulated": true,
+      "connection": {
+        "port": "",
+        "node_address": "P01"
+      },
+      "plot_index": 2,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "",
+        "source": "SOLU1",
+        "target": "C1"
+      },
+      "simulation": {
+        "seed": 103,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0,
+      "defaults": {
+        "direction": "+"
+      }
+    },
+    "PSEED1": {
+      "name": "Seed pump",
+      "type": "masterflex",
+      "simulated": true,
+      "connection": {
+        "port": "",
+        "node_address": "P01"
+      },
+      "plot_index": 2,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "",
+        "source": "SEED1",
+        "target": "C1"
+      },
+      "simulation": {
+        "seed": 104,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0,
+      "defaults": {
+        "direction": "+"
+      }
+    },
+    "WAS1": {
+      "name": "Antisolvent scale - mass (g)",
+      "type": "mettler",
+      "simulated": true,
+      "connection": {
+        "port": ""
+      },
+      "plot_index": 6,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "AS1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 105,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "SSOLU1": {
+      "name": "Solution container stirrer",
+      "type": "jkem",
+      "simulated": true,
+      "connection": {
+        "port": ""
+      },
+      "plot_index": 1,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "SOLU1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 106,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0
+    },
+    "SSEED1": {
+      "name": "Seed container stirrer",
+      "type": "jkem",
+      "simulated": true,
+      "connection": {
+        "port": ""
+      },
+      "plot_index": 1,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "SEED1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 107,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0
+    },
+    "FBRM1": {
+      "name": "FBRM - counts (simulated placeholder)",
+      "type": "opcua",
+      "simulated": true,
+      "connection": {
+        "endpoint": "",
+        "node_id": ""
+      },
+      "plot_index": 7,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 108,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "IR1": {
+      "name": "IR - concentration (simulated placeholder)",
+      "type": "opcua",
+      "simulated": true,
+      "connection": {
+        "endpoint": "",
+        "node_id": ""
+      },
+      "plot_index": 8,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 109,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "D101": {
+      "name": "EasyViewer - D10 (simulated placeholder)",
+      "type": "opcua",
+      "simulated": true,
+      "connection": {
+        "endpoint": "",
+        "node_id": ""
+      },
+      "plot_index": 8,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 110,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "D501": {
+      "name": "EasyViewer - D50 (simulated placeholder)",
+      "type": "opcua",
+      "simulated": true,
+      "connection": {
+        "endpoint": "",
+        "node_id": ""
+      },
+      "plot_index": 8,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 111,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "D901": {
+      "name": "EasyViewer - D90 (simulated placeholder)",
+      "type": "opcua",
+      "simulated": true,
+      "connection": {
+        "endpoint": "",
+        "node_id": ""
+      },
+      "plot_index": 8,
+      "connectivity": {
+        "role": "read_only",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 112,
+        "noise": 0.01,
+        "response_time": 2.0
+      }
+    },
+    "T1": {
+      "name": "Crystallizer Huber temperature",
+      "type": "huber",
+      "simulated": true,
+      "connection": {
+        "port": ""
+      },
+      "plot_index": 4,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 113,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 25.0,
+      "defaults": {
+        "control_mode": "Process"
+      }
+    },
+    "V1": {
+      "name": "Crystallizer drain valve",
+      "type": "nidaq_valve",
+      "simulated": true,
+      "connection": {
+        "ai_channel": "Dev1/ai0",
+        "do_channel": "Dev1/port0/line0"
+      },
+      "plot_index": 5,
+      "connectivity": {
+        "role": "controlled",
+        "module": "m1",
+        "unit": "C1",
+        "source": "",
+        "target": ""
+      },
+      "simulation": {
+        "seed": 114,
+        "noise": 0.01,
+        "response_time": 2.0
+      },
+      "default_target": 0
+    }
+  },
+  "profiles": {},
+  "experiments": []
+}

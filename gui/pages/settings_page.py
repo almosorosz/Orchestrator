@@ -25,6 +25,12 @@ class SettingsPage(QWidget):
     generate_requested = Signal()
     profile_requested = Signal()
     plot_doe_requested = Signal()
+    assign_doe_requested = Signal()
+    start_independent_doe_requested = Signal()
+    export_doe_requested = Signal()
+    recording_requested = Signal()
+    save_preset_requested = Signal()
+    load_preset_requested = Signal()
 
     def __init__(self,parent=None):
         super().__init__(parent)
@@ -91,7 +97,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("Experiment Path"),
+            QLabel("Experiment path in LOOP:"),
             2,
             0,
         )
@@ -103,7 +109,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("MODEL Path"),
+            QLabel("Model path in LOOP:"),
             3,
             0,
         )
@@ -115,7 +121,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("Number of experiments"),
+            QLabel("Experiments (non-full-factorial):"),
             4,
             0,
         )
@@ -140,16 +146,14 @@ class SettingsPage(QWidget):
         config_box.setLayout(config_layout)
 
         # ======================================================
-        # 2. INITIAL DOE GENERATION
+        # 2. DOE WORKFLOW WITHIN ENVIRONMENT CONFIGURATION
         # ======================================================
 
-        exp_group = QGroupBox(
-            "⚙ Initial DoE Generation"
-        )
+        doe_controls = QWidget()
 
         form = QFormLayout()
         form.setContentsMargins(
-            10, 10, 10, 10
+            0, 0, 0, 0
         )
         form.setFieldGrowthPolicy(
             QFormLayout.AllNonFixedFieldsGrow
@@ -188,7 +192,7 @@ class SettingsPage(QWidget):
         ])
 
         form.addRow(
-            "Process conditions:",
+            "Process settings:",
             self.profile_button,
         )
 
@@ -200,16 +204,38 @@ class SettingsPage(QWidget):
         form.addRow(
             self.generate_button
         )
+        self.assign_doe_button = QPushButton("Assign devices / preview DoE")
+        self.assign_doe_button.setObjectName("assign_doe_button")
+        self.start_independent_doe_button = QPushButton("Start DoE independent from loop")
+        self.start_independent_doe_button.setEnabled(False)
+        self.start_independent_doe_button.clicked.connect(lambda checked=False: self.start_independent_doe_requested.emit())
+        self.export_doe_button = QPushButton("Export generated DoE CSV")
+        self.assign_doe_button.setEnabled(False)
+        self.export_doe_button.setEnabled(False)
+        self.assign_doe_button.clicked.connect(lambda checked=False: self.assign_doe_requested.emit())
+        self.export_doe_button.clicked.connect(lambda checked=False: self.export_doe_requested.emit())
+        config_layout.addWidget(doe_controls, 6, 0, 1, 2)
+        config_layout.addWidget(self.assign_doe_button, 7, 0, 1, 2)
+        config_layout.addWidget(self.start_independent_doe_button, 8, 0, 1, 2)
+        self.recording_button = QPushButton("Recording / SQL settings")
+        self.recording_button.clicked.connect(lambda checked=False: self.recording_requested.emit())
+        config_layout.addWidget(self.recording_button, 9, 0, 1, 2)
+        self.save_preset_button = QPushButton("Save setup preset…")
+        self.load_preset_button = QPushButton("Load setup preset…")
+        self.save_preset_button.clicked.connect(self.save_preset_requested.emit)
+        self.load_preset_button.clicked.connect(self.load_preset_requested.emit)
+        config_layout.addWidget(self.save_preset_button, 10, 0, 1, 2)
+        config_layout.addWidget(self.load_preset_button, 11, 0, 1, 2)
 
-        exp_group.setLayout(form)
+        doe_controls.setLayout(form)
 
         # ======================================================
         # 3. DOE INFORMATION
         # ======================================================
 
-        doe_info_group = QGroupBox(
-            "🧪 DoE Information"
-        )
+        doe_info_group = QWidget()
+        form.addRow(QLabel("🧪 DoE information"))
+        form.addRow(doe_info_group)
 
         doe_info_layout = QFormLayout()
         doe_info_layout.setContentsMargins(
@@ -255,6 +281,7 @@ class SettingsPage(QWidget):
         doe_info_layout.addRow(
             self.plot_doe_button
         )
+        doe_info_layout.addRow(self.export_doe_button)
 
         doe_info_group.setLayout(
             doe_info_layout
@@ -363,14 +390,6 @@ class SettingsPage(QWidget):
 
         inputs_layout.addWidget(
             config_box
-        )
-
-        inputs_layout.addWidget(
-            exp_group
-        )
-
-        inputs_layout.addWidget(
-            doe_info_group
         )
 
         inputs_layout.addStretch()
@@ -552,6 +571,7 @@ class SettingsPage(QWidget):
 
 
     def reset_ui(self):
+        self.set_doe_available(False)
         self.clear_inputs()
 
         self.changed_dimensions_count_label.clear()
@@ -569,10 +589,41 @@ class SettingsPage(QWidget):
 
 
     def set_controls_enabled(self, enabled):
+        self._controls_enabled = bool(enabled)
+        self.load_preset_button.setEnabled(enabled)
         self.define_button.setEnabled(enabled)
         self.generate_button.setEnabled(enabled)
         self.profile_button.setEnabled(enabled)
         self.plot_doe_button.setEnabled(enabled)
+        self.assign_doe_button.setEnabled(enabled and getattr(self, "_doe_available", False))
+        self.export_doe_button.setEnabled(enabled and getattr(self, "_doe_available", False))
+        self.start_independent_doe_button.setEnabled(enabled and getattr(self, "_assignment_available", False))
+
+    def set_doe_available(self, available):
+        self._doe_available = bool(available)
+        enabled = available and getattr(self, "_controls_enabled", True)
+        self.assign_doe_button.setEnabled(enabled)
+        self.export_doe_button.setEnabled(enabled)
+        self.set_assignment_available(False)
+
+    def set_assignment_available(self, available):
+        self._assignment_available = bool(available)
+        self.start_independent_doe_button.setEnabled(available and getattr(self, "_controls_enabled", True))
+        self.assign_doe_button.setStyleSheet("""
+            QPushButton#assign_doe_button {
+                background: #3aa662;
+                border: 1px solid #2CFF05;
+                color: white;
+            }
+            QPushButton#assign_doe_button:hover:enabled {
+                background: #88E788;
+            }
+            QPushButton#assign_doe_button:disabled {
+                background: #2d6a43;
+                border-color: #3aa662;
+                color: #cbd5e1;
+            }
+        """ if available else "")
 
     def reset_plots(self, dark_mode):
         if dark_mode:

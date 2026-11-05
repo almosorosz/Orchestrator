@@ -1,4 +1,4 @@
-from copy import deepcopy
+import json
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -8,9 +8,8 @@ from PySide6.QtWidgets import (
 from control_panel.control_panel import (
     ControlPanel,
     HARDWARE_TYPES,
-    DEFAULT_DEVICES,
-    create_hardware,
 )
+from app.paths import ASSETS_DIR
 
 
 class ControlPanelPage(QWidget):
@@ -28,20 +27,20 @@ class ControlPanelPage(QWidget):
         # CONFIGURATION
         # --------------------------------------------------
 
-        self.devices = deepcopy(DEFAULT_DEVICES)
+        default_configuration = json.loads(
+            (ASSETS_DIR / "control_panel_defaults.json").read_text(encoding="utf-8")
+        )
+        self.devices = {}
 
         self.hardware_types = HARDWARE_TYPES
 
-        self.default_devices = DEFAULT_DEVICES
+        self.default_devices = default_configuration["devices"]
 
         # --------------------------------------------------
         # HARDWARE
         # --------------------------------------------------
 
-        self.hardware = create_hardware(
-            self.devices,
-            self.hardware_types,
-        )
+        self.hardware = {}
 
         # --------------------------------------------------
         # EMBED EXISTING CONTROL PANEL
@@ -53,7 +52,9 @@ class ControlPanelPage(QWidget):
             hardware=self.hardware,
             default_devices=self.default_devices,
             parent=self,
+            default_configuration=default_configuration,
         )
+        self.control_panel.apply_default_configuration()
 
         # --------------------------------------------------
         # LAYOUT

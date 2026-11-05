@@ -14,6 +14,7 @@ import re
 from abc import ABC, abstractmethod
 import serial
 import threading
+from hardware_devices.limits import DEFAULT_LIMITS, target_allowed
 from asyncua.sync import Client
 
 
@@ -701,9 +702,10 @@ class JKemStirrer(BaseDevice):
         return self.ser.read_until(b'\r').decode('ascii', errors='ignore').strip()
 
     def set_target(self, rpm: int, **kwargs) -> bool:
-        """Sets motor target speed (0 or 20-800 RPM)."""
-        if rpm != 0 and not (20 <= rpm <= 800):
-            print(f"[{self.name}] Invalid RPM: {rpm}. Range: 0, 20-800.")
+        """Sets motor target speed (0–800 RPM by default)."""
+        limits = getattr(self, "target_limits", DEFAULT_LIMITS["jkem"])
+        if not target_allowed(float(rpm), limits):
+            print(f"[{self.name}] Invalid RPM: {rpm}. Configured limits: {limits}")
             return False
         reply = self._send_command(f"SS{rpm}")
         return reply == f"SS{rpm}"

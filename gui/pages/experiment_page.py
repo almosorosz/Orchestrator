@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
 )
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 
 class ExperimentPage(QWidget):
 
@@ -111,7 +111,16 @@ class ExperimentPage(QWidget):
         dashboard.show()
 
         self.placeholder.hide()
-        self.end_session_button.setEnabled(True)
+        dashboard.execution_active_changed.connect(self.set_execution_active)
+        self.set_execution_active(dashboard.is_execution_active())
+
+    @Slot(bool)
+    def set_execution_active(self, active):
+        self.end_session_button.setEnabled(self.dashboard is not None and not active)
+        self.end_session_button.setToolTip(
+            "Stop the experiment and wait for cleanup before ending the session."
+            if active else "End the experiment session."
+        )
 
     # ==========================================================
     # DETACH DASHBOARD
@@ -123,6 +132,7 @@ class ExperimentPage(QWidget):
             return
 
         dashboard = self.dashboard
+        dashboard.execution_active_changed.disconnect(self.set_execution_active)
 
         self.dashboard_layout.removeWidget(dashboard)
 

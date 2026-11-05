@@ -6,16 +6,22 @@ import json
 import sys
 
 from copy import deepcopy
+from app.paths import DATA_DIR
+from hardware_devices.capabilities import is_monitor_only
+from hardware_devices.simulated import SimulatedDevice
+from hardware_devices.limits import DEFAULT_LIMITS, target_limits
+from experiment.models import Campaign, ExperimentDefinition
 from asyncua.sync import Client
 
-from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QEvent
+from gui.flow_layout import FlowLayout
 
 from PySide6.QtWidgets import (QApplication,QFileDialog, 
     QWidget, QGroupBox, QFormLayout, QLineEdit, QLabel, QComboBox,
     QSpinBox, QDoubleSpinBox, QPushButton, QHBoxLayout, QVBoxLayout,
     QGridLayout, QScrollArea, QDialog, QDialogButtonBox, QTableWidget,
     QTableWidgetItem,
-    QMessageBox
+    QMessageBox, QSizePolicy
 )
 
 
@@ -348,6 +354,12 @@ PROFILE_TYPES = {
 
 def create_device(config, hardware_types):
 
+    if config.get("simulated", False):
+        device = SimulatedDevice(config["name"], config["type"], **config.get("simulation", {}))
+        if config["type"] in DEFAULT_LIMITS:
+            device.target_limits = target_limits(config)
+        return device
+
     schema = hardware_types[
         config["type"]
     ]
@@ -368,10 +380,13 @@ def create_device(config, hardware_types):
             )
         )
 
-    return schema["driver"](
+    device = schema["driver"](
         name=config["name"],
         **kwargs
     )
+    if config["type"] in DEFAULT_LIMITS:
+        device.target_limits = target_limits(config)
+    return device
 
 
 def create_hardware(devices, hardware_types):
@@ -644,7 +659,12 @@ class DeviceWidget(QGroupBox):
 
         self.device_id = device_id
         self.config = deepcopy(config)
-        self.schema = hardware_types[config["type"]]
+        self.schema = deepcopy(hardware_types[config["type"]])
+        if config["type"] in DEFAULT_LIMITS:
+            limits = target_limits(config)
+            integer = self.schema["target"]["type"] == "int"
+            self.schema["target"].update(min=int(limits["min"]) if integer else limits["min"],
+                                         max=int(limits["max"]) if integer else limits["max"])
         self.hardware = hardware
         self.device = device
 
@@ -654,7 +674,7 @@ class DeviceWidget(QGroupBox):
         self.target_widget = None
         self.profile = None
 
-        self.setTitle(config["name"])
+        self.setTitle(config["name"] + (" [SIMULATED]" if config.get("simulated") else ""))
         self._build_ui()
         self._update_connection_state()
 
@@ -732,6 +752,10 @@ class DeviceWidget(QGroupBox):
 
     def _edit_profile(self):
 
+        if is_monitor_only(self.config):
+            self.status_label.setText("Read-only monitor: select Controlled device before defining a profile.")
+            return
+
         if self.schema.get("target") is None:
             return
 
@@ -777,7 +801,16 @@ class DeviceWidget(QGroupBox):
     def _build_ui(self):
 
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 14, 10, 10)
+        main_layout.setSpacing(5)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setHorizontalSpacing(6)
+        form.setVerticalSpacing(4)
+        self.setObjectName("deviceCard")
+        self.setMinimumWidth(0)
+        self.setMaximumWidth(460)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
         self.id_label = QLabel(self.device_id)
         form.addRow("ID", self.id_label)
@@ -893,7 +926,11 @@ class DeviceWidget(QGroupBox):
         # Action buttons
         # ---------------------------------------------------------
 
-        button_layout = QHBoxLayout()
+        from gui.device_connectivity import DeviceConnectivity
+        self.connectivity_fields = DeviceConnectivity(self.config, self)
+        main_layout.addWidget(self.connectivity_fields)
+        button_layout = QGridLayout()
+        button_layout.setSpacing(4)
 
         self.connect_button = QPushButton("Connect")
         self.set_button = QPushButton("Set")
@@ -903,9 +940,7 @@ class DeviceWidget(QGroupBox):
         self.profile_button = QPushButton("Profile")
         self.delete_button = QPushButton("Delete")
 
-        if self.config["type"] in PROFILE_TYPES:
-            button_layout.addWidget(self.profile_button)
-        else:
+        if self.config["type"] not in PROFILE_TYPES:
             self.profile_button.setEnabled(False)
 
         if self.schema.get("target") is None:
@@ -926,20 +961,14 @@ class DeviceWidget(QGroupBox):
         self.stop_button.setObjectName("stop_button")
         self.read_button.setObjectName("device_read_button")
 
-        button_layout.addWidget(self.connect_button)
-        button_layout.addWidget(self.set_button)
-        button_layout.addWidget(self.start_button)
-        button_layout.addWidget(self.stop_button)
-        button_layout.addWidget(self.read_button)
-        button_layout.addWidget(self.delete_button)
-
+        actions = [self.connect_button, self.set_button, self.start_button, self.stop_button,
+                   self.read_button, self.delete_button]
         if self.schema.get("target") is not None:
-            button_layout.addWidget(self.profile_button)
-        else:
-            self.profile_button.setEnabled(False)
-
+            actions.append(self.profile_button)
         if self.test_button is not None:
-            button_layout.addWidget(self.test_button)
+            actions.append(self.test_button)
+        for index, button in enumerate(actions):
+            button_layout.addWidget(button, index // 4, index % 4)
 
         main_layout.addLayout(button_layout)
 
@@ -953,12 +982,21 @@ class DeviceWidget(QGroupBox):
         self.connection_led.setFixedSize(12, 12)
 
         self.status_label = QLabel("Disconnected")
+        self.status_label.setWordWrap(True)
+        self.status_label.setMinimumWidth(0)
 
         status_layout.addWidget(self.connection_led)
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
 
         main_layout.addLayout(status_layout)
+        for combo in self.findChildren(QComboBox):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
+            combo.setMinimumWidth(0)
+            combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for edit in self.findChildren(QLineEdit):
+            edit.setMinimumWidth(0)
 
         # ---------------------------------------------------------
         # Signals
@@ -1493,13 +1531,14 @@ class DeviceWidget(QGroupBox):
 class ControlPanel(QWidget):
     connection_status_changed = Signal(bool, int, int)
 
-    def __init__(self, devices, hardware_types, hardware, default_devices, parent=None):
+    def __init__(self, devices, hardware_types, hardware, default_devices, parent=None, *, default_configuration=None):
         super().__init__(parent)
 
         self.setObjectName("controlPanel")
 
         self.devices = devices
         self.default_devices = deepcopy(default_devices)
+        self.default_configuration = deepcopy(default_configuration)
         self.hardware_types = hardware_types
         self.hardware = hardware
 
@@ -1510,6 +1549,8 @@ class ControlPanel(QWidget):
         
         self.device_widgets = {}
         self.experiments = []
+        from experiment.system_topology import empty_topology
+        self.system_topology = empty_topology()
 
         self.connection_thread = None
         self.connection_worker = None
@@ -1541,8 +1582,8 @@ class ControlPanel(QWidget):
     def _build_ui(self):
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(6)
 
         # ========================================================
         # TOP CONTROL BAR
@@ -1551,8 +1592,8 @@ class ControlPanel(QWidget):
         top_section = QVBoxLayout()
         top_section.setSpacing(8)
         
-        top_row = QHBoxLayout()
-        bottom_row = QHBoxLayout()
+        top_row = FlowLayout()
+        bottom_row = FlowLayout()
         
 
         title = QLabel("Hardware Control Panel")
@@ -1572,8 +1613,16 @@ class ControlPanel(QWidget):
 
         self.save_config_button = QPushButton("Save Configuration")
         self.load_config_button = QPushButton("Load Configuration")
+        self.demo_button = QPushButton("Load Simulated Demo")
+        self.demo_button.setToolTip("Load a hardware-free demonstration at real-time speed")
+        self.limits_button = QPushButton("Device Limits")
         
         self.generate_experiment_button = QPushButton("Generate Experiment")
+        self.simulation_speed = QDoubleSpinBox()
+        self.simulation_speed.setRange(0.1, 100)
+        self.simulation_speed.setValue(1.0)
+        self.simulation_speed.setSuffix("×")
+        self.simulation_speed.setToolTip("Simulation speed; 1× is real time. Real hardware always uses 1×.")
         self.start_experiment_button = QPushButton("Start Experiment")
         self.start_experiment_button.setEnabled(False)
         
@@ -1608,6 +1657,8 @@ class ControlPanel(QWidget):
         top_row.addWidget(self.reset_button)
         top_row.addWidget(self.save_config_button)
         top_row.addWidget(self.load_config_button)
+        top_row.addWidget(self.demo_button)
+        top_row.addWidget(self.limits_button)
         
         
         # ========================================================
@@ -1622,6 +1673,8 @@ class ControlPanel(QWidget):
         
         bottom_row.addWidget(self.generate_experiment_button)
         bottom_row.addWidget(self.start_experiment_button)
+        bottom_row.addWidget(QLabel("Simulation speed"))
+        bottom_row.addWidget(self.simulation_speed)
         
         bottom_row.addStretch()
         
@@ -1635,6 +1688,30 @@ class ControlPanel(QWidget):
         
         top_section.addLayout(top_row)
         top_section.addLayout(bottom_row)
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Control Panel experiment folder"))
+        self.control_output_path = QLineEdit(str(DATA_DIR / "control_panel_runs"))
+        path_row.addWidget(self.control_output_path, 1)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self.choose_control_output_folder)
+        path_row.addWidget(browse)
+        top_section.addLayout(path_row)
+        self.calibration_button = QPushButton("Pump calibration files…")
+        self.calibration_button.clicked.connect(self.edit_pump_calibrations)
+        calibration_row = QHBoxLayout()
+        calibration_row.addWidget(self.calibration_button)
+        self.module_sensors_button = QPushButton("Module sensors…")
+        self.module_sensors_button.clicked.connect(lambda: self.edit_system_topology(False, tab=1))
+        calibration_row.addWidget(self.module_sensors_button)
+        top_section.addLayout(calibration_row)
+        system_row = QHBoxLayout()
+        self.unit_operations_button = QPushButton("Unit operations / modules…")
+        self.msi_button = QPushButton("Generate MSI / connectivity graph…")
+        self.unit_operations_button.clicked.connect(lambda: self.edit_system_topology(False))
+        self.msi_button.clicked.connect(lambda: self.edit_system_topology(True))
+        system_row.addWidget(self.unit_operations_button)
+        system_row.addWidget(self.msi_button)
+        top_section.addLayout(system_row)
         
         main_layout.addLayout(top_section)
 
@@ -1643,13 +1720,17 @@ class ControlPanel(QWidget):
         # ========================================================
 
         scroll = QScrollArea()
+        self.device_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.viewport().installEventFilter(self)
 
         container = QWidget()
 
         self.device_grid = QGridLayout(container)
-        self.device_grid.setSpacing(14)
+        self.device_grid.setSpacing(8)
+        self.device_grid.setContentsMargins(0, 0, 0, 0)
+        self.device_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.n_columns = 2
 
@@ -1680,6 +1761,7 @@ class ControlPanel(QWidget):
             )
 
         scroll.setWidget(container)
+        QTimer.singleShot(0, self._adapt_device_columns)
 
         main_layout.addWidget(scroll)
 
@@ -1728,8 +1810,123 @@ class ControlPanel(QWidget):
         self.load_config_button.clicked.connect(
             self.load_configuration
         )
+        self.demo_button.clicked.connect(self.load_simulated_demo)
+        self.limits_button.clicked.connect(self.edit_device_limits)
         
         self.update_profile_status()
+
+    def edit_pump_calibrations(self):
+        if self.hardware_manager.is_busy or self.experiment_window_attached():
+            QMessageBox.warning(self, "Session open", "End the experiment session before changing pump calibrations.")
+            return None
+        from gui.pump_calibration_dialog import PumpCalibrationDialog
+        configs, _ = self.collect_current_configuration()
+        dialog = PumpCalibrationDialog(configs, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        for key, config in dialog.configs.items():
+            if key not in self.device_widgets:
+                continue
+            widget = self.device_widgets[key]
+            if "pump_calibration" in config:
+                widget.config["pump_calibration"] = deepcopy(config["pump_calibration"])
+            else:
+                widget.config.pop("pump_calibration", None)
+        return self.collect_current_configuration()[0]
+
+    def current_system_topology(self):
+        from experiment.system_topology import encode_msi
+        definition = deepcopy(self.system_topology)
+        definition.pop("msi_code", None)
+        configs, _ = self.collect_current_configuration()
+        try:
+            definition["msi_code"] = encode_msi(definition, configs)
+        except ValueError:
+            pass
+        return definition
+
+    def edit_system_topology(self, generate=False, tab=0):
+        if self.hardware_manager.is_busy or self.experiment_window_attached():
+            QMessageBox.warning(self, "Session open", "End the experiment session before editing the physical system definition.")
+            return
+        from gui.system_topology_dialog import SystemTopologyDialog
+        configs, _ = self.collect_current_configuration()
+        dialog = SystemTopologyDialog(self.current_system_topology(), configs, self, generate=generate, initial_tab=tab)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.system_topology = deepcopy(dialog.definition)
+            self.refresh_connectivity_fields()
+        dialog.deleteLater()
+
+    def refresh_connectivity_fields(self):
+        for widget in self.device_widgets.values():
+            if hasattr(widget, "connectivity_fields"):
+                widget.connectivity_fields.set_definition(self.system_topology)
+                widget.connectivity_fields.setEnabled(not self.hardware_manager.is_busy and not self.experiment_window_attached())
+
+    def load_simulated_demo(self):
+        """Explicitly replace the current configuration with a short demo."""
+        if self.experiment_window_attached():
+            QMessageBox.warning(self, "Session Open", "End the current experiment session first.")
+            return
+        if self.hardware_manager.is_busy or any(w.is_connected() for w in self.device_widgets.values()):
+            QMessageBox.warning(self, "Hardware Busy", "Disconnect devices and finish active operations before loading the demo.")
+            return
+        configs = deepcopy(DEFAULT_DEVICES)
+        configs["OPC_DEMO"] = {
+            "name": "Demo probe", "type": "opcua", "connection": {}, "plot_index": 7,
+        }
+        for index, config in enumerate(configs.values()):
+            config["simulated"] = True
+            config["simulation"] = {"seed": 42 + index}
+            config["simulation_speed"] = 1.0
+        frame = {"time_s": [0.0, 10.0, 30.0]}
+        for device_id, config in configs.items():
+            kind = config["type"]
+            if kind in {"mettler", "opcua"}:
+                continue
+            frame[device_id] = (
+                [25, 35, 30] if kind == "huber" else
+                [100, 400, 200] if kind == "jkem" else
+                [0, 1, 0] if kind == "nidaq_valve" else
+                [0, 10, 0]
+            )
+        self.apply_loaded_configuration(configs, {}, [pd.DataFrame(frame).to_dict(orient="split")], self.control_output_path.text())
+
+    def choose_control_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Control Panel experiment folder", self.control_output_path.text())
+        if folder:
+            self.control_output_path.setText(folder)
+
+    def experiment_window_attached(self):
+        return getattr(self, "experiment_window", None) is not None
+
+    def edit_device_limits(self):
+        if self.hardware_manager.is_busy or self.experiment_window_attached():
+            QMessageBox.warning(self, "Session Active", "End the experiment session before changing device limits.")
+            return
+        dialog = DeviceLimitsDialog({key: widget.config for key, widget in self.device_widgets.items()}, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.apply_device_limits(dialog.overrides())
+
+    def apply_device_limits(self, overrides):
+        if self.hardware_manager.is_busy or self.experiment_window_attached():
+            raise RuntimeError("Cannot change limits during an experiment or connection operation")
+        # Validate every change before mutating any device.
+        validated = {key: target_limits({**self.device_widgets[key].config, "target_limits": values})
+                     for key, values in overrides.items()}
+        for key, limits in validated.items():
+            widget = self.device_widgets[key]
+            values = {field: limits[field] for field in ("min", "max", "min_nonzero")}
+            widget.config["target_limits"] = values
+            self.devices[key]["target_limits"] = dict(values)
+            self.hardware[key].target_limits = dict(limits)
+            widget.schema["target"].update(min=limits["min"], max=limits["max"])
+            if widget.target_widget is not None:
+                if isinstance(widget.target_widget, QSpinBox):
+                    widget.target_widget.setRange(int(limits["min"]), int(limits["max"]))
+                else:
+                    widget.target_widget.setRange(limits["min"], limits["max"])
 
     def dataframe_from_saved(self, data):
     
@@ -1743,9 +1940,17 @@ class ControlPanel(QWidget):
         self,
         devices,
         profiles_data,
-        experiments_data
+        experiments_data,
+        recording_folder=None,
+        system_topology=None,
     ):
 
+        from experiment.system_topology import empty_topology, validate_topology
+        definition = deepcopy(system_topology or empty_topology())
+        validate_topology(definition, devices, complete=False)
+
+        if self.experiment_window_attached():
+            raise RuntimeError("End the existing experiment session before replacing configuration")
         if (
             self.experiment_running()
             or self.connection_operation_active()
@@ -1790,6 +1995,8 @@ class ControlPanel(QWidget):
         # Replace working configuration
         # ----------------------------------------------------------
     
+        self.control_output_path.setText(str(recording_folder or DATA_DIR / "control_panel_runs"))
+        self.system_topology = definition
         self.devices.clear()
         self.devices.update(
             deepcopy(devices)
@@ -1882,8 +2089,8 @@ class ControlPanel(QWidget):
         self.update_experiment_controls()
         self.update_profile_status()
         self.update_global_status()
+        return True
 
-    
     def load_configuration(self):
     
         if self.experiment_running():
@@ -1953,7 +2160,9 @@ class ControlPanel(QWidget):
             self.apply_loaded_configuration(
                 devices,
                 profiles_data,
-                experiments_data
+                experiments_data,
+                data.get("recording_folder"),
+                data.get("system_topology"),
             )
     
             print(
@@ -1983,7 +2192,9 @@ class ControlPanel(QWidget):
         )
     
         data = {
-            "version": 1,
+            "version": 3,
+            "system_topology": self.current_system_topology(),
+            "recording_folder": self.control_output_path.text().strip(),
             "devices": devices,
             "profiles": profiles,
             "experiments": [
@@ -2122,7 +2333,18 @@ class ControlPanel(QWidget):
         else:
             self.delete_experiment_spin.setRange(1, 1)
 
+    def apply_default_configuration(self):
+        config = self.default_configuration
+        return self.apply_loaded_configuration(
+            config["devices"], config["profiles"], config["experiments"],
+            DATA_DIR / "control_panel_runs" / "crystallization_demo", config["system_topology"],
+        )
+
     def reset_defaults(self):
+
+        if self.experiment_window_attached():
+            QMessageBox.warning(self, "Session Open", "End the current experiment session first.")
+            return
 
         if self.experiment_running():
             QMessageBox.warning(
@@ -2147,6 +2369,10 @@ class ControlPanel(QWidget):
         
             return
     
+        if self.default_configuration is not None:
+            self.apply_default_configuration()
+            return
+
         if not self.shutdown_hardware():
             QMessageBox.warning(
                 self,
@@ -2236,6 +2462,18 @@ class ControlPanel(QWidget):
         self.update_experiment_controls()
 
     def start_experiment(self):
+        return self._start_experiment()
+
+    def start_campaign(self, campaign, recording_override=None):
+        if not isinstance(campaign, Campaign) or not campaign.experiments:
+            raise ValueError("A nonempty campaign is required")
+        return self._start_experiment(campaign, recording_override)
+
+    def _start_experiment(self, campaign=None, recording_override=None):
+
+        if self.experiment_window_attached():
+            QMessageBox.warning(self, "Session Open", "End the current experiment session before opening another.")
+            return
 
         if self.connection_operation_active():
             QMessageBox.warning(
@@ -2254,12 +2492,22 @@ class ControlPanel(QWidget):
             )
             return
 
+        experiments = campaign.experiments if campaign is not None else self.experiments
+        selected_ids = set(self.hardware)
+        if campaign is not None:
+            selected_ids = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
+            selected_ids.update(campaign.monitor_device_ids)
+            missing = selected_ids - self.hardware.keys()
+            if missing:
+                QMessageBox.warning(self, "Missing Devices", ", ".join(sorted(missing)))
+                return
+
         print(
             f"[CONTROL PANEL] Start clicked | "
-            f"{len(self.experiments)} experiment(s)"
+            f"{len(experiments)} experiment(s)"
         )
     
-        if not self.experiments:
+        if not experiments:
             QMessageBox.warning(
                 self,
                 "No Experiments",
@@ -2271,7 +2519,7 @@ class ControlPanel(QWidget):
             device_id
             for device_id, widget
             in self.device_widgets.items()
-            if not widget.is_connected()
+            if device_id in selected_ids and not widget.is_connected()
         ]
 
         if disconnected:
@@ -2317,7 +2565,15 @@ class ControlPanel(QWidget):
                 device_id: deepcopy(widget.config)
                 for device_id, widget
                 in self.device_widgets.items()
+                if device_id in selected_ids
             }
+            # Validate all experiments before reserving or starting any hardware.
+            for experiment in experiments:
+                frame = experiment.to_frame() if isinstance(experiment, ExperimentDefinition) else experiment
+                ExperimentDefinition.from_frame(frame, device_configs)
+            if campaign is not None:
+                if any(not is_monitor_only(device_configs[key]) for key in campaign.monitor_device_ids):
+                    raise ValueError("Only read-only devices may be added as campaign monitors")
 
             # --------------------------------------------------
             # 2. Reserve hardware BEFORE dashboard creation
@@ -2341,15 +2597,31 @@ class ControlPanel(QWidget):
             # --------------------------------------------------
 
             dashboard = ExperimentDashboard(
-                devices=self.hardware,
+                devices={key: device for key, device in self.hardware.items() if key in selected_ids},
                 device_configs=device_configs,
-                experiments=self.experiments,
+                experiments=experiments,
+                campaign=campaign,
             )
 
             dashboard.hardware_manager = self.hardware_manager
+            from gui.recording_settings_dialog import load_recording_settings
+            dashboard.recording_settings = load_recording_settings()
+            dashboard.recording_settings["system_topology"] = self.current_system_topology()
+            if campaign is None:
+                output = self.control_output_path.text().strip()
+                if not output:
+                    raise ValueError("Choose a Control Panel experiment folder")
+                dashboard.recording_settings["output_folder"] = output
+            if recording_override:
+                dashboard.recording_settings.update(recording_override)
+            dashboard.recording_settings["enabled"] = True
+            from app.logging_config import set_output_log_root
+            set_output_log_root(dashboard.recording_settings["output_folder"])
+            dashboard.simulation_speed = self.simulation_speed.value()
             dashboard.hardware_token = token
 
             self.experiment_window = dashboard
+            self.refresh_connectivity_fields()
 
             print("[CONTROL PANEL] Dashboard created.")
             
@@ -2376,6 +2648,7 @@ class ControlPanel(QWidget):
             print(
                 "[CONTROL PANEL] Experiment start scheduled."
             )
+            return dashboard
 
         except Exception as error:
 
@@ -2448,7 +2721,7 @@ class ControlPanel(QWidget):
     
         for device_id, widget in self.device_widgets.items():
     
-            if widget.config["type"] not in PROFILE_TYPES:
+            if widget.config["type"] not in PROFILE_TYPES or is_monitor_only(widget.config):
                 continue
     
             if widget.profile is not None:
@@ -2479,7 +2752,7 @@ class ControlPanel(QWidget):
     
         for device_id, widget in self.device_widgets.items():
     
-            if widget.config["type"] not in PROFILE_TYPES:
+            if widget.config["type"] not in PROFILE_TYPES or is_monitor_only(widget.config):
                 continue
     
             if device_id in profiles:
@@ -2779,7 +3052,7 @@ class ControlPanel(QWidget):
                 else "Disconnecting..."
             )
         
-            self.connection_thread = QThread()
+            self.connection_thread = QThread(self)
         
             self.connection_worker = ConnectionWorker(
                 dict(self.hardware),
@@ -2900,6 +3173,7 @@ class ControlPanel(QWidget):
         return
         
     def update_global_status(self):
+        self.refresh_connectivity_fields()
 
         states = [
             widget.is_connected()
@@ -3042,6 +3316,26 @@ class ControlPanel(QWidget):
                 row,
                 col
             )
+
+    def eventFilter(self, watched, event):
+        if hasattr(self, 'device_scroll') and watched is self.device_scroll.viewport() and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._adapt_device_columns)
+        return super().eventFilter(watched, event)
+
+    def _adapt_device_columns(self):
+        if not hasattr(self, 'device_scroll'):
+            return
+        width = self.device_scroll.viewport().width()
+        card_width = max(360, max((widget.minimumSizeHint().width() for widget in self.device_widgets.values()), default=360))
+        columns = max(1, (width + 8) // (card_width + 8))
+        for widget in self.device_widgets.values():
+            self.device_grid.setAlignment(widget, Qt.AlignmentFlag.AlignTop)
+        if columns != self.n_columns:
+            old_columns = self.n_columns
+            self.n_columns = columns
+            for column in range(max(old_columns, columns)):
+                self.device_grid.setColumnStretch(column, 1 if column < columns else 0)
+            self.rebuild_device_grid()
         
     def new_connection(self):
 
@@ -3393,6 +3687,29 @@ class ControlPanel(QWidget):
                 font-weight: 700;
             }
 
+            QGroupBox#deviceCard {
+                margin-top: 12px;
+                padding: 8px;
+                border-radius: 8px;
+            }
+            QGroupBox#deviceCard::title {
+                left: 10px;
+                font-size: 12px;
+            }
+            QGroupBox#deviceCard QLineEdit,
+            QGroupBox#deviceCard QSpinBox,
+            QGroupBox#deviceCard QDoubleSpinBox,
+            QGroupBox#deviceCard QComboBox {
+                padding: 3px 5px;
+                border-radius: 5px;
+                font-size: 12px;
+            }
+            QGroupBox#deviceCard QPushButton {
+                padding: 4px 5px;
+                font-size: 12px;
+                min-width: 0px;
+            }
+
             QLineEdit,
             QSpinBox,
             QDoubleSpinBox,
@@ -3559,6 +3876,59 @@ class ControlPanel(QWidget):
     def set_theme(self, dark=True):
         self._apply_style(dark)
 
+class DeviceLimitsDialog(QDialog):
+    def __init__(self, configs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Device Limits — application overrides")
+        self.resize(800, 500)
+        layout = QVBoxLayout(self)
+        description = QLabel("Edit the application limits per device. Minimum nonzero = 0 disables the low-speed gap. "
+                             "Overrides do not change a physical instrument's capabilities. Valve states remain 0/1. "
+                             "Save Configuration to retain changes.")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.rows = {}
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Device", "Minimum", "Maximum", "Min. nonzero", "Unit"])
+        for key, config in configs.items():
+            if config["type"] not in DEFAULT_LIMITS:
+                continue
+            limits = target_limits(config)
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(f"{key}: {config['name']}"))
+            self.table.setItem(row, 4, QTableWidgetItem(limits["unit"]))
+            editors = {}
+            for col, field in enumerate(("min", "max", "min_nonzero"), 1):
+                editor = QDoubleSpinBox()
+                editor.setDecimals(2)
+                editor.setRange(0 if field == "min_nonzero" else -1e6, 1e6)
+                editor.setValue(limits[field])
+                editor.setEnabled(config["type"] != "nidaq_valve")
+                self.table.setCellWidget(row, col, editor)
+                editors[field] = editor
+            self.rows[key] = (config, editors)
+        self.table.resizeColumnsToContents()
+        layout.addWidget(self.table)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def overrides(self):
+        return {key: {field: editor.value() for field, editor in editors.items()}
+                for key, (_, editors) in self.rows.items()}
+
+    def validate_and_accept(self):
+        try:
+            for key, values in self.overrides().items():
+                target_limits({**self.rows[key][0], "target_limits": values})
+        except ValueError as error:
+            QMessageBox.warning(self, "Invalid Limits", str(error))
+            return
+        self.accept()
+
+
 class NewDeviceDialog(QDialog):
 
     def __init__(self, hardware_types, existing_ids=None, parent=None):
@@ -3583,10 +3953,13 @@ class NewDeviceDialog(QDialog):
 
         self.type_combo = QComboBox()
         self.type_combo.addItems(self.hardware_types.keys())
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Real hardware", "Simulated"])
 
         form.addRow("Device ID", self.id_edit)
         form.addRow("Name", self.name_edit)
         form.addRow("Hardware Type", self.type_combo)
+        form.addRow("Connection Mode", self.mode_combo)
 
         main_layout.addLayout(form)
 
@@ -3770,6 +4143,7 @@ class NewDeviceDialog(QDialog):
         config = {
             "name": self.name_edit.text().strip(),
             "type": device_type,
+            "simulated": self.mode_combo.currentText() == "Simulated",
             "connection": {
                 key: widget.text().strip()
                 for key, widget in self.connection_widgets.items()

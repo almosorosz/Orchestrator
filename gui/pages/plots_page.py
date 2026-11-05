@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from PySide6.QtCore import Qt
+from gui.campaign_browser import CampaignBrowser
 
 
 class PlotsPage(QWidget):
@@ -14,61 +15,30 @@ class PlotsPage(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.page_scroll_area = QScrollArea()
+        self.page_scroll_area.setWidgetResizable(True)
+        self.page_scroll_area.setFrameShape(QFrame.NoFrame)
+        self.page_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.page_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.page_content = QWidget()
+        # Preserve room for controls, tables and a useful plot viewport. Small
+        # windows scroll the page instead of compressing/clipping its contents.
+        self.page_content.setMinimumHeight(600)
+        layout = QVBoxLayout(self.page_content)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        self.page_scroll_area.setWidget(self.page_content)
+        page_layout.addWidget(self.page_scroll_area)
 
         title_label = QLabel("Data & Plots View")
         title_label.setStyleSheet(
-            "font-size: 18px;"
+            "font-size: 15px;"
             "font-weight: bold;"
             "color: #f8fafc;"
         )
 
         layout.addWidget(title_label)
-
-        self.plot_scroll_area = QScrollArea()
-        self.plot_scroll_area.setWidgetResizable(True)
-        self.plot_scroll_area.setFrameShape(QFrame.NoFrame)
-
-        self.plot_scroll_area.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-        self.plot_scroll_area.setVerticalScrollBarPolicy(
-            Qt.ScrollBarAsNeeded
-        )
-
-        self.plot_container = QWidget()
-
-        self.plot_container_layout = QVBoxLayout(
-            self.plot_container
-        )
-        self.plot_container_layout.setContentsMargins(
-            5, 5, 5, 5
-        )
-        self.plot_container_layout.setSpacing(10)
-
-        self.plot_placeholder_label = QLabel(
-            "No experiment data plotted yet. "
-            "Click 'Plot data' to load."
-        )
-
-        self.plot_placeholder_label.setStyleSheet(
-            "color: #64748b;"
-            "font-size: 13px;"
-        )
-
-        self.plot_container_layout.addWidget(
-            self.plot_placeholder_label
-        )
-
-        self.plot_container_layout.addStretch()
-
-        self.plot_scroll_area.setWidget(
-            self.plot_container
-        )
-
-        layout.addWidget(
-            self.plot_scroll_area,
-            1,
-        )
+        self.browser = CampaignBrowser(self)
+        layout.addWidget(self.browser, 1)
