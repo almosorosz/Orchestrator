@@ -322,6 +322,8 @@ class AssignmentGuiTests(unittest.TestCase):
         from MAIN_WINDOW import MainWindow
         window = MainWindow()
         try:
+            # Exercise the DoE-only start route without the bundled manual batch.
+            window.control_panel.experiments.clear()
             window.settings_page.exp_number_input.setText("2")
             window._assigned_doe_campaign = object()
             window.settings_page.set_assignment_available(True)
