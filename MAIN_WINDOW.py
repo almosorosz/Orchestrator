@@ -36,7 +36,7 @@ from gui.stylish_widgets                  import MetricCard, LogViewer, StatusBa
 from gui.pages.dashboard_page             import DashboardPage
 from gui.pages.experiment_page            import ExperimentPage
 from gui.pages.plots_page                 import PlotsPage
-from gui.pages.brain_page                 import BrainPage
+from gui.pages.sentinel_page                 import SentinelPage
 from gui.pages.modeling_page              import ModelingPage
 from gui.pages.control_panel_page         import ControlPanelPage
 from gui.pages.settings_page              import SettingsPage
@@ -1928,7 +1928,7 @@ class MainWindow(QMainWindow):
 
         self.experiment_page    = ExperimentPage( parent=self)    
         self.plots_page         = PlotsPage(parent=self)
-        self.brain_page         = BrainPage(parent=self)    
+        self.sentinel_page         = SentinelPage(parent=self)
         self.modeling_page      = ModelingPage(parent=self)    
         self.control_panel_page = ControlPanelPage(parent=self)
         self.control_panel_page.control_panel.set_theme(
@@ -1949,7 +1949,7 @@ class MainWindow(QMainWindow):
             self.dashboard_page,
             self.experiment_page,
             self.plots_page,
-            self.brain_page,
+            self.sentinel_page,
             self.modeling_page,
             self.control_panel_page,
             self.settings_page,
@@ -2123,7 +2123,7 @@ class MainWindow(QMainWindow):
         self.btn_dashboard = QPushButton("🏠  Dashboard")
         self.btn_experiment = QPushButton("🧪  Experiment")
         self.btn_plots = QPushButton("📊  Data & Plots")
-        self.btn_brain = QPushButton("🧠  Brain")
+        self.btn_sentinel = QPushButton("🛡  Sentinel")
         self.btn_modeling = QPushButton("📐  Modeling")
         self.btn_control_panel = QPushButton("🎛  Control Panel")
         self.btn_settings = QPushButton("⚙️  Settings")
@@ -2132,7 +2132,7 @@ class MainWindow(QMainWindow):
             self.btn_dashboard,
             self.btn_experiment,
             self.btn_plots,
-            self.btn_brain,
+            self.btn_sentinel,
             self.btn_modeling,
             self.btn_control_panel,
             self.btn_settings,
@@ -2316,6 +2316,9 @@ class MainWindow(QMainWindow):
         # --------------------------------------------------
         # 2. Existing MainWindow cleanup
         # --------------------------------------------------
+
+        if hasattr(self, "sentinel_page"):
+            self.sentinel_page.shutdown()
 
         self.reset_command()
 
