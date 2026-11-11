@@ -8,7 +8,9 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.polynomial.legendre import leggauss
 from scipy.integrate import solve_ivp
-from scipy.linalg import eigh
+from scipy.linalg import LinAlgError, eigh
+
+from ..distribution import cell_volumes, seed_number_density
 
 
 @dataclass(frozen=True)
@@ -131,25 +133,13 @@ class CCASReference:
     breakup_events: np.ndarray
 
 
-def _seed_moments(experiment, seed_mass, shape, density, lower, upper, length_scale):
-    if seed_mass == 0:
-        return np.zeros(6)
-    data = np.asarray(experiment["InitialCSDsData"], dtype=float)
-    if (data.ndim != 2 or data.shape[0] != 2 or data.shape[1] < 2
-            or not np.isfinite(data).all() or np.any(np.diff(data[0]) <= 0)):
-        raise ValueError("QMOM seed data require finite, strictly increasing size points")
-    # Split integration at supplied CSD knots so even narrow seed modes contribute.
-    grid = np.r_[lower, data[0, (data[0] > lower) & (data[0] < upper)], upper]
-    nodes, weights = leggauss(10)
-    half_width = np.diff(grid) / 2
-    sizes = grid[:-1, None] + half_width[:, None] * (nodes + 1)
-    x = sizes.ravel()
-    pdf = np.maximum(np.interp(x, data[0], data[1], left=0., right=0.), 0.)
-    n = (pdf / x**3) * (half_width[:, None] * weights).ravel()
-    moments = n @ ((x[:, None] / length_scale)**np.arange(6))
-    if not np.isfinite(moments).all() or moments[3] <= 0:
-        raise ValueError("The specified seed distribution has no finite volume on the mesh")
-    return moments * (seed_mass * 1e12 / (shape * density * length_scale**3 * moments[3]))
+def _seed_moments(experiment, process, bounds, length_scale):
+    """Match PBM seed count and mass on the selected mesh."""
+    counts = seed_number_density(experiment, process, bounds) * np.diff(bounds)
+    # Place each bin's count at its volume-equivalent size. This preserves
+    # M0 and M3 while all six moments describe one nonnegative distribution.
+    sizes = np.cbrt(cell_volumes(bounds, 1.)) / length_scale
+    return counts @ (sizes[:, None]**np.arange(6))
 
 
 def _ccas_daughters(br, bounds, shape, length_scale):
@@ -176,6 +166,23 @@ def _ccas_daughters(br, bounds, shape, length_scale):
     else:
         raise ValueError("QMOM breakage requires daughter law 1 or Gaussian law 2 with positive width")
     return moments / moments[3]
+
+
+class _InvalidQMOMTrial(ValueError):
+    """An adaptive integration trial left the closure's valid domain."""
+
+
+def _integrate_ccas(rhs, time, initial, rtol, atol, max_step):
+    # An exception from a trial stage bypasses the integrator's normal error
+    # rejection. Retry with a smaller cap, keeping the caller's wall budget.
+    for attempt in range(3):
+        try:
+            return solve_ivp(rhs, (time[0], time[-1]), initial, t_eval=time, method="DOP853",
+                             rtol=rtol, atol=atol, max_step=max_step)
+        except _InvalidQMOMTrial:
+            if attempt == 2:
+                raise
+            max_step /= 4
 
 
 def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, time=None,
@@ -217,7 +224,7 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
     seed_mass = process["SeedMass"]
     if min(shape, rho, mass, process["SolventDensity"], process["AntiSolventDensity"]) <= 0 or seed_mass < 0:
         raise ValueError("QMOM requires positive densities, shape factor, liquid mass and nonnegative seed mass")
-    initial_moments = _seed_moments(experiment, seed_mass, shape, rho, lower, upper, ls)
+    initial_moments = _seed_moments(experiment, process, bounds, ls)
     ns = max(initial_moments[0], 1e6)
     mass_factor = rho * ns * shape * ls**3 / 1e12
     daughter = _ccas_daughters(br, bounds, shape, ls)
@@ -260,6 +267,8 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
             raise TimeoutError("QMOM exceeded its time budget")
         moments = y[:6]
         dissolved, liquid_mass, tracked, _, _ = y[6:]
+        if not np.isfinite(y).all() or liquid_mass <= 0 or dissolved <= -liquid_mass:
+            raise _InvalidQMOMTrial(f"Invalid QMOM liquid or moment trial state at t={t:.2f} s")
         ratio = dissolved / liquid_mass
         temperature_k = float(temperature(t)) + 273.15
         feed = float(flow(t))
@@ -271,7 +280,10 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
                       + g * anti / temperature_k + h * np.exp(anti) / temperature_k)
         supersat = ratio / (1 + ratio) / csat - 1
         thermal = 8.314 * temperature_k
-        node, weight = quadrature(moments)
+        try:
+            node, weight = quadrature(moments)
+        except (ValueError, LinAlgError) as error:
+            raise _InvalidQMOMTrial(f"Unrealizable QMOM trial moments at t={t:.2f} s") from error
         length = ls * node
         rate_law = growth if supersat > 0 else dissolution
         direction = 1 if supersat > 0 else -1
@@ -280,7 +292,7 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
         if len(length) and direction == 1 and length[-1] > upper + boundary_epsilon:
             volume_weights = weight * node**3
             volume_share = volume_weights[-1] / volume_weights.sum()
-            raise ValueError(f"QMOM upper size boundary at t={t:.2f} s: "
+            raise _InvalidQMOMTrial(f"QMOM upper size boundary at t={t:.2f} s: "
                              f"trial node {length[-1]:.4g} µm exceeds Lmax={upper:g} µm "
                              f"and represents {volume_share:.2%} of quadrature crystal volume.")
         change = np.zeros(6)
@@ -344,7 +356,7 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
                 speeds *= scale
                 change *= scale
             if len(length) and speeds[0] > 0 and length[0] <= lower + boundary_epsilon:
-                raise ValueError(f"QMOM lower size boundary at t={t:.2f} s: "
+                raise _InvalidQMOMTrial(f"QMOM lower size boundary at t={t:.2f} s: "
                                  f"dissolving trial node {length[0]:.4g} µm reached Lmin={lower:g} µm.")
             if daughter is not None and tracked > 0 and moments[0] > 0 and len(length):
                 volume = shape * length**3
@@ -365,8 +377,7 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
     if relaxation is not None:
         # Keep explicit trial stages within the equilibrium relaxation scale.
         max_step = min(max_step, 4 * relaxation)
-    result = solve_ivp(rhs, (time[0], time[-1]), initial, t_eval=time, method="DOP853",
-                       rtol=rtol, atol=atol, max_step=max_step)
+    result = _integrate_ccas(rhs, time, initial, rtol, atol, max_step)
     if not result.success or not np.isfinite(result.y).all():
         raise RuntimeError(f"QMOM integration failed. {result.message}")
     moments = result.y[:6] * ns * (ls**powers)[:, None]

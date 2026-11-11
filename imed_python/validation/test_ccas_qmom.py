@@ -39,7 +39,9 @@ class ConfigurableQMOMTests(unittest.TestCase):
                 case = Case("combined", mechanisms)
                 time = np.linspace(0, case.duration, 100)
                 original = solve_reference(case, time)
-                configurable = solve_ccas_qmom(*case.inputs(160), time=time)
+                # The configurable solver starts from mesh data; refine that mesh
+                # before comparing it with the original continuum seed.
+                configurable = solve_ccas_qmom(*case.inputs(640), time=time)
                 expected = (original.moments * case.number_scale
                             * case.length_scale**np.arange(6)[:, None])
                 peak = np.max(np.abs(expected), axis=1)[:, None]
@@ -52,6 +54,21 @@ class ConfigurableQMOMTests(unittest.TestCase):
                 if mechanisms == "full":
                     self.assertGreater(configurable.aggregation_events[-1], 0)
                     self.assertGreater(configurable.breakup_events[-1], 0)
+
+    def test_seed_with_nonzero_near_zero_volume_has_same_count_and_mass(self):
+        parameters, experiment, process, solubility, settings = Case("cooling", "growth").inputs(65)
+        parameters[12] = -np.inf
+        experiment["InitialCSDsData"] = np.array([
+            [0., .5, 1., 2., 5., 10., 65.],
+            [0., .01, .04, .08, .05, 0., 0.],
+        ])
+        reference = solve_ccas_qmom(parameters, experiment, process, solubility, settings)
+        _, _, _, history = simulate(parameters, experiment, process, solubility, settings,
+                                    return_history=True)
+        edges = np.linspace(0., settings["Lmax"], settings["N"] + 1)
+        counts = history[:settings["N"], 0] * np.diff(edges)
+        np.testing.assert_allclose(reference.number, counts.sum(), rtol=1e-13)
+        np.testing.assert_allclose(reference.crystal_mass, process["SeedMass"], rtol=1e-13)
 
     def test_unseeded_inert_solution_remains_particle_free(self):
         case = Case("combined", "growth")

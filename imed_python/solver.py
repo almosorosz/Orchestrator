@@ -7,7 +7,7 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from scipy.io import loadmat
 
-from .distribution import cell_volumes
+from .distribution import cell_volumes, seed_number_density
 
 
 PBM_MODES = {
@@ -274,16 +274,7 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
     if end <= 0 or mass <= 0 or not 0 <= initial_conc < 1:
         raise ValueError("Expected positive duration and solvent mass and concentration in [0, 1)")
     check_liquid_inventory(flow_data, flow, end, mass)
-    seed = np.zeros(n)
-    if process["SeedMass"]:
-        frequency = profile(experiment["InitialCSDsData"])(bounds)
-        frequency = np.where(np.isfinite(frequency) & (frequency >= 0), frequency, 0)
-        number = np.r_[0, frequency[1:] / bounds[1:]**3]
-        seed = (number[:-1] + number[1:]) / 2
-        seed_mass = np.dot(volume * width, seed) * rho / 1e12
-        if seed_mass <= 0:
-            raise ValueError("Seed mass is positive but the initial CSD has no mass on the grid")
-        seed *= process["SeedMass"] / seed_mass
+    seed = seed_number_density(experiment, process, bounds)
 
     if agg[0] > 0:
         if matlab_pe:
