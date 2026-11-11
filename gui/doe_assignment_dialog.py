@@ -34,6 +34,7 @@ class DoeAssignmentDialog(QDialog):
         self.table.setHorizontalHeaderLabels(["Generated profile", "Device", "Conversion"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.rows = {}
+        self.imed_rows = {}
         required = self.service.required_roles()
         for row, (role, spec) in enumerate(ROLES.items()):
             label = spec.label + (" *" if role in required else " (inactive)")
@@ -53,6 +54,23 @@ class DoeAssignmentDialog(QDialog):
             if index >= 0 and (role in required or role in existing):
                 combo.setCurrentIndex(index)
             combo.currentIndexChanged.connect(lambda _, key=role: self.update_conversion(key))
+        if self.service.imed_simulations:
+            from imed_python.demo_campaign import MONITOR_TYPES
+            defaults = next(iter(self.service.imed_simulations.values())).get("monitors", {})
+            for role, kind in MONITOR_TYPES.items():
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(f"IMED: {role} *"))
+                combo = QComboBox()
+                combo.addItem("Not assigned", None)
+                for key, config in configs.items():
+                    if config.get("simulated") and config["type"] == kind and is_monitor_only(config):
+                        combo.addItem(f"{key}: {config['name']}", key)
+                combo.setCurrentIndex(max(0, combo.findData(defaults.get(role))))
+                combo.currentIndexChanged.connect(self.invalidate)
+                self.imed_rows[role] = combo
+                self.table.setCellWidget(row, 1, combo)
+                self.table.setItem(row, 2, QTableWidgetItem("Recorded channel"))
         layout.addWidget(self.table)
         self.include_monitors = QCheckBox("Include connected read-only monitors")
         self.include_monitors.setChecked(True)
@@ -120,6 +138,10 @@ class DoeAssignmentDialog(QDialog):
             result.append(ProfileAssignment(role, device_id))
         return tuple(result)
 
+    def imed_monitor_assignments(self):
+        return {role: box.currentData() for role, box in self.imed_rows.items()
+                if box.currentData() is not None}
+
     def edit_calibrations(self):
         if self.calibration_editor is not None:
             updated = self.calibration_editor()
@@ -133,7 +155,8 @@ class DoeAssignmentDialog(QDialog):
             monitors = tuple(key for key, config in self.configs.items()
                              if self.include_monitors.isChecked() and is_monitor_only(config)
                              and getattr(self.hardware.get(key), "is_connected", False))
-            campaign = self.service.compile(self.assignments(), self.configs, monitors)
+            campaign = self.service.compile(self.assignments(), self.configs, monitors,
+                                            imed_monitors=self.imed_monitor_assignments())
             self.preview_table.setRowCount(0)
             total_duration = 0
             for experiment in campaign.experiments:
@@ -180,6 +203,8 @@ class DoeAssignmentDialog(QDialog):
         if filename:
             try:
                 payload = {"version": 1, "assignments": [asdict(item) for item in self.assignments()]}
+                if self.imed_rows:
+                    payload["imed_monitors"] = self.imed_monitor_assignments()
                 Path(filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
             except Exception as error:
                 QMessageBox.warning(self, "Save Failed", str(error))
@@ -198,10 +223,17 @@ class DoeAssignmentDialog(QDialog):
             for item in loaded:
                 if item.role not in self.rows or self.rows[item.role][0].findData(item.device_id) < 0:
                     raise ValueError(f"Missing or incompatible device for {item.role}: {item.device_id}")
+            monitored = payload.get("imed_monitors", {})
+            for role, device in monitored.items():
+                if role not in self.imed_rows or self.imed_rows[role].findData(device) < 0:
+                    raise ValueError(f"Missing or incompatible IMED monitor for {role}: {device}")
             for combo, _ in self.rows.values():
                 combo.setCurrentIndex(0)
             for item in loaded:
                 combo, _ = self.rows[item.role]
                 combo.setCurrentIndex(combo.findData(item.device_id))
+            if "imed_monitors" in payload:
+                for role, combo in self.imed_rows.items():
+                    combo.setCurrentIndex(max(0, combo.findData(monitored.get(role))))
         except Exception as error:
             QMessageBox.warning(self, "Load Failed", str(error))

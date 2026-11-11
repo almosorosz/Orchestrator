@@ -1,5 +1,16 @@
 # CrystaLoop 0.4.0 — Campaign archive, recovery, presets and Windows release
 
+## IMED
+
+Open **IMED** in the sidebar to import a MATLAB model or a recorded CrystaLoop
+campaign. The page provides forward PBM simulation, parameter estimation, model
+discrimination, and D-optimal design. To use campaign data for modeling, load a
+MATLAB case with the relevant kinetics and solubility before importing the campaign.
+See the [IMED workflow guide](imed_python/README.md) for input and solver details.
+For PBM fitting, IMED Parameter Estimation offers final D10/D50/D90 or all recorded size trends under **Size samples**. **Settings → PBM size samples in LOOP** chooses the same data mode for the automated EXP–MODEL handoff and is retained in setup presets. Campaign MODEL inputs carry the choice in `campaign_input.json` under `pbm_fitting.size_term`. The CSV-based external loop writes `pbm_fitting.json` in its MODEL folder. External MODEL scripts should read this value when constructing their fitting objective. The Python fitter accepts it as the `terms` argument to `FitObjective`.
+JAX/Diffrax is optional when running from source and is not bundled in the
+Windows release; use SciPy PBM in the packaged app.
+
 ## Recorded campaign plots
 
 ### Fast simulated profiles

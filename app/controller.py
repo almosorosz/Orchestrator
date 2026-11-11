@@ -4,13 +4,17 @@ import os
 from enum import Enum
 from typing import Optional
 from utilities.data_utils import StableResultTracker, result_files
+from imed_python.size_data import FINAL_SIZE_TERM, SIZE_SAMPLE_OPTIONS
 
 class Stage(Enum):
     OMNI = "OMNI"
     MODEL = "MODEL"
 
 class Controller:
-    def __init__(self, omni_folder: str, model_folder: str , initial_exp_count: int, omni_filename: str="expttsd", model_filename: str="model"):
+    def __init__(self, omni_folder: str, model_folder: str , initial_exp_count: int, omni_filename: str="expttsd", model_filename: str="model", *, pbm_size_term=FINAL_SIZE_TERM):
+        if pbm_size_term not in {value for _, value in SIZE_SAMPLE_OPTIONS}:
+            raise ValueError("Choose final sizes or all recorded size trends for LOOP PBM fitting.")
+        self.pbm_size_term = pbm_size_term
         
         self.omni_filename       = omni_filename
         self.model_filename      = model_filename

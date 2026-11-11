@@ -53,6 +53,7 @@ class ExperimentDefinition:
     profiles: tuple[DeviceProfile, ...]
     source: str = "manual"
     experiment_id: str = field(default_factory=lambda: uuid4().hex)
+    imed_simulation: dict | None = None
 
     def __post_init__(self):
         ids = [profile.device_id for profile in self.profiles]
@@ -104,6 +105,7 @@ class Campaign:
     experiments: tuple[ExperimentDefinition, ...]
     campaign_id: str = field(default_factory=lambda: uuid4().hex)
     monitor_device_ids: tuple[str, ...] = ()
+    doe_factors: tuple[str, ...] | None = None
 
 
 @dataclass

@@ -17,6 +17,41 @@ APP = QApplication.instance() or QApplication([])
 
 
 class LoopRecordingTests(unittest.TestCase):
+    def test_loop_handoff_retains_selected_pbm_size_data_mode(self):
+        from imed_python.size_data import SIZE_SAMPLE_OPTIONS
+        from imed_python.estimation import FitObjective
+
+        _, campaign = self.fixture()
+        for _, term in SIZE_SAMPLE_OPTIONS:
+            with self.subTest(term=term), tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+                model = Path(root)/"model"
+                model.mkdir()
+                controller = Controller(root, str(model), 1, pbm_size_term=term)
+                coordinator = ExperimentCoordinator()
+                coordinator.set_controller(controller)
+                coordinator.begin_campaign(campaign)
+                folder = Path(root)/"campaign_test"
+                folder.mkdir()
+                (folder/"definition.json").write_text(json.dumps({"campaign": {"campaign_id": campaign.campaign_id}}))
+                run = folder/"run1"
+                run.mkdir()
+                (run/"run.json").write_text(json.dumps({"run_id": "run1", "experiment_id": campaign.experiments[0].experiment_id,
+                                                       "status": "completed", "recording_complete": True}))
+                (folder/"summary.json").write_text(json.dumps({"status": "completed", "recording_complete": True}))
+                try:
+                    coordinator.set_campaign_folder(folder)
+                    coordinator.monitoring_tick()
+                    self.assertEqual(controller.current_stage, Stage.MODEL)
+                    manifest = json.loads((Path(controller.current_model_folder)/"campaign_input.json").read_text())
+                    self.assertEqual(manifest["pbm_fitting"]["size_term"], term)
+                    experiment = {"TemperatureData": [[0., 10.], [20., 20.]], "FinalD10D50D90": [10., 20., 30.]}
+                    objective = FitObjective([experiment], [{"ShapeFactor": 1}], {}, {"N": 3}, [0, 0, 1],
+                                             manifest["pbm_fitting"]["size_term"])
+                    self.assertEqual(objective.terms, term)
+                    self.assertEqual(objective.residual_count, 3)
+                finally:
+                    coordinator.reset()
+
     def test_skip_idles_devices_and_sends_only_completed_run_to_model(self):
         from experiment_dashboard.experiment_dashboard import ExperimentWorker
         from hardware_devices.simulated import SimulatedDevice

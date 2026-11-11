@@ -38,6 +38,7 @@ from gui.pages.experiment_page            import ExperimentPage
 from gui.pages.plots_page                 import PlotsPage
 from gui.pages.sentinel_page                 import SentinelPage
 from gui.pages.modeling_page              import ModelingPage
+from gui.pages.imed_page                  import IMEDPage
 from gui.pages.control_panel_page         import ControlPanelPage
 from gui.pages.settings_page              import SettingsPage
 
@@ -557,6 +558,20 @@ class MainWindow(QMainWindow):
                     color: white;
                 }
 
+                #imedWorkflow QPushButton:!hover:!pressed {
+                    background: #0b1728;
+                }
+
+                #imedWorkflow QPushButton:focus:enabled {
+                    border-color: #3b82f6;
+                }
+
+                #imedWorkflow QPushButton:disabled {
+                    background: #0b1728;
+                    color: #8594aa;
+                    border-color: #16263d;
+                }
+
                 QPushButton#plot_button {
                     background: transparent;
                     color: #d6dde8;
@@ -1059,6 +1074,20 @@ class MainWindow(QMainWindow):
                     background: #dbeafe;
                 }
 
+                #imedWorkflow QPushButton:!hover:!pressed {
+                    background: #ffffff;
+                }
+
+                #imedWorkflow QPushButton:focus:enabled {
+                    border-color: #3b82f6;
+                }
+
+                #imedWorkflow QPushButton:disabled {
+                    background: #f1f5f9;
+                    color: #64748b;
+                    border-color: #d8dee8;
+                }
+
                 QPushButton:checked {
                     background: #2563eb;
                     border: 1px solid #3b82f6;
@@ -1483,6 +1512,10 @@ class MainWindow(QMainWindow):
         if accepted and dialog.campaign is not None:
             configs, _ = panel.collect_current_configuration()
             self._doe_assignments = dialog.assignments()
+            for experiment in dialog.campaign.experiments:
+                if experiment.imed_simulation:
+                    self.create_experiments.parameter_snapshots[experiment.name]["imed_simulation"]["monitors"] = (
+                        dict(experiment.imed_simulation["monitors"]))
             self._apply_doe_campaign(dialog.campaign, configs)
             self.log_message("DoE assignments applied. Use Start DoE independent from loop, or Dashboard Start for the EXP–MODEL loop.", "SUCCESS")
 
@@ -1516,10 +1549,14 @@ class MainWindow(QMainWindow):
                 self.log_message("Device configuration changed. Apply DoE assignments again before starting.", "WARNING")
                 return
         if for_loop:
+            if any(experiment.imed_simulation for experiment in campaign.experiments):
+                self.log_message("Run the IMED validation preset with Start DoE independent from loop.", "WARNING")
+                return
             return self._start_loop_campaign(campaign)
         return panel.start_campaign(campaign)
 
     def _start_loop_campaign(self, campaign):
+        self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
         dashboard = self.control_panel.start_campaign(campaign, {"enabled": True, "output_folder": self.CONTROLLER.omni_folder})
         if dashboard is None:
             return
@@ -1588,6 +1625,7 @@ class MainWindow(QMainWindow):
             environment = {"experiment_path": self.settings_page.exp_path_input.text(),
                            "model_path": self.settings_page.MODEL_path_input.text(),
                            "experiment_count": self.settings_page.exp_number_input.text(),
+                           "pbm_size_term": self.settings_page.pbm_size_samples.currentData(),
                            "sampling_strategy": self.settings_page.get_sampling_strategy()}
             write_preset(filename, panel, self.experiment_service.exp_par, self._doe_assignments,
                          environment, load_recording_settings(),
@@ -1626,6 +1664,9 @@ class MainWindow(QMainWindow):
             self.settings_page.exp_path_input.setText(environment.get("experiment_path", ""))
             self.settings_page.MODEL_path_input.setText(environment.get("model_path", ""))
             self.settings_page.exp_number_input.setText(environment.get("experiment_count", ""))
+            self.settings_page.pbm_size_samples.setCurrentIndex(
+                self.settings_page.pbm_size_samples.findData(environment.get(
+                    "pbm_size_term", self.settings_page.pbm_size_samples.itemData(0))))
             self.settings_page.doe_type_combo.setCurrentText(environment.get("sampling_strategy", "Random sampling"))
             self.settings_page.set_doe_available(False)
             self.settings_page.set_doe_info("", "", "")
@@ -1783,6 +1824,7 @@ class MainWindow(QMainWindow):
             no_exp,
             self.omni_filename,
             self.MODEL_filename,
+            pbm_size_term=self.settings_page.pbm_size_samples.currentData(),
         )
 
         # Give the coordinator the SAME controller instance.
@@ -1940,6 +1982,7 @@ class MainWindow(QMainWindow):
         self.hardware = (self.control_panel_page.hardware)
 
         self.settings_page = SettingsPage(parent=self)
+        self.imed_page = IMEDPage(parent=self)
 
         # ----------------------------------------------------------
         # ALLOW PAGES TO SHRINK
@@ -1953,6 +1996,7 @@ class MainWindow(QMainWindow):
             self.modeling_page,
             self.control_panel_page,
             self.settings_page,
+            self.imed_page,
         ]
 
         for page in pages:
@@ -2127,6 +2171,7 @@ class MainWindow(QMainWindow):
         self.btn_modeling = QPushButton("📐  Modeling")
         self.btn_control_panel = QPushButton("🎛  Control Panel")
         self.btn_settings = QPushButton("⚙️  Settings")
+        self.btn_imed = QPushButton("🔬  IMED")
 
         self.nav_buttons = [
             self.btn_dashboard,
@@ -2136,6 +2181,7 @@ class MainWindow(QMainWindow):
             self.btn_modeling,
             self.btn_control_panel,
             self.btn_settings,
+            self.btn_imed,
         ]
 
         for btn in self.nav_buttons:
@@ -2267,6 +2313,10 @@ class MainWindow(QMainWindow):
         self.switch_page(2)
 
     def closeEvent(self, event):
+        if not self.imed_page.panel.close_simulation():
+            event.ignore()
+            return
+
         from experiment.recording import pending_csv_recorders
         if pending_csv_recorders():
             QMessageBox.warning(self, "CSV saving is waiting", "Close the experiment CSV files in Excel before exiting. Pending data will be saved automatically once the files are closed.")

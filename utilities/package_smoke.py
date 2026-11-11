@@ -21,6 +21,12 @@ def run(output):
         window = MainWindow()
         assert WINDOWS_ICON_PATH.is_file() and AS_PUMP_CALIBRATION_FILE.is_file()
         assert not window.windowIcon().isNull()
+        window.btn_imed.click()
+        assert window.stack.currentWidget() is window.imed_page
+        assert not window.imed_page.panel.isWindow()
+        assert window.imed_page.panel.import_button.isEnabled()
+        assert not window.imed_page.panel.design.isEnabled()
+        window.btn_dashboard.click()
         configs = {"pump": {"name": "Smoke-test pump", "type": "masterflex", "simulated": True, "connection": {}}}
         frame = pd.DataFrame({"time_s": [0, 1], "pump": [10, 20]})
         definition = ExperimentDefinition.from_frame(frame, configs)
@@ -51,7 +57,8 @@ def run(output):
                      window.experiment_service.exp_par, (), {}, {"output_folder": str(DATA_DIR / "smoke"), "sql_enabled": False})
         read_preset(setup)
         result = {"passed": True, "version": __version__, "data_directory": str(DATA_DIR),
-                  "resources": True, "csv_recording": True, "campaign_plot": True, "setup_preset": True}
+                  "resources": True, "imed_page": True, "csv_recording": True,
+                  "campaign_plot": True, "setup_preset": True}
     except Exception:
         result = {"passed": False, "error": traceback.format_exc()}
     finally:

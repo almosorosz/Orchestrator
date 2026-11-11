@@ -77,3 +77,29 @@ by this configuration.
 To use real devices later, replace connection fields and switch the required
 devices to Real hardware, then supply actual calibrations/OPC nodes. The empty
 OPC/serial fields in this file are placeholders for simulated mode only.
+# IMED validation DoE
+
+Load `imed_validation_doe.json` in **Settings → Load setup preset**. In **Control
+Panel**, connect the simulated devices. Return to **Settings → Assign devices /
+preview DoE** and review the actuator assignments and the rows prefixed **IMED:**.
+Select **Preview / validate**, **Apply assignments**, and **Start DoE independent
+from loop**.
+
+The three runs are seeded cooling, unseeded cooling with antisolvent, and seeded
+isothermal antisolvent addition. The PBM uses the solubility coefficients in
+`imed_python/validation/cases.py`. The simulated count channel is the PBM
+particle count per liquid volume. The size channels are volume percentiles and
+are empty until particles are present.
+
+The crystallization clock starts at the initial temperature. The two seeded runs
+command the seed pump at that instant and the PBM treats the seed dose as an
+initial condition. Final temperature is reached by 35 s and held through 60 s.
+The valve then discharges the batch, the cleaning pump adds rinse solvent, and
+the valve drains the rinse. Those operations stay in the recorded timeline.
+
+After recording finishes, choose the campaign folder in **IMED → Import
+CrystalLoop**. IMED reads the stored device assignments and uses only the 0–60 s
+crystallization interval. It loads the seed distribution, process inputs,
+solubility and starting kinetic model together, so you can open **Parameter
+Estimation** without a separate MAT file. The default recording root is
+`data/imed_simulated_runs`.

@@ -40,6 +40,9 @@ def read_preset(filename):
     environment = data.get("environment", {})
     if not isinstance(environment, dict) or any(not isinstance(value, str) for value in environment.values()):
         raise ValueError("Environment paths and sampling settings must be text")
+    from imed_python.size_data import FINAL_SIZE_TERM, SIZE_SAMPLE_OPTIONS
+    if environment.get("pbm_size_term", FINAL_SIZE_TERM) not in {value for _, value in SIZE_SAMPLE_OPTIONS}:
+        raise ValueError("Unknown LOOP PBM size-sample setting")
     if not isinstance(panel.get("recording_folder", ""), str):
         raise ValueError("Invalid Control Panel recording folder")
     speed = panel.get("simulation_speed", 1)
