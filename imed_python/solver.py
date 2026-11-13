@@ -1,5 +1,6 @@
 """Headless IMED parameter-estimation forward model."""
 from pathlib import Path
+from typing import BinaryIO
 from time import monotonic
 
 import numpy as np
@@ -34,7 +35,7 @@ def pbm_backend_label(settings):
     return PBM_MODES[mode]
 
 
-def read_model(path: str | Path):
+def read_model(path: str | Path | BinaryIO, *, allow_settings_only=False):
     keys = ("ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
             "MDIteration", "MDsimulation", "PPsimulation", "summaryTable",
             "objweightfactor", "pyfitsettings", "PythonWorkflow")
@@ -42,11 +43,16 @@ def read_model(path: str | Path):
         data = loadmat(path, variable_names=keys, simplify_cells=True)
     except NotImplementedError as error:
         raise ValueError("Export the IMED case from MATLAB with -v7 to import it here.") from error
-    if not any(key in data for key in keys[:4]):
+    if not allow_settings_only and not any(key in data for key in keys[:4]):
         raise ValueError("The MAT file does not contain an IMED model or experiment data")
     for key in ("ExpData", "ProcInf", "ModelParameter"):
-        if isinstance(data.get(key), dict):
-            data[key] = [data[key]]
+        value = data.get(key)
+        if isinstance(value, dict):
+            data[key] = [value]
+        elif isinstance(value, np.ndarray) and not value.size:
+            data[key] = []
+    if isinstance(data.get("Solubility"), np.ndarray) and not data["Solubility"].size:
+        data.pop("Solubility")
     if "PythonWorkflow" in data:
         from .session import history
 

@@ -13,7 +13,7 @@ from experiment.recording import validate_settings
 
 def read_preset(filename):
     data = json.loads(Path(filename).read_text(encoding="utf-8"))
-    if data.get("format") != "crystalloop-setup" or data.get("version") not in (1, 2):
+    if data.get("format") != "crystalloop-setup" or data.get("version") not in (1, 2, 3):
         raise ValueError("Unsupported setup preset format/version")
     panel = data["control_panel"]
     from control_panel.control_panel import HARDWARE_TYPES
@@ -94,12 +94,15 @@ def read_preset(filename):
     return data, parameters, assignments
 
 
-def write_preset(filename, panel, parameters, assignments, environment, recording, generated_doe=None, *, monitor_device_ids=()):
+def write_preset(filename, panel, parameters, assignments, environment, recording, generated_doe=None, *, monitor_device_ids=(), modeling=None):
     from app.version import __version__
     payload = {"format": "crystalloop-setup", "version": 2, "application_version": __version__,
                "control_panel": panel, "process": asdict(parameters),
                "assignments": [asdict(a) for a in assignments], "environment": environment,
                "recording": validate_settings(recording), "generated_doe": generated_doe,
                "monitor_device_ids": list(monitor_device_ids)}
+    if modeling is not None:
+        payload["version"] = 3
+        payload["modeling"] = modeling
     from experiment.recording import atomic_json
     atomic_json(Path(filename), payload)

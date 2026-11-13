@@ -528,11 +528,22 @@ class HuberController(BaseDevice):
             return False
 
 
+    def _set_control_mode(self, mode: str, value: int) -> str:
+        # PP uses @ to set a volatile value and request the controller's echo.
+        command = f"TM@ {value:+06d}"
+        response = self.send_command(command)
+        if not response:
+            raise RuntimeError(f"No reply to {command!r} for {mode} control on {self.port}.")
+        match = re.fullmatch(r"TM\s*([+-]?\d+)", response, re.IGNORECASE)
+        if match is None or int(match.group(1)) != value:
+            raise RuntimeError(f"Huber did not confirm {mode} control on {self.port}: {response!r}.")
+        return response
+
     def set_jacket_control(self) -> str:
-        return self.send_command("TM 0")
+        return self._set_control_mode("Jacket", 0)
 
     def set_process_control(self) -> str:
-        return self.send_command("TM 1")
+        return self._set_control_mode("Process", 1)
 
 
     def read_status(self) -> dict:

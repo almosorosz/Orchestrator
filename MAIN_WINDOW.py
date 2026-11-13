@@ -39,6 +39,7 @@ from gui.pages.plots_page                 import PlotsPage
 from gui.pages.sentinel_page                 import SentinelPage
 from gui.pages.modeling_page              import ModelingPage
 from gui.pages.imed_page                  import IMEDPage
+from imed_python.readable_theme            import readable_controls
 from gui.pages.control_panel_page         import ControlPanelPage
 from gui.pages.settings_page              import SettingsPage
 
@@ -935,7 +936,7 @@ class MainWindow(QMainWindow):
                 QPushButton#theme_toggle:pressed {
                     background-color: #22262c;
                 }
-                """)
+                """ + readable_controls(dark))
             #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: white; background: transparent;")
 
         else:
@@ -1192,7 +1193,7 @@ class MainWindow(QMainWindow):
                 QScrollBar::sub-page:vertical {
                     background: transparent;
                 }
-            """)
+            """ + readable_controls(dark))
             #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: black; background: transparent;")
 
 
@@ -1631,7 +1632,8 @@ class MainWindow(QMainWindow):
                          environment, load_recording_settings(),
                          generated_doe=snapshot_doe(self.create_experiments),
                          monitor_device_ids=(self._assigned_doe_campaign.monitor_device_ids
-                                             if self._assigned_doe_campaign is not None else ()))
+                                             if self._assigned_doe_campaign is not None else ()),
+                         modeling=self.imed_page.panel.setup_settings())
             self.log_message(f"Setup preset saved: {filename}", "SUCCESS")
         except Exception as error:
             QMessageBox.warning(self, "Preset save failed", str(error))
@@ -1648,6 +1650,9 @@ class MainWindow(QMainWindow):
             from app.presets import read_preset
             from gui.recording_settings_dialog import save_recording_settings
             data, parameters, assignments = read_preset(filename)
+            from imed_python.setup_snapshot import read_imed_settings
+
+            modeling = read_imed_settings(data.get("modeling"))
             panel = data["control_panel"]
             if not self.control_panel.apply_loaded_configuration(panel["devices"], panel.get("profiles", {}),
                     panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology")):
@@ -1687,6 +1692,8 @@ class MainWindow(QMainWindow):
             save_recording_settings(data["recording"])
             from experiment.recording import resume_sql
             resume_sql(data["recording"])
+            if modeling is not None:
+                self.imed_page.panel.restore_setup_settings(modeling)
             self._update_archive_roots()
             message = "Setup preset loaded. Connect the required devices before starting."
             if self.create_experiments is not None:

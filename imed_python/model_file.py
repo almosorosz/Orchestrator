@@ -85,12 +85,15 @@ def _atomic_write(destination, payload):
             temporary.unlink(missing_ok=True)
 
 
-def save_checkpoint(source, destination, case):
-    """Write the current case and workflow while preserving opaque source variables."""
-    destination = Path(destination)
+def checkpoint_variables(case):
+    """Convert current IMED case fields to MATLAB-compatible records."""
     mutable = ("ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
                "objweightfactor", "pyfitsettings", "PythonWorkflow")
     updates = {key: case[key] for key in mutable if key in case}
+    # Write empty records when an editor explicitly removes the last experiment.
+    # Empty solver inputs are normalized on read.
+    if isinstance(updates.get("Solubility"), dict) and not updates["Solubility"]:
+        updates["Solubility"] = np.empty((0, 0))
     # Keep MATLAB's struct arrays for the existing IMED input and model records.
     for key in ("ExpData", "ProcInf", "ModelParameter"):
         records = updates.get(key)
@@ -101,6 +104,13 @@ def save_checkpoint(source, destination, case):
                 for field in fields:
                     structs[0, index][field] = record.get(field, np.empty((0, 0)))
             updates[key] = structs
+    return updates
+
+
+def save_checkpoint(source, destination, case):
+    """Write the current case and workflow while preserving opaque source variables."""
+    destination = Path(destination)
+    updates = checkpoint_variables(case)
     if source is not None:
         save_model(source, destination, {}, updates, preserve_legacy=True, allow_overwrite=True)
     else:

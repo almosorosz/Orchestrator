@@ -8,12 +8,15 @@ class SolverChoice(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         for mode, label in PBM_MODES.items():
-            self.addItem(label, (mode, "auto"))
+            self.addItem("JAX PBM (Auto)" if mode == "jax" else label, (mode, "auto"))
             if mode == "jax":
                 self.addItem("JAX PBM (CPU)", (mode, "cpu"))
                 self.addItem("JAX PBM (GPU)", (mode, "gpu"))
-        self.setToolTip("JAX PBM selects the default JAX device. JAX PBM (GPU) "
-                        "requires a GPU-enabled JAX environment. On Windows, run IMED in WSL2.")
+        self.setToolTip("JAX Auto uses JAX’s default device. JAX CPU forces the CPU. "
+                        "JAX GPU requires a working GPU backend. All three use the same PBM. "
+                        "The first solve for an input shape includes compilation. "
+                        "On Windows, GPU use requires running IMED in WSL2.")
+        self.setWhatsThis(self.toolTip())
 
     def load_settings(self, settings):
         settings = settings if isinstance(settings, dict) else {}

@@ -15,7 +15,7 @@ from .estimation import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, FitObjective, fit_mo
 from .parameter_labels import PARAMETERS
 from .solver import pbm_backend_label
 from .size_data import SIZE_SAMPLE_OPTIONS, TREND_SIZE_TERM
-from .session import latest_step, pack_fit, record_step, signature, unpack_fit
+from .session import display_name, latest_step, pack_fit, record_step, signature, unpack_fit
 
 
 class AdvancedSettings(QDialog):
@@ -223,8 +223,8 @@ class ParameterEstimation(QDialog):
 
         self.model = QComboBox()
         self.model.addItem("All models", None)
-        for index, _ in enumerate(case["ModelParameter"]):
-            self.model.addItem(f"Model {index + 1}", index)
+        for index, model in enumerate(case["ModelParameter"]):
+            self.model.addItem(display_name(model, f"Model {index + 1}"), index)
         saved = case.get("objweightfactor")
         saved = saved if isinstance(saved, dict) else {}
         self.weights = []
@@ -498,7 +498,8 @@ class ParameterEstimation(QDialog):
 
     def apply_fit(self):
         for index, fit in self.results.items():
-            model = {"paraset": self.case["ModelParameter"][index]["paraset"]}
+            model = {key: value for key, value in self.case["ModelParameter"][index].items()
+                     if key in ("Name", "paraset")}
             model.update(para=fit.parameters.reshape(1, -1), covmat=fit.covariance,
                          resnorm=float(fit.residuals @ fit.residuals),
                          resid=fit.residuals, jacobian=fit.jacobian, nvars=len(fit.parameters),

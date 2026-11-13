@@ -9,7 +9,7 @@ from matplotlib.figure import Figure
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -18,13 +18,14 @@ from .probabilistic import (
     CONDITIONS, ERROR_LEVELS, assess_reliability, error_limits, model_intervals,
     partial_rank_correlations, prediction_errors, prcc_diagnostics, propagate, sample_intervals,
 )
-from .session import history, record_step, signature
+from .session import display_name, history, record_step, signature
 from .simulated_profile import editable_groups, remember_active_doe
 from .simulated_profile_dialog import SimulatedProfileDialog
 
 
 class ProbabilisticJob(QThread):
     message = Signal(str)
+    draws = Signal(int, int, int)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -38,7 +39,7 @@ class ProbabilisticJob(QThread):
         try:
             result = propagate(self.case, self.model_index, self.experiment_index,
                                **self.request, cancelled=self.cancel_requested.is_set,
-                               progress=self.message.emit)
+                               progress=self.message.emit, draw_progress=self.draws.emit)
         except InterruptedError:
             self.failed.emit("Probabilistic analysis stopped.")
         except Exception as error:
@@ -65,7 +66,8 @@ class ProbabilisticDialog(QDialog):
             self.resize(1100, 850)
         self.case, self.job, self.result = case, None, None
         self.model, self.experiment = QComboBox(), QComboBox()
-        self.model.addItems(f"Model {i+1}" for i in range(len(case["ModelParameter"])))
+        self.model.addItems(display_name(model, f"Model {i+1}")
+                            for i, model in enumerate(case["ModelParameter"]))
         self.experiment.addItems(f"Experiment {i+1}" for i in range(len(case["ExpData"])))
         self.samples, self.seed = QSpinBox(), QSpinBox()
         self.samples.setRange(2, 10000)
@@ -122,7 +124,7 @@ class ProbabilisticDialog(QDialog):
         assessment_row.addWidget(QLabel("Assess"))
         assessment_row.addWidget(self.reliability_scope, 1)
         assessment_controls.setVisible(not sensitivity)
-        form.addRow(assessment_controls)
+        self.error_threshold.setKeyboardTracking(False)
         self.plot_bounds = {"absolute": [np.nan, np.nan], "relative": [np.nan, np.nan]}
         self.limit_inputs = {}
         self.condition_controls = {}
@@ -165,6 +167,8 @@ class ProbabilisticDialog(QDialog):
         reliability_page = QWidget(self)
         reliability_page.setVisible(not sensitivity)
         assessment_layout = QVBoxLayout(reliability_page)
+        assessment_layout.addWidget(assessment_controls)
+        assessment_layout.addWidget(QLabel("Changing the error threshold or assessment scope reuses these draws."))
         assessment_layout.addWidget(self.reliability_label)
         assessment_layout.addWidget(self.reliability_table)
         explanation = QLabel(
@@ -226,6 +230,9 @@ class ProbabilisticDialog(QDialog):
             self.figures[name] = figure, canvas
         self.status = QLabel("Choose a model and experiment, then run the analysis.")
         self.status.setWordWrap(True)
+        self.draw_bar = QProgressBar()
+        self.draw_bar.setFormat("%v / %m draws")
+        self.draw_bar.hide()
         self.run_button, self.stop_button = QPushButton("Run analysis"), QPushButton("Stop")
         self.export_button, self.close_button = QPushButton("Export samples CSV"), QPushButton("Close")
         self.intervals_export = QPushButton("Export model intervals CSV")
@@ -252,6 +259,7 @@ class ProbabilisticDialog(QDialog):
             self.tabs.setMinimumHeight(360)
             layout.addLayout(buttons)
             layout.addWidget(self.status)
+            layout.addWidget(self.draw_bar)
             layout.addWidget(scroll, 1)
         else:
             content = layout
@@ -262,6 +270,7 @@ class ProbabilisticDialog(QDialog):
         content.addWidget(self.tabs, 1)
         if not sensitivity:
             layout.addWidget(self.status)
+            layout.addWidget(self.draw_bar)
             layout.addLayout(buttons)
         self.controls = [self.model, self.experiment, self.samples, self.seed]
         if sensitivity:
@@ -326,6 +335,7 @@ class ProbabilisticDialog(QDialog):
 
     def clear_result(self):
         self.result = None
+        self.draw_bar.hide()
         self.export_button.setEnabled(False)
         self.intervals_export.setEnabled(False)
         self.reliability_export.setEnabled(False)
@@ -377,15 +387,33 @@ class ProbabilisticDialog(QDialog):
             self.profile_button.setEnabled(False)
             self.recorded_button.setEnabled(False)
         self.clear_result()
+        self.draw_bar.setRange(0, 0)
+        self.draw_bar.show()
+        self.status.setText("Preparing sample inputs…")
         self.job = ProbabilisticJob(self.case, self.model.currentIndex(), self.experiment.currentIndex(), request, self)
         for control in (*self.controls, self.run_button, self.close_button):
             control.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.job.message.connect(self.status.setText)
-        self.job.failed.connect(self.status.setText)
+        self.job.message.connect(self.show_stage)
+        self.job.draws.connect(self.show_draw_progress)
+        self.job.failed.connect(self.show_failure)
         self.job.completed.connect(self.show_result)
         self.job.finished.connect(self.finish)
         self.job.start()
+
+    def show_stage(self, message):
+        if self.job is not None and not self.job.cancel_requested.is_set():
+            self.status.setText(message)
+
+    def show_draw_progress(self, completed, total, successful):
+        if self.job is not None and not self.job.cancel_requested.is_set():
+            self.draw_bar.setRange(0, total)
+            self.draw_bar.setValue(completed)
+            self.draw_bar.setFormat(f"%v / %m draws · {successful} successful · {completed - successful} failed")
+
+    def show_failure(self, message):
+        self.draw_bar.hide()
+        self.status.setText(message)
 
     def stop(self):
         if self.job is not None:
@@ -509,6 +537,8 @@ class ProbabilisticDialog(QDialog):
 
     def show_result(self, result, *, remember=True):
         self.result = result
+        if self.job is not None:
+            self.status.setText("Rendering analysis plots…")
         for figure, _ in self.figures.values():
             figure.clear()
         predictions = np.asarray(result["predictions"], dtype=float)

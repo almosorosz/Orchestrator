@@ -12,6 +12,11 @@ from .uncertainty import ParameterIntervals
 WORKFLOW_KEY = "PythonWorkflow"
 
 
+def display_name(record, fallback):
+    name = record.get("Name")
+    return name.strip() if isinstance(name, str) and name.strip() else fallback
+
+
 def history(case):
     workflow = case.setdefault(WORKFLOW_KEY, {"version": 1, "steps": []})
     steps = workflow.get("steps", [])

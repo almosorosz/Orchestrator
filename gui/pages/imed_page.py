@@ -26,14 +26,14 @@ class IMEDPage(QWidget):
         # Use the same primary action colors as Settings in both themes.
         self.panel.body.setStyleSheet("""
             QPushButton[imedPrimary="true"]:enabled {
-                background: #3b82f6;
+                background: #1d4ed8;
                 border: 1px solid #60a5fa;
                 color: white;
                 text-align: center;
                 font-weight: 700;
             }
             QPushButton[imedPrimary="true"]:hover:enabled { background: #2563eb; }
-            QPushButton[imedPrimary="true"]:pressed:enabled { background: #1d4ed8; }
+            QPushButton[imedPrimary="true"]:pressed:enabled { background: #1e40af; }
             QPushButton[imedPrimary="true"]:focus:enabled { border-color: #bfdbfe; }
             QCheckBox { background: transparent; }
         """)

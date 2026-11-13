@@ -14,7 +14,7 @@ from .simulated_profile import editable_groups, prediction_inputs, remember_acti
 from .simulated_profile_dialog import SimulatedProfileDialog
 from .solver import load_case, model_parameters, pbm_backend_label, simulate
 from .solver_choice import SolverChoice
-from .session import history, record_step, signature
+from .session import display_name, history, record_step, signature
 
 
 class Simulation(QThread):
@@ -131,7 +131,7 @@ class Window(QMainWindow):
         history(case)
         for combo, key in ((self.model, "ModelParameter"), (self.experiment, "ExpData")):
             combo.clear()
-            combo.addItems(item.get("Name", str(index + 1)) for index, item in enumerate(case[key]))
+            combo.addItems(display_name(item, str(index + 1)) for index, item in enumerate(case[key]))
         self.numerics.load_settings(case.get("pbmsetting"))
         selection = case.get("PythonWorkflow", {}).get("simulation_selection", {})
         if selection:

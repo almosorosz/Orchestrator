@@ -1373,11 +1373,11 @@ class DeviceWidget(QGroupBox):
 
                 control_mode = options.get("control_mode")
 
-                if control_mode == "Jacket":
-                    self.device.set_jacket_control()
+                if control_mode == "Jacket" and not self.device.set_jacket_control():
+                    raise RuntimeError("Huber did not confirm Jacket control.")
 
-                elif control_mode == "Process":
-                    self.device.set_process_control()
+                if control_mode == "Process" and not self.device.set_process_control():
+                    raise RuntimeError("Huber did not confirm Process control.")
 
                 success = self.device.set_target(target)
 

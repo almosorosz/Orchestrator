@@ -17,7 +17,7 @@ from .model_file import save_checkpoint
 from .parameter_labels import PARAMETERS
 from .solver import read_model
 from .solver_choice import SolverChoice
-from .session import history, record_step
+from .session import display_name, history, record_step
 
 
 def table(headers):
@@ -82,7 +82,9 @@ class ControlPanel(QMainWindow):
         self.import_button = self.button("Import MATLAB (.mat)", self.choose_file)
         self.save_button = self.button("Save Model", self.save_case)
         self.campaign_button = self.button("Import CrystalLoop", self.choose_campaign)
-        self.input_buttons = [self.button("Initial DoE / Inputs", self.show_inputs)]
+        self.input_buttons = [self.button("Edit experimental inputs", self.edit_inputs)]
+        self.review_inputs = self.button("Review saved inputs", self.show_inputs)
+        self.candidate_button = self.button("Generate candidate model", self.generate_candidate)
         self.configurations = self.button("Model Configurations", self.show_configurations)
         self.estimation_buttons = [self.button("Parameter Estimation", self.show_estimation)]
         self.uncertainty_button = self.button("Parameter Uncertainty", self.show_uncertainty)
@@ -135,7 +137,8 @@ class ControlPanel(QMainWindow):
         workflow = QGroupBox("Modeling workflow")
         workflow_layout = QVBoxLayout(workflow)
         self.design.setProperty("imedPrimary", True)
-        for button in (*self.input_buttons, self.configurations, *self.estimation_buttons,
+        for button in (*self.input_buttons, self.review_inputs, self.candidate_button,
+                       self.configurations, *self.estimation_buttons,
                        self.uncertainty_button, self.md_button, self.dopt_button, self.design,
                        self.reliability, self.sensitivity, self.history_button):
             button.setMinimumHeight(42)
@@ -177,7 +180,7 @@ class ControlPanel(QMainWindow):
         for index, check in enumerate(self.checks.values()):
             check.setGeometry(15, 22 + 32 * index, 140, 24)
 
-        self.input_buttons.extend(self.button("Experimental Input", self.show_inputs) for _ in range(2))
+        self.input_buttons.extend(self.button("Experimental Input", self.edit_inputs) for _ in range(2))
         self.estimation_buttons.append(self.button("Parameter Estimation", self.show_estimation))
         for widget, position in (
             (self.input_buttons[0], (106, 425, 155, 30)),
@@ -206,6 +209,8 @@ class ControlPanel(QMainWindow):
         self.place(QLabel("CPU workers", self.body), 495, 90, 162, 20)
         self.place(self.workers, 495, 62, 162, 26)
         self.place(self.history_button, 495, 24, 162, 26)
+        self.place(self.candidate_button, 302, 24, 157, 26)
+        self.place(self.review_inputs, 105, 24, 157, 26)
 
     def place(self, widget, x, bottom, width, height):
         # MATLAB figure coordinates are measured up from the bottom.
@@ -310,8 +315,7 @@ class ControlPanel(QMainWindow):
         if not destination.suffix:
             destination = destination.with_suffix(".mat")
         try:
-            case = self.simulation_case()
-            case["PythonWorkflow"]["cpu_workers"] = self.workers.value()
+            case = self.checkpoint_case()
             save_checkpoint(self.source, destination, case)
         except Exception as error:
             QMessageBox.warning(self, "Save Model", str(error))
@@ -331,10 +335,9 @@ class ControlPanel(QMainWindow):
             f"Estimation runs: {counts['MDIteration'] + bool(counts['summaryTable'])}",
             f"Executed Python steps: {len(history(self.case))}",
         )))
-        for button in self.input_buttons:
-            button.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
+        self.review_inputs.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
         self.configurations.setEnabled(counts["ModelParameter"] > 0)
-        self.save_button.setEnabled(counts["ModelParameter"] > 0 or counts["ExpData"] > 0)
+        self.save_button.setEnabled(any(counts[key] for key in ("ModelParameter", "ExpData", "Solubility")))
         self.save_button.setToolTip("Save current IMED inputs, results, confidence intervals and executed steps.")
         self.history_button.setEnabled(bool(history(self.case)))
         self.design.setEnabled(
@@ -367,6 +370,68 @@ class ControlPanel(QMainWindow):
         dialog.exec()
         dialog.deleteLater()
 
+    def edit_inputs(self):
+        from .experiment_editor import ExperimentEditor
+
+        dialog = ExperimentEditor(self.case, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.changed:
+            records, solubility = dialog.result
+            self.case["ExpData"] = [experiment for experiment, _ in records]
+            self.case["ProcInf"] = [{**process, "No": index}
+                                    for index, (_, process) in enumerate(records, 1)]
+            if solubility:
+                self.case["Solubility"] = solubility
+            else:
+                self.case["Solubility"] = {}
+            for key in ("MDIteration", "MDsimulation", "PPsimulation", "summaryTable"):
+                self.case.pop(key, None)
+            for model in self.case.get("ModelParameter", []):
+                for key in ("para", "covmat", "resnorm", "resid", "jacobian", "nvars", "SSR",
+                            "r", "FVector", "AICVector", "t_test", "Results"):
+                    model.pop(key, None)
+            if "objweightfactor" not in self.case:
+                fields = ("CountsData", "ConcentrationData", "FinalD10D50D90")
+                weights = {f"W{i}": int(all(np.size(exp.get(field, [])) for exp, _ in records))
+                           for i, field in enumerate(fields, 1)} if records else {}
+                self.case["objweightfactor"] = {**weights, "Terms": "D10 D50 D90"}
+            record_step(self.case, "experiment_edit", {"runs": len(records)})
+            self.refresh_status()
+            self.show_message("Experimental inputs updated. Use Save Model to write a MATLAB checkpoint.")
+        dialog.deleteLater()
+
+    def generate_candidate(self):
+        from .candidate_model_dialog import CandidateModelDialog
+
+        models = self.case.setdefault("ModelParameter", [])
+        dialog = CandidateModelDialog({display_name(model, "").casefold() for model in models}, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            models.append(dialog.model)
+            record_step(self.case, "model_configuration", {"paraset": dialog.model["paraset"]},
+                        model_index=len(models) - 1)
+            self.refresh_status()
+            self.show_message(f"Added candidate {dialog.model['Name']}.")
+        dialog.deleteLater()
+
+    def setup_settings(self):
+        from .setup_snapshot import pack_imed_settings
+
+        return pack_imed_settings(self.checkpoint_case())
+
+    def restore_setup_settings(self, case):
+        self.case = case
+        self.source = self.campaign_path = None
+        self.parameter_edits.clear()
+        self.setting_edits.clear()
+        self.numerics.load_settings(case.get("pbmsetting"))
+        self.workers.setValue(int(case.get("PythonWorkflow", {}).get("cpu_workers", 1)))
+        self.refresh_status()
+        self.show_message("Restored IMED settings from the setup preset.")
+
+    def checkpoint_case(self):
+        case = self.simulation_case()
+        case["PythonWorkflow"]["cpu_workers"] = self.workers.value()
+        return case
+
     def show_inputs(self):
         dialog, layout = self.dialog("IMED | Initial DoE / Experimental input")
         layout.addWidget(QLabel("Review saved experimental inputs"))
@@ -386,7 +451,7 @@ class ControlPanel(QMainWindow):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             choices = QComboBox()
-            choices.addItems(entry.get("Name", f"Experiment {index + 1}")
+            choices.addItems(display_name(entry, f"Experiment {index + 1}")
                              for index, entry in enumerate(entries))
             values = table(("Field", "Value" if is_process else "Stored data"))
 
@@ -404,7 +469,7 @@ class ControlPanel(QMainWindow):
             page_layout.addWidget(choices)
             page_layout.addWidget(values)
             tabs.addTab(page, label)
-        if self.campaign_path is not None:
+        if self.campaign_path is not None and experiments:
             self.add_recording_tab(tabs, experiments)
             tabs.setCurrentIndex(tabs.count() - 1)
         self.show_dialog(dialog, layout)
@@ -413,7 +478,8 @@ class ControlPanel(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         runs = QComboBox()
-        runs.addItems(experiment["Name"] for experiment in experiments)
+        runs.addItems(str(experiment.get("Name", f"Experiment {i + 1}"))
+                      for i, experiment in enumerate(experiments))
         signals = QComboBox()
         for field, label in (
             ("TemperatureData", "Temperature (°C)"), ("ConcentrationData", "Concentration (g/g solution)"),
@@ -429,7 +495,10 @@ class ControlPanel(QMainWindow):
             layout.addWidget(widget)
 
         def refresh():
-            points = experiments[runs.currentIndex()][signals.currentData()]
+            index = runs.currentIndex()
+            if index < 0:
+                return
+            points = np.asarray(experiments[index].get(signals.currentData(), [])).reshape(2, -1)
             count = points.shape[1]
             status.setText(f"{count:,} samples" if count else "No valid recorded samples")
             plot = points[:, np.linspace(0, count - 1, min(count, 2000), dtype=int)]
@@ -451,7 +520,7 @@ class ControlPanel(QMainWindow):
         tables = {}
         for index, model in enumerate(models):
             parameters = table(("Parameter", "Meaning", "Nominal", "Lower Bound", "Upper Bound", "Est."))
-            tabs.addTab(parameters, f"Model {index + 1}")
+            tabs.addTab(parameters, display_name(model, f"Model {index + 1}"))
             entries = np.asarray(model.get("paraset", []), dtype=float)
             if entries.shape != (len(PARAMETERS), 4):
                 continue
@@ -497,7 +566,8 @@ class ControlPanel(QMainWindow):
                 if not np.array_equal(updated, original, equal_nan=True):
                     changes[index] = updated
             for index, updated in changes.items():
-                models[index] = {"paraset": updated, "para": np.empty(0)}
+                models[index] = {**{k: models[index][k] for k in ("Name",) if k in models[index]},
+                                 "paraset": updated, "para": np.empty(0)}
                 self.parameter_edits[index] = models[index]
                 record_step(self.case, "model_configuration", {"paraset": updated}, model_index=index)
             if changes:

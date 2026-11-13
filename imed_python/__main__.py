@@ -13,6 +13,9 @@ def main():
     parser.add_argument("--simulate", action="store_true", help="Open the forward simulator directly")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
+    from .readable_theme import readable_controls
+
+    app.setStyleSheet(readable_controls(False))
     if args.simulate:
         window = Window()
     else:

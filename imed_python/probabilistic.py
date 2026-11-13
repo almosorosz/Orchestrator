@@ -276,9 +276,12 @@ def prcc_diagnostics(inputs, outputs):
 
 
 def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_parameters=True,
-              conditions=None, workers=1, simulated_profile=None, cancelled=None, progress=None):
+              conditions=None, workers=1, simulated_profile=None, cancelled=None, progress=None,
+              draw_progress=None):
     if not 2 <= samples <= 10000:
         raise ValueError("Use between 2 and 10000 samples.")
+    if progress is not None:
+        progress("Preparing sample inputs…")
     conditions = conditions or {}
     if not use_parameters and not conditions:
         raise ValueError("Select parameter uncertainty, operating conditions, or both.")
@@ -323,18 +326,35 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
             predictions.append(prediction["percentiles"])
             concentrations.append(prediction["concentration"])
             counts.append(prediction["counts"])
-        if progress is not None:
-            progress(f"Simulated {len(valid)}/{samples} draws · {sum(valid)} successful · "
-                     f"{len(valid)-sum(valid)} failed")
 
+    finished = successful = 0
+
+    def report(result):
+        nonlocal finished, successful
+        finished += 1
+        successful += result[0] is not None
+        if draw_progress is not None:
+            draw_progress(finished, samples, successful)
+        if progress is not None and draw_progress is None:
+            progress(f"Simulated {finished}/{samples} draws · {successful} successful · "
+                     f"{finished - successful} failed")
+
+    if progress is not None:
+        progress(f"Simulating sampled draws with {min(workers, samples)} worker(s)…")
+    if draw_progress is not None:
+        draw_progress(0, samples, 0)
     if workers > 1:
-        with candidate_map(min(workers, samples), trial, collect, cancelled) as evaluate:
+        with candidate_map(min(workers, samples), trial, collect, cancelled, completed=report) as evaluate:
             evaluate(None, draws)
     else:
         for candidate in draws:
             if cancelled is not None and cancelled():
                 raise InterruptedError("Probabilistic analysis stopped.")
-            collect(candidate, trial(candidate, cancelled=cancelled))
+            result = trial(candidate, cancelled=cancelled)
+            collect(candidate, result)
+            report(result)
+    if progress is not None:
+        progress("Summarizing sampled predictions…")
     if not predictions:
         raise ValueError(f"All sampled simulations failed. First failure. {failures[0]}")
     predictions, concentrations, counts = np.asarray(predictions), np.asarray(concentrations), np.asarray(counts)
