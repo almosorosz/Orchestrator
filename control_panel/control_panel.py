@@ -1414,6 +1414,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
     def _start_device(self):
@@ -1509,6 +1511,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
     def _read_device(self):
@@ -1523,6 +1527,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
 # In[52]:

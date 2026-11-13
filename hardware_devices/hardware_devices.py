@@ -374,7 +374,7 @@ class HuberController(BaseDevice):
       - Safe stop before disconnect
     """
 
-    def __init__(self,name: str,port: str,baudrate: int = 9600,timeout: float = 0.2):
+    def __init__(self,name: str,port: str,baudrate: int = 9600,timeout: float = 0.5):
         super().__init__(name, port)
 
         self.baudrate = baudrate
@@ -408,22 +408,12 @@ class HuberController(BaseDevice):
 
 
     def connect(self) -> bool:
-
         with self._lock:
+            if self.is_connected and self.ser is not None and self.ser.is_open:
+                return True
 
+            self._close_serial()
             try:
-
-                # Clean up any stale serial object first.
-                if self.ser is not None:
-
-                    try:
-                        if self.ser.is_open:
-                            self.ser.close()
-                    except Exception:
-                        pass
-
-                    self.ser = None
-
                 self.ser = serial.Serial(
                     port=self.port,
                     baudrate=self.baudrate,
@@ -431,80 +421,54 @@ class HuberController(BaseDevice):
                     parity=serial.PARITY_NONE,
                     stopbits=serial.STOPBITS_ONE,
                     timeout=self.timeout,
+                    write_timeout=self.timeout,
                 )
+                self.ser.reset_input_buffer()
+                response = self._exchange("TI?")
+                if not response:
+                    raise RuntimeError("no complete reply to the TI? temperature query")
+                if not re.fullmatch(r"(?:TI\s*)?[+-][0-9]{5}", response):
+                    raise RuntimeError(f"unexpected reply to TI? ({response!r})")
+            except Exception as exc:
+                self._close_serial()
+                raise RuntimeError(f"HUBER connection failed on {self.port} ({exc})") from exc
 
-                self.is_connected = self.ser.is_open
+            self.is_connected = True
+            return True
 
-                if self.is_connected:
-                    print(f"[{self.name}] Connected on {self.port}")
-
-                return self.is_connected
-
-            except Exception as e:
-
-                print(f"[{self.name}] Connection Error on{self.port}: {e}")
-
-                self.ser = None
-                self.is_connected = False
-
-                return False
-
+    def _exchange(self, command: str) -> str:
+        """Send a PP command with the serial lock held."""
+        request = f"{command}\r\n".encode("ascii")
+        if self.ser.write(request) != len(request):
+            raise serial.SerialTimeoutException("incomplete HUBER command write")
+        response = self.ser.readline()
+        if not response.endswith(b"\n"):
+            return ""
+        return response.decode("ascii").strip()
 
     def send_command(self, cmd: str) -> str:
-        """
-        Sends one Huber command and waits for its response.
-
-        The entire write/read transaction is protected by the same lock
-        used by disconnect(), preventing teardown from occurring while
-        another thread is communicating with the Huber.
-        """
-
         with self._lock:
-
-            if (self.ser is None or not self.ser.is_open or not self.is_connected):
+            if not self.is_connected or self.ser is None or not self.ser.is_open:
                 return ""
-
             try:
-
-                full_cmd = f"{cmd}\r\n".encode("ascii")
-
-                self.ser.write(full_cmd)
-                self.ser.flush()
-
-                response = (self.ser.readline().decode("ascii", errors="ignore").strip())
-
-                return response
-
-            except Exception as ex:
-
-                print(
-                    f"[{self.name}] IO Error during "
-                    f"command '{cmd}': {ex}"
-                )
-
-                # We are already holding the RLock.
-                # Close the port immediately on communication failure.
-                self._safe_close_unlocked()
-
+                return self._exchange(cmd)
+            except (serial.SerialException, OSError, UnicodeError) as exc:
+                print(f"[{self.name}] I/O error during {cmd!r} on {self.port}: {exc}")
+                self._close_serial()
                 return ""
-
 
     def start(self) -> bool:
-        """
-        Starts Huber circulation / temperature control.
-        """
-        #response = self.send_command("CA@ +00001")
-        
-        response = True
-        return bool(response)
+        """Check the connection. Regulation is started at the controller."""
+        with self._lock:
+            return self.is_connected and self.ser is not None and self.ser.is_open
 
 
     def stop(self) -> bool:
         """
         Stops Huber circulation / temperature control.
         """
-        response = self.send_command("CA@ +00000")
-        return bool(response)
+        response = self.send_command("CA@ 0")
+        return re.fullmatch(r"CA\s*[+]?0+", response) is not None
 
 
     def set_target(self,temp_celsius: float,**kwargs) -> bool:
@@ -529,8 +493,8 @@ class HuberController(BaseDevice):
 
 
     def _set_control_mode(self, mode: str, value: int) -> str:
-        # PP uses @ to set a volatile value and request the controller's echo.
-        command = f"TM@ {value:+06d}"
+        # PP mode selectors use a single digit.
+        command = f"TM@ {value}"
         response = self.send_command(command)
         if not response:
             raise RuntimeError(f"No reply to {command!r} for {mode} control on {self.port}.")
@@ -577,97 +541,24 @@ class HuberController(BaseDevice):
 
 
 
-    def _safe_close_unlocked(self):
-        """
-        Actually closes the PySerial handle.
-
-        IMPORTANT:
-        Caller must already hold self._lock.
-        """
-
+    def _close_serial(self) -> None:
+        """Release the serial handle with the serial lock held."""
         self.is_connected = False
-
-        ser = self.ser
-
-        # Remove the reference immediately so the rest of the application
-        # cannot treat the old handle as active.
-        self.ser = None
-
-        if ser is not None:
-
-            try:
-
-                if ser.is_open:
-
-                    print( f"[{self.name}] Closing serial port {self.port}..."  )
-
-                    # Best-effort buffer cleanup.
-                    try:
-                        ser.reset_input_buffer()
-                    except Exception:
-                        pass
-
-                    try:
-                        ser.reset_output_buffer()
-                    except Exception:
-                        pass
-
-                    # THE IMPORTANT OPERATION:
-                    ser.close()
-
-                    print( f"[{self.name}] Serial close() completed.")
-
-            except Exception as e:
-
-                print(f"[{self.name}] Error closing{self.port}: {e}")
-
-            finally:
-
-                # Second close attempt is harmless and gives us
-                # additional protection against unusual PySerial states.
-                try:
-                    if ser.is_open:
-                        ser.close()
-                except Exception:
-                    pass
-
-        print(
-            f"[{self.name}] Hardware handle released "
-            f"({self.port})."
-        )
-
+        if self.ser is not None:
+            self.ser.close()
+            self.ser = None
 
     def disconnect(self) -> None:
-        """
-        Safely stop Huber and release COM port.
-
-        This method is deliberately synchronous.
-        When it returns, PySerial has been told to close the port.
-        """
-
-        print(  f"[{self.name}] DISCONNECT REQUESTED(port={self.port})")
-
+        """Request a stop, then release the port even if confirmation fails."""
         with self._lock:
-
-            # Send stop command while the port is still valid.
-            if (  self.ser is not None  and self.ser.is_open  and self.is_connected):
-
-                try:
-
-                    self.ser.write(b"CA@ +00000\r\n")
-                    self.ser.flush()
-                    # Give the Huber a short opportunity to process
-                    # the stop command.
-                    time.sleep(0.05)
-
-                except Exception as e:
-
-                    print(f"[{self.name}] Stop command failed  during disconnect: {e}")
-
-            # Definitive COM-port release.
-            self._safe_close_unlocked()
-
-        print( f"[{self.name}] DISCONNECT COMPLETE(port={self.port}, is_connected={self.is_connected})")
+            try:
+                if self.is_connected and not self.stop():
+                    raise RuntimeError(
+                        f"HUBER stop was not confirmed on {self.port}. "
+                        "Check the controller's front panel."
+                    )
+            finally:
+                self._close_serial()
 
 
 # =============================================================================
