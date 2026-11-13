@@ -77,3 +77,7 @@
 2026-11-11 17:59:52,425 INFO orchestrator.app 🌟 App opened up successfully.
 2026-11-11 17:59:53,206 INFO orchestrator.app Recovery: 0 campaigns recovered; 0 waiting. Hardware was not restarted.
 2026-11-11 18:15:10,997 WARNING orchestrator.app Wait for experiment cleanup before resetting the loop.
+2026-11-13 11:21:00,613 INFO orchestrator Application log output: C:\Users\abotondo\OneDrive - purdue.edu\ECNDATA\Desktop\GIT\CrystalLoop_0.2\data\imed_simulated_runs\application.log
+2026-11-13 11:21:00,659 INFO orchestrator.app 🌟 App opened up successfully.
+2026-11-13 11:21:02,555 INFO orchestrator.app Recovery: 0 campaigns recovered; 0 waiting. Hardware was not restarted.
+2026-11-13 11:22:01,658 WARNING orchestrator.app Wait for experiment cleanup before resetting the loop.
