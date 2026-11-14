@@ -96,6 +96,44 @@ against the current devices, then preview and apply the assignments. Connect the
 required devices before starting. Valid saved LOOP folders are restored automatically.
 Presets without generated data still require DoE generation.
 
+## Bayesian optimization
+
+Install the BO runtime in the Python environment running CrystalLoop.
+
+```powershell
+python -m pip install -r requirements-bo.txt
+python -m bo
+```
+
+The same workflow is available under **IMED → BO** in CrystalLoop. Open an
+IMED MATLAB or CrystalLoop case, import a recorded campaign, or reuse the current
+IMED case. Select completed experiments, set input bounds, enable the targets,
+then configure optional output limits under **Output screening**. Give each
+target a scale in its own unit so that weights compare dimensionless losses.
+
+**Profile encoding** uses the trajectory VAE architecture from
+`BO_test_V2_single_profile`. It fits the selected traces and uses the encoder's
+posterior means. You can load `trajectory_vae_T.pt` and `trajectory_vae_AS.pt`
+exported by the notebook to use those weights. Compare the source trace, eight
+input knots and decoded profile before reviewing a proposal. This tab reports
+reconstruction error and integrated antisolvent dose. Seed and constant
+setpoints use scalar values. Missing channels must be consistent across the
+selected runs.
+
+**Propose experiment** shows the decoded recipe, input history, and one-dimensional
+GP projections through the proposal. **Observed inputs** shows standardized
+values together or any input in its own units. **GP projections** shows the
+predicted mean, a predictive band at ±1.96 standard deviations, the acquisition
+for the weighted objective, and the actual measured points when available. The
+output filter uses the selected margin and requires the full predicted interval
+to meet every enabled bound. With small datasets, use the plots and reconstruction
+errors to judge whether the proposed recipe is suitable for experimental review.
+
+**Save BO setup** includes the selected runs, settings and any imported VAE
+weights. **Save proposed recipe** exports decoded profiles and predictions as
+JSON for review. The Windows build includes BO when PyTorch and scikit-learn are
+both installed in the build environment.
+
 ## Unit operations and MSI connectivity
 
 In **Control Panel → Unit operations / modules**, define module codes/names and

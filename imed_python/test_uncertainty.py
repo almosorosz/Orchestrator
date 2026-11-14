@@ -72,6 +72,38 @@ class UncertaintyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "More independent measurements"):
             local_intervals(self.model(), objective)
 
+    def test_last_parameter_uses_a_stable_difference_when_pbm_trial_fails(self):
+        models = np.zeros((35, 4))
+        indices = [0, 1, 5, 6, 12, 25]
+        models[indices] = [1, 1, 0, 2]
+
+        class Objective:
+            cancelled = None
+            sample_count = 8
+
+            def __init__(self, failure_step):
+                self.failure_step = failure_step
+                self.attempted = []
+
+            def residuals(self, parameters):
+                perturbation = parameters[25] - 1
+                self.attempted.append(perturbation)
+                if abs(perturbation) > self.failure_step or perturbation > .0005:
+                    raise FloatingPointError("Experiment 1: PBM numerical failure: divide by zero")
+                return np.r_[parameters[indices] - 1, .1, -.05]
+
+        for fail_at in (.002, .0002):
+            with self.subTest(fail_at=fail_at):
+                objective = Objective(fail_at)
+                progress = []
+                result = local_intervals({"paraset": models}, objective, progress=progress.append)
+                np.testing.assert_array_equal(result.indices, indices)
+                np.testing.assert_allclose(result.covariance, .00625 * np.eye(6))
+                self.assertTrue(any("agg (6/6)" in message for message in progress))
+                self.assertTrue(progress[-1].startswith("Sensitivity evaluations complete"))
+                self.assertTrue(any(step > .0005 for step in objective.attempted))
+                self.assertEqual(any("reducing" in message for message in progress), fail_at < .001)
+
     def test_residuals_use_measured_sizes_and_exclude_initial_concentration(self):
         experiment = {"FinalCSDsData": [[0., 1.5, 2.5, 3.5, 4.], [0., 1., 2., 1., 0.]],
                       "ConcentrationData": [[0., 1., 2.], [0.1, 0.09, 0.08]]}

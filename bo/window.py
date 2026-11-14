@@ -1,12 +1,11 @@
-"""BO setup page shared by the standalone window and CrystalLoop."""
+"""Bayesian experiment design shared by the standalone window and CrystalLoop."""
 import json
-from dataclasses import replace
 from pathlib import Path
+import sys
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtCharts import QChart, QChartView, QLineSeries
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtCharts import QChart
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QPushButton, QTabWidget, QTableWidget,
@@ -19,11 +18,9 @@ from imed_python.campaign_import import campaign_runs
 from imed_python.demo_campaign import import_simulated_campaign
 from imed_python.solver import read_model
 
-from .profiles import (
-    CHANNELS, CONSTRAINTS, TARGETS, case_runs, components, constraint_values,
-    encode, make_profile, profile_family, violations,
-)
-from .settings import empty_settings, validate_settings
+from .profiles import CHANNELS, CONSTRAINTS, TARGETS, Profile, case_runs, constraint_values, make_profile, violations
+from .proposal_view import BAND_SD, ProposalView, chart_view, profile_chart, replace_chart
+from .settings import CHECKPOINT_CHANNELS, OUTPUTS, empty_settings, validate_settings
 
 
 def grid(headers):
@@ -46,6 +43,52 @@ def show_value(value):
     return "—" if value is None else f"{value:.6g}"
 
 
+class BOJobSignals(QObject):
+    progress = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+
+class BOJob(QRunnable):
+    def __init__(self, task):
+        super().__init__()
+        self.task = task
+        self.signals = BOJobSignals()
+
+    def run(self):
+        try:
+            result = self.task(self.signals.progress.emit)
+        except ImportError as error:
+            hint = ("Use a build that includes the BO dependencies." if getattr(sys, "frozen", False)
+                    else "Install requirements-bo.txt in this Python environment.")
+            self.signals.failed.emit(f"Could not load the BO dependencies. {hint} {error}")
+        except Exception as error:
+            self.signals.failed.emit(str(error) or type(error).__name__)
+        else:
+            self.signals.completed.emit(result)
+
+
+def bounds_fields(layout, definitions):
+    table = grid(("Constraint", "Unit", "Minimum", "Maximum"))
+    table.setRowCount(len(definitions))
+    result = {}
+    for row, (key, (label, unit)) in enumerate(definitions.items()):
+        table.setItem(row, 0, item(label))
+        table.setItem(row, 1, item(unit))
+        fields = result[key] = [QLineEdit(), QLineEdit()]
+        for column, field in enumerate(fields, 2):
+            field.setPlaceholderText("Off")
+            table.setCellWidget(row, column, field)
+    table.setMinimumHeight(table.verticalHeader().defaultSectionSize() * len(definitions) + 38)
+    layout.addWidget(table)
+    return result
+
+
+def read_bounds(fields):
+    return {key: [float(control.text()) if control.text().strip() else None for control in pair]
+            for key, pair in fields.items()}
+
+
 class BOWindow(QWidget):
     imed_requested = Signal()
 
@@ -55,7 +98,13 @@ class BOWindow(QWidget):
         self.resize(1050, 710)
         self.imed_case = imed_case
         self.state = empty_settings()
+        self.job = None
+        self.revision = 0
+        self.rendering = False
+        self.proposal = None
+        self.encoding = None
         self.status = QLabel()
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.source = QLabel()
         self.source.setWordWrap(True)
@@ -75,7 +124,10 @@ class BOWindow(QWidget):
         layout.addWidget(self.status)
         self.build_data_page()
         self.build_settings_page()
+        self.build_output_page()
         self.build_profile_page()
+        self.build_proposal_page()
+        self.connect_settings()
         self.restore(self.state)
 
     @staticmethod
@@ -93,7 +145,7 @@ class BOWindow(QWidget):
     def build_data_page(self):
         layout = self.page("Experiments")
         actions = QHBoxLayout()
-        actions.addWidget(self.button("Open MATLAB (.mat)", self.choose_matlab))
+        actions.addWidget(self.button("Open IMED data (.mat / .json)", self.choose_matlab))
         actions.addWidget(self.button("Import CrystalLoop campaign", self.choose_campaign))
         if self.imed_case is not None:
             actions.addWidget(self.button("Use current IMED case", self.use_imed))
@@ -106,19 +158,8 @@ class BOWindow(QWidget):
         layout.addWidget(self.inventory, 1)
 
     def build_settings_page(self):
-        layout = self.page("Constraints and targets")
-        self.bounds = grid(("Constraint", "Unit", "Minimum", "Maximum"))
-        self.bounds.setRowCount(len(CONSTRAINTS))
-        self.bound_fields = {}
-        for row, (key, (label, unit)) in enumerate(CONSTRAINTS.items()):
-            self.bounds.setItem(row, 0, item(label))
-            self.bounds.setItem(row, 1, item(unit))
-            fields = self.bound_fields[key] = [QLineEdit(), QLineEdit()]
-            for col, field in enumerate(fields, 2):
-                field.setPlaceholderText("Off")
-                self.bounds.setCellWidget(row, col, field)
-        self.bounds.setFixedHeight(self.bounds.verticalHeader().defaultSectionSize() * len(CONSTRAINTS) + 55)
-        layout.addWidget(self.bounds)
+        layout = self.page("Input bounds and targets")
+        self.bound_fields = bounds_fields(layout, CONSTRAINTS)
         note = QLabel("Blank bounds are off. Cooling and dosing minimums apply to active segments. "
                       "Holds and zero feed are allowed.")
         note.setWordWrap(True)
@@ -157,6 +198,22 @@ class BOWindow(QWidget):
         layout.addWidget(self.scores)
         layout.addWidget(self.button("Check bounds and preview objective", self.check_settings))
 
+    def build_output_page(self):
+        layout = self.page("Output screening")
+        self.output_fields = bounds_fields(layout, {key: TARGETS[key][:2] for key in OUTPUTS})
+        form = QFormLayout()
+        self.exploration = QLineEdit()
+        self.output_margin = QLineEdit()
+        form.addRow("Exploration weight", self.exploration)
+        form.addRow("Output margin (standard deviations)", self.output_margin)
+        layout.addLayout(form)
+        note = QLabel("Blank bounds are off. The entire predicted interval must lie within the enabled bounds. "
+                      "The interval is mean ± margin × SD. A margin of 0 screens the predicted mean. "
+                      "The acquisition minimizes weighted loss minus the exploration weight times its SD.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addStretch()
+
     def build_profile_page(self):
         layout = self.page("Profile encoding")
         row = QHBoxLayout()
@@ -164,32 +221,87 @@ class BOWindow(QWidget):
         self.run_choice.currentIndexChanged.connect(self.refresh_channels)
         self.channel_choice.currentIndexChanged.connect(self.refresh_tolerance)
         self.tolerance = QLineEdit()
-        self.tolerance.setMaximumWidth(95)
+        self.tolerance.setMaximumWidth(90)
+        self.tolerance.editingFinished.connect(self.store_tolerance)
         row.addWidget(QLabel("Experiment"))
         row.addWidget(self.run_choice, 1)
         row.addWidget(self.channel_choice)
-        row.addWidget(QLabel("Tolerance"))
+        row.addWidget(QLabel("Variation tolerance"))
         row.addWidget(self.tolerance)
-        row.addWidget(self.button("Preview profile encoding", self.preview))
+        self.preview_button = self.button("Compare source and decoded", self.preview)
+        row.addWidget(self.preview_button)
         layout.addLayout(row)
-        self.chart = QChartView()
-        self.chart.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.chart.setMinimumHeight(240)
+        codec = QHBoxLayout()
+        self.checkpoint_button = self.button("Load notebook checkpoint", self.choose_checkpoint)
+        self.reset_checkpoint_button = self.button("Fit from selected runs", self.reset_checkpoint)
+        self.codec_note = QLabel()
+        self.codec_note.setWordWrap(True)
+        codec.addWidget(self.checkpoint_button)
+        codec.addWidget(self.reset_checkpoint_button)
+        codec.addWidget(self.codec_note, 1)
+        layout.addLayout(codec)
+        self.chart = chart_view()
+        self.chart.setMinimumHeight(215)
         layout.addWidget(self.chart, 2)
         self.metrics = QLabel()
         self.metrics.setWordWrap(True)
         layout.addWidget(self.metrics)
-        self.variables = grid(("Decision variable", "Component", "Encoded value", "Unit", "Across selected runs"))
+        self.variables = grid(("Vary in BO", "Decoder input", "Value", "Unit", "Selected runs"))
+        self.variables.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
+                                       | QAbstractItemView.EditTrigger.EditKeyPressed)
         self.variables.itemChanged.connect(self.update_override)
         layout.addWidget(self.variables, 1)
-        layout.addWidget(self.button("Plot edited components", self.plot_edit))
-        self.encoded = None
+        self.decode_button = self.button("Decode edited values", self.plot_edit)
+        self.vary_duration = QCheckBox("Vary batch duration")
+        self.vary_duration.toggled.connect(self.change_duration)
+        row = QHBoxLayout()
+        row.addWidget(self.decode_button)
+        row.addWidget(self.vary_duration)
+        row.addStretch()
+        layout.addLayout(row)
+
+    def build_proposal_page(self):
+        layout = self.page("Propose experiment")
+        row = QHBoxLayout()
+        self.propose_button = self.button("Propose next experiment", self.suggest)
+        self.export_button = self.button("Save proposed recipe", self.save_proposal)
+        row.addWidget(self.propose_button)
+        row.addWidget(self.export_button)
+        row.addStretch()
+        layout.addLayout(row)
+        self.proposal_note = QLabel()
+        self.proposal_note.setWordWrap(True)
+        layout.addWidget(self.proposal_note)
+        self.proposal_view = ProposalView()
+        self.predictions = grid(("Output", "Unit", "Observations", "Mean", "SD", "Posterior lower", "Posterior upper"))
+        self.proposal_view.insertTab(0, self.predictions, "Predictions")
+        self.proposal_view.setCurrentIndex(0)
+        layout.addWidget(self.proposal_view, 1)
+
+    def connect_settings(self):
+        for enabled, mode, weight, match, scale in self.target_fields.values():
+            enabled.toggled.connect(self.invalidate_proposal)
+            mode.currentIndexChanged.connect(self.invalidate_proposal)
+            for control in (weight, match, scale):
+                control.textEdited.connect(self.invalidate_proposal)
+        for fields in (*self.bound_fields.values(), *self.output_fields.values()):
+            for control in fields:
+                control.textEdited.connect(self.invalidate_proposal)
+        for control in (self.exploration, self.output_margin):
+            control.textEdited.connect(self.invalidate_proposal)
+        self.tolerance.textEdited.connect(self.tolerance_changed)
+        self.yield_basis.currentIndexChanged.connect(self.invalidate_proposal)
 
     def restore(self, settings):
         self.state = validate_settings(settings)
-        for key, bounds in self.state["constraints"].items():
-            for field, value in zip(self.bound_fields[key], bounds):
-                field.setText("" if value is None else str(value))
+        self.rendering = True
+        for group, fields in (("constraints", self.bound_fields), ("output_bounds", self.output_fields)):
+            for key, bounds in self.state[group].items():
+                for field, value in zip(fields[key], bounds):
+                    field.setText("" if value is None else str(value))
+        self.exploration.setText(str(self.state["exploration"]))
+        self.output_margin.setText(str(self.state["output_margin"]))
+        self.vary_duration.setChecked(self.state["overrides"].get("duration", True))
         for key, (enabled, mode, weight, target, scale) in self.target_fields.items():
             saved = self.state["targets"][key]
             enabled.setChecked(saved["enabled"])
@@ -197,14 +309,18 @@ class BOWindow(QWidget):
             for field, value in ((weight, "weight"), (target, "target"), (scale, "scale")):
                 field.setText(str(saved[value]))
         self.yield_basis.setCurrentIndex(self.yield_basis.findData(self.state["yield_basis"]))
+        self.rendering = False
+        self.invalidate_proposal()
         self.refresh_data()
         self.status.setText("Select experiments and check the settings." if self.state["runs"]
                             else "Open a MATLAB case or CrystalLoop campaign to get started.")
 
     def settings(self):
         data = dict(self.state)
-        data["constraints"] = {key: [float(field.text()) if field.text().strip() else None
-                                     for field in fields] for key, fields in self.bound_fields.items()}
+        data["constraints"] = read_bounds(self.bound_fields)
+        data["output_bounds"] = read_bounds(self.output_fields)
+        data["exploration"] = float(self.exploration.text())
+        data["output_margin"] = float(self.output_margin.text())
         data["targets"] = {key: {"enabled": enabled.isChecked(), "mode": mode.currentData(),
                                  "weight": float(weight.text()), "target": float(target.text()) if target.isEnabled() else 0.,
                                  "scale": float(scale.text())}
@@ -236,7 +352,8 @@ class BOWindow(QWidget):
                 self.status.setText(str(error))
 
     def choose_matlab(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open MATLAB case", "", "MAT files (*.mat)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open experimental data", "", "IMED cases (*.mat *.imed.json);;MATLAB (*.mat);;JSON (*.json)")
         if path:
             self.open_matlab(path)
 
@@ -275,6 +392,10 @@ class BOWindow(QWidget):
     def set_case(self, case, source, *, folder=None):
         runs = case_runs(case, folder)
         self.state.update(source=source, runs=runs, selected=list(range(len(runs))), overrides={})
+        self.vary_duration.blockSignals(True)
+        self.vary_duration.setChecked(True)
+        self.vary_duration.blockSignals(False)
+        self.invalidate_proposal()
         self.refresh_data()
         skipped = len(case.get("ExpData", [])) - len(runs)
         message = f"Loaded {len(runs)} experiment(s)."
@@ -310,6 +431,7 @@ class BOWindow(QWidget):
             return
         self.state["selected"] = [row for row in range(self.inventory.rowCount())
                                   if self.inventory.item(row, 0).checkState() == Qt.CheckState.Checked]
+        self.invalidate_proposal()
         self.refresh_runs()
 
     def refresh_runs(self):
@@ -339,10 +461,42 @@ class BOWindow(QWidget):
         channel = self.channel_choice.currentData()
         self.tolerance.setText(str(self.state["tolerances"][channel]) if channel else "")
         self.tolerance.setEnabled(channel is not None)
-        self.encoded = None
+        checkpoint = self.state["vae_checkpoints"].get(channel)
+        if channel is None:
+            note = ""
+        elif checkpoint is not None:
+            note = checkpoint["name"]
+        elif channel == "seed":
+            note = "Seed mass is a scalar in grams."
+        else:
+            note = "Uses the notebook VAE fitted to the selected runs when the profile shape varies."
+        self.codec_note.setText(note)
+        self.clear_preview()
+        self.update_buttons()
+
+    def clear_preview(self):
+        self.encoding = None
         self.variables.setRowCount(0)
-        self.chart.setChart(QChart())
-        self.metrics.setText("Click Preview profile encoding to inspect the selected trace.")
+        replace_chart(self.chart, QChart())
+        self.metrics.setText("Select an experiment and compare its source profile with the decoder output.")
+        self.update_buttons()
+
+    def store_tolerance(self):
+        channel = self.channel_choice.currentData()
+        if channel is not None:
+            try:
+                value = float(self.tolerance.text())
+                if not np.isfinite(value) or value < 0:
+                    raise ValueError
+            except ValueError:
+                self.status.setText("Enter a finite, nonnegative variation tolerance.")
+            else:
+                self.state["tolerances"][channel] = value
+
+    def tolerance_changed(self):
+        self.invalidate_proposal()
+        if self.encoding is not None:
+            self.clear_preview()
 
     @staticmethod
     def profile(run, channel):
@@ -397,117 +551,265 @@ class BOWindow(QWidget):
                             if lines else "Select one or more experiments to preview the objective.")
         self.status.setText("Checked bounds. Objective preview uses dimensionless weighted losses. Lower is better.")
 
+    def invalidate_proposal(self, *_):
+        if self.rendering:
+            return
+        self.revision += 1
+        if self.proposal is not None or self.predictions.rowCount():
+            self.set_proposal(None)
+        else:
+            self.proposal_note.setText("Select experiments, set the targets and bounds, then propose a recipe.")
+            self.update_buttons()
+
+    def change_duration(self, enabled):
+        if not self.rendering:
+            self.state["overrides"]["duration"] = enabled
+            self.invalidate_proposal()
+
+    def update_buttons(self):
+        if not hasattr(self, "propose_button"):
+            return
+        available = self.job is None
+        channel = self.channel_choice.currentData()
+        self.propose_button.setEnabled(available and len(self.state["selected"]) >= 2)
+        self.preview_button.setEnabled(available and channel is not None)
+        self.checkpoint_button.setEnabled(available and channel in CHECKPOINT_CHANNELS)
+        self.reset_checkpoint_button.setEnabled(available and channel in self.state["vae_checkpoints"])
+        self.decode_button.setEnabled(available and self.encoding is not None and bool(self.encoding[0].variables))
+        self.export_button.setEnabled(self.proposal is not None)
+
+    def run_job(self, task, callback, *, check_profile=False):
+        if self.job is not None:
+            return
+        self.status.setText("Preparing Bayesian optimization…")
+        self.job = BOJob(task)
+        self.completed_action = callback
+        self.active_revision = self.revision
+        self.active_profile = self.profile_selection() if check_profile else None
+        self.job.signals.progress.connect(self.status.setText, Qt.ConnectionType.QueuedConnection)
+        self.job.signals.completed.connect(self.work_completed, Qt.ConnectionType.QueuedConnection)
+        self.job.signals.failed.connect(self.work_failed, Qt.ConnectionType.QueuedConnection)
+        self.update_buttons()
+        QThreadPool.globalInstance().start(self.job)
+
+    def work_completed(self, result):
+        self.job = None
+        action = self.completed_action
+        self.completed_action = None
+        self.update_buttons()
+        if self.active_revision != self.revision:
+            self.status.setText("The BO settings changed during the calculation. Run the calculation again.")
+            return
+        if self.active_profile is not None and self.active_profile != self.profile_selection():
+            self.status.setText("The selected profile changed. Compare the current profile to view its encoding.")
+            return
+        action(result)
+
+    def work_failed(self, error):
+        self.job = None
+        self.completed_action = None
+        self.update_buttons()
+        self.status.setText(error if self.active_revision == self.revision
+                            else "The BO settings changed during the calculation. Run the calculation again.")
+
+    def profile_selection(self):
+        return self.run_choice.currentData(), self.channel_choice.currentData()
+
+    def choose_checkpoint(self):
+        key = self.channel_choice.currentData()
+        if key not in CHECKPOINT_CHANNELS:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, f"Load {CHANNELS[key][0]} VAE checkpoint",
+                                              "", "PyTorch checkpoints (*.pt *.pth)")
+        if not path:
+            return
+
+        def load(report):
+            from .vae import read_checkpoint
+
+            report("Loading the notebook trajectory VAE weights…")
+            return read_checkpoint(key, path)
+
+        def loaded(checkpoint):
+            self.state["vae_checkpoints"][key] = checkpoint
+            self.invalidate_proposal()
+            self.refresh_tolerance()
+            self.status.setText(f"Loaded {checkpoint['name']}.")
+
+        self.run_job(load, loaded, check_profile=True)
+
+    def reset_checkpoint(self):
+        key = self.channel_choice.currentData()
+        if self.state["vae_checkpoints"].pop(key, None) is not None:
+            self.invalidate_proposal()
+            self.refresh_tolerance()
+            self.status.setText(f"{CHANNELS[key][0]} will use a VAE fitted to the selected runs.")
+
     def preview(self):
-        index, channel = self.run_choice.currentData(), self.channel_choice.currentData()
-        if index is None or channel is None:
+        index, key = self.profile_selection()
+        if index is None or key is None:
             self.status.setText("Select an experiment and a profile.")
             return
         try:
-            tolerance = float(self.tolerance.text())
-            if not np.isfinite(tolerance) or tolerance < 0:
-                raise ValueError("Enter a finite, nonnegative encoding tolerance.")
+            state = self.settings()
         except ValueError as error:
             self.status.setText(str(error))
             return
-        self.state["tolerances"][channel] = tolerance
-        source = self.profile(self.state["runs"][index], channel)
-        model = encode(source, tolerance, channel)
-        model_values = components(channel, model)
-        peers = []
-        for other in self.state["selected"]:
-            run = self.state["runs"][other]
-            if channel in run["profiles"]:
-                peer = encode(self.profile(run, channel), tolerance, channel)
-                if profile_family(peer, channel) == profile_family(model, channel):
-                    peers.append(components(channel, peer))
-        family = ":".join(map(str, (channel, *profile_family(model, channel))))
+        self.clear_preview()
+
+        def prepare(report):
+            from .optimizer import preview_channel
+
+            channel, row = preview_channel(state, key, index, report)
+            data = state["runs"][index]
+            original = self.profile(data, key)
+            features = channel.features[row:row + 1]
+            decoded, = channel.decode(features, [data["metrics"]["duration"]])
+            representation = None
+            if channel.codec is not None:
+                time, values = channel.codec.normalize(original)
+                representation = Profile(time * original.time[-1], values * channel.codec.scale + channel.codec.offset,
+                                         "VAE input knots", original.step)
+            return channel, original, features[0], decoded, representation
+
+        self.run_job(prepare, self.show_encoding, check_profile=True)
+
+    def show_encoding(self, result):
+        from .optimizer import variable_activity
+
+        channel, original, features, decoded, representation = result
+        self.encoding = channel, original, representation
+        varied = variable_activity(channel.features)
         self.variables.blockSignals(True)
-        self.variables.setRowCount(len(model_values))
-        for row, (label, value) in enumerate(model_values.items()):
-            sequence = [peer[label] for peer in peers]
-            varied = bool(sequence and max(sequence) - min(sequence) > (1e-6 if label.endswith("duration") else tolerance))
-            key = f"{family}:{label}"
-            checked = item("")
-            checked.setData(Qt.ItemDataRole.UserRole, key)
-            checked.setFlags(checked.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            checked.setCheckState(Qt.CheckState.Checked if self.state["overrides"].get(key, varied) else Qt.CheckState.Unchecked)
-            self.variables.setItem(row, 0, checked)
-            self.variables.setItem(row, 1, item(label))
-            self.variables.setItem(row, 2, item(f"{value:.12g}", editable=True))
-            self.variables.setItem(row, 3, item("s" if label.endswith("duration") else CHANNELS[channel][1]))
-            self.variables.setItem(row, 4, item("Varies" if varied else "Fixed" if len(peers) > 1 else "One run in family"))
+        self.variables.setRowCount(len(channel.variables))
+        for row, (variable, value) in enumerate(zip(channel.variables, features)):
+            cell = item("")
+            cell.setData(Qt.ItemDataRole.UserRole, variable.key)
+            if varied[row]:
+                cell.setFlags(cell.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                cell.setCheckState(Qt.CheckState.Checked if self.state["overrides"].get(variable.key, True)
+                                   else Qt.CheckState.Unchecked)
+            self.variables.setItem(row, 0, cell)
+            for column, content in enumerate((variable.label, f"{value:.12g}", variable.unit,
+                                                "Varies" if varied[row] else "Fixed"), 1):
+                self.variables.setItem(row, column, item(content, editable=column == 2))
         self.variables.blockSignals(False)
-        self.variables.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
-        self.encoded = source, model, len(peers)
-        self.draw_profiles(source, model, channel, len(peers))
+        self.show_profiles(original, decoded, representation, channel)
+        self.update_buttons()
+        self.status.setText("Compared the selected profile with its decoded values.")
 
     def update_override(self, cell):
-        if cell.column() == 0:
+        if cell.column() == 0 and cell.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             self.state["overrides"][cell.data(Qt.ItemDataRole.UserRole)] = cell.checkState() == Qt.CheckState.Checked
-            if self.encoded is not None:
-                self.draw_profiles(self.encoded[0], self.decoded, self.channel_choice.currentData(), self.encoded[2])
+            self.invalidate_proposal()
 
     def plot_edit(self):
-        if self.encoded is None:
-            self.preview()
-            return
-        source, model, peer_count = self.encoded
-        channel = self.channel_choice.currentData()
+        channel, source, representation = self.encoding
+        index = self.run_choice.currentData()
         try:
-            values = np.array([float(self.variables.item(row, 2).text()) for row in range(self.variables.rowCount())])
-            if not np.isfinite(values).all() or np.any(values[1::2] <= 0):
-                raise ValueError("Enter finite components and positive segment durations.")
-            time, targets = np.r_[0., np.cumsum(values[1::2])], values[::2]
-            limits_ok = np.all(targets > -273.15) if channel == "temperature" else np.all(targets >= 0)
-            if not limits_ok:
-                raise ValueError("The edited profile contains values outside the physical range.")
-            changed = replace(model, time=time, values=targets)
             settings = self.settings()
-            key, checks = constraint_values(channel, changed)
-            if (key and violations(checks, *settings["constraints"][key])
-                    or channel != "seed" and violations([time[-1]], *settings["constraints"]["duration"])):
-                raise ValueError("The edited profile violates the enabled bounds.")
+            values = np.array([float(self.variables.item(row, 2).text()) for row in range(len(channel.variables))])
+            if not np.isfinite(values).all():
+                raise ValueError("Enter finite decoder inputs.")
+            duration = settings["runs"][index]["metrics"]["duration"]
+            decoded, = channel.decode(values[None, :], [duration])
+            key = channel.key
+            if not np.isfinite(decoded.values).all() or np.any(decoded.values <= -273.15 if key == "temperature"
+                                                               else decoded.values < 0):
+                raise ValueError("The edited values produce a profile outside the physical range.")
+        except (ValueError, RuntimeError, OverflowError) as error:
+            self.status.setText(str(error))
+            return
+        self.show_profiles(source, decoded, representation, channel)
+        key, checks = constraint_values(channel.key, decoded)
+        outside = (key and violations(checks, *settings["constraints"][key]))
+        self.status.setText("Previewed the edited values. This trace exceeds an input bound."
+                            if outside else "Previewed the edited decoder inputs.")
+
+    def show_profiles(self, original, decoded, representation, channel):
+        key = channel.key
+        traces = [("Source", original)]
+        if representation is not None:
+            traces.append(("VAE input knots", representation))
+        traces.append(("Decoded", decoded))
+        replace_chart(self.chart, profile_chart(key, traces))
+        _, unit, _ = CHANNELS[key]
+        difference = original.values - decoded.sample(original.time)
+        detail = (f"{channel.description} · {len(original.time)} source points → {len(decoded.time)} decoded knots · "
+                  f"RMSE {np.sqrt(np.mean(difference**2)):.5g} {unit} · maximum error {np.max(np.abs(difference)):.5g} {unit}")
+        if key == "feed":
+            detail += f" · total dose {original.total():.5g} → {decoded.total():.5g} g"
+        if key == "temperature":
+            _, rates = constraint_values(key, decoded)
+            detail += f" · peak decoded cooling {max(rates, default=0):.5g} °C/min"
+        self.metrics.setText(detail)
+
+    def suggest(self):
+        try:
+            state = self.settings()
         except ValueError as error:
             self.status.setText(str(error))
             return
-        self.draw_profiles(source, changed, channel, peer_count)
-        self.status.setText("Previewed edited components. The imported experiment was preserved.")
+        self.set_proposal(None)
 
-    def draw_profiles(self, source, decoded, channel, peer_count=None):
-        self.decoded = decoded
-        chart = QChart()
-        for label, profile, color, dashed in (("Source", source, "#b45309", True),
-                                               ("Decoded", decoded, "#1d4ed8", False)):
-            curve = QLineSeries()
-            curve.setName(label)
-            for i, (time, value) in enumerate(zip(profile.time, profile.values)):
-                if profile.step and i:
-                    curve.append(float(time), float(profile.values[i - 1]))
-                curve.append(float(time), float(value))
-            pen = QPen(QColor(color), 2)
-            if dashed:
-                pen.setStyle(Qt.PenStyle.DashLine)
-            curve.setPen(pen)
-            curve.setPointsVisible(label == "Decoded" or len(profile.time) == 1)
-            chart.addSeries(curve)
-        chart.createDefaultAxes()
-        chart.axes(Qt.Orientation.Horizontal)[0].setTitleText("Time (s)")
-        label, unit, _ = CHANNELS[channel]
-        chart.axes(Qt.Orientation.Vertical)[0].setTitleText(f"{label} ({unit})")
-        self.chart.setChart(chart)
-        errors = source.values - decoded.sample(source.time)
-        detail = (f"{source.source} · {len(source.time)} source points, {len(decoded.time)} decoded knots · "
-                  f"max error {np.max(np.abs(errors)):.5g} {unit}, RMS {np.sqrt(np.mean(errors**2)):.5g} {unit}")
-        if channel != "seed":
-            detail += f" · duration {source.time[-1]:.6g} → {decoded.time[-1]:.6g} s"
-        if channel == "feed":
-            detail += f" · integrated dose {source.total():.6g} → {decoded.total():.6g} g"
-        if channel == "temperature":
-            _, rates = constraint_values(channel, decoded)
-            detail += f" · peak cooling {max(rates, default=0):.5g} °C/min"
-        if peer_count is not None:
-            count = sum(self.variables.item(row, 0).checkState() == Qt.CheckState.Checked
-                        for row in range(self.variables.rowCount()))
-            detail += f" · {peer_count}/{len(self.state['selected'])} selected runs in this profile family"
-            detail += f" · {count} decision variable(s) in this channel"
-        self.metrics.setText(detail)
+        def calculate(report):
+            from .optimizer import propose
+
+            return propose(state, report=report)
+
+        self.run_job(calculate, self.set_proposal)
+
+    def set_proposal(self, result):
+        self.proposal = result
+        self.predictions.setRowCount(0)
+        self.proposal_view.set_result(result)
+        if result is not None:
+            for row, (key, (label, unit, _)) in enumerate(TARGETS.items()):
+                self.predictions.insertRow(row)
+                if key in result.predictions:
+                    mean, sd = result.predictions[key]
+                    values = (label, unit, "Exact" if key == "duration" else result.counts[key],
+                              *(show_value(value) for value in (mean, sd, mean - BAND_SD * sd, mean + BAND_SD * sd)))
+                else:
+                    values = (label, unit, result.counts.get(key, 0), result.unavailable[key], "—", "—", "—")
+                for column, value in enumerate(values):
+                    self.predictions.setItem(row, column, item(value))
+            beta = result.state["exploration"]
+            active = int(result.vary.sum())
+            self.proposal_note.setText(
+                f"{active} varying inputs · {result.output_passed}/{result.input_passed} screened candidates passed. "
+                f"Predicted loss {result.mean_loss:.5g} ± {result.loss_sd:.4g} SD · "
+                f"exploration bonus {beta * result.loss_sd:.4g} · acquisition {result.acquisition:.5g}. "
+                "The prediction table shows mean ± 1.96 SD.")
+            self.status.setText("Proposal ready. Review the recipe and output predictions.")
+        else:
+            self.proposal_note.setText("Select experiments, set the targets and bounds, then propose a recipe.")
+        self.update_buttons()
+
+    def save_proposal(self):
+        result = self.proposal
+        if result is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save proposed recipe", "bo_proposed_recipe.json", "JSON (*.json)")
+        if not path:
+            return
+        file = Path(path)
+        payload = {
+            "format": "crystalloop-bo-proposal", "version": 1,
+            "yield_basis": result.state["yield_basis"], "duration_s": float(result.point[0]),
+            "profiles": {key: {**profile.payload(), "unit": CHANNELS[key][1]} for key, profile in result.profiles.items()},
+            "predictions": {key: {"mean": mean, "sd": sd, "unit": TARGETS[key][1]}
+                            for key, (mean, sd) in result.predictions.items()},
+            "decision_variables": {variable.key: {"decoder_input": float(control),
+                                                  "evaluated_value": float(value), "unit": variable.unit}
+                                   for variable, control, value in zip(result.variables, result.controls, result.point)},
+            "input_bounds": result.state["constraints"], "output_bounds": result.state["output_bounds"],
+            "output_margin": result.state["output_margin"], "exploration": result.state["exploration"],
+            "weighted_loss": result.mean_loss, "weighted_loss_sd": result.loss_sd, "acquisition": result.acquisition,
+        }
+        try:
+            atomic_json(file, payload)
+        except (ValueError, OSError) as error:
+            self.status.setText(str(error))
+        else:
+            self.status.setText(f"Saved the proposal to {file.name}.")

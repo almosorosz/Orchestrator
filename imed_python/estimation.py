@@ -1,6 +1,6 @@
 """Residuals and two-stage SciPy fitting for IMED."""
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic
 
@@ -200,6 +200,7 @@ class FitResult:
     simulation_count: int = 0
     simulation_seconds: float = 0.
     wall_seconds: float = 0.
+    generation_history: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
 
 
 def _global_trial(candidate, *, objective, baseline, free, cancelled):
@@ -221,7 +222,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
               mutation_min=PYFIT_DEFAULTS["mutation_min"], mutation_max=PYFIT_DEFAULTS["mutation_max"],
               recombination=PYFIT_DEFAULTS["recombination"],
               local_evaluations=PYFIT_DEFAULTS["local_evaluations"], cancelled=None, progress=None,
-              workers=1):
+              workers=1, generation_progress=None):
     """Fit the model, optionally evaluating global trials in separate CPU processes."""
     if isinstance(objective, FitObjective) and objective.settings.get("Numerics") == "jax":
         if workers != 1:
@@ -251,6 +252,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
     total_simulations = 0
     simulation_seconds = 0.
     fit_started = monotonic()
+    generation_history = []
 
     def begin_phase(name):
         nonlocal phase, evaluations, rejected, generation, best, current, next_update, last_report
@@ -285,6 +287,12 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
         nonlocal generation, best
         generation = intermediate_result.nit
         best = intermediate_result.fun
+        scores = intermediate_result.population_energies
+        if np.isfinite(scores).all():
+            point = (generation, float(np.mean(scores)), float(best))
+            generation_history.append(point)
+            if generation_progress is not None:
+                generation_progress(*point)
         report_progress(force=generation == 1)
 
     def record_timing(times):
@@ -341,7 +349,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
                        tol=float(global_tolerance), polish=False,
                        mutation=(float(mutation_min), float(mutation_max)),
                        recombination=float(recombination),
-                       callback=report_generation if progress else None)
+                       callback=report_generation)
         if workers == 1:
             global_result = differential_evolution(score, bounds, **options)
         else:
@@ -412,4 +420,5 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
         progress(f"Simulation timing · {total_simulations} PBM runs · total compute {simulation_seconds:.3f} s"
                  f" · mean {average:.3f} s/run · fit wall time {wall_seconds:.3f} s")
     return FitResult(values.copy(), errors, jacobian, covariance, ssr, aic, converged,
-                     intervals, uncertainty_error, total_simulations, simulation_seconds, wall_seconds)
+                     intervals, uncertainty_error, total_simulations, simulation_seconds, wall_seconds,
+                     np.asarray(generation_history, dtype=float).reshape(-1, 3))

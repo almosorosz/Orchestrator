@@ -1,15 +1,18 @@
 """Parameter Estimation dialog backed by the standalone fitting engine."""
 from datetime import datetime
+from functools import partial
 import json
 from pathlib import Path
 from math import isfinite
 from threading import Event
 
 import numpy as np
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout,
+    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from experiment.recording import atomic_json
@@ -166,6 +169,7 @@ class AdvancedSettings(QDialog):
 
 class EstimationJob(QThread):
     message = Signal(str)
+    generation = Signal(int, int, float, float)
     completed = Signal(object, object)
     failed = Signal(str)
 
@@ -189,6 +193,7 @@ class EstimationJob(QThread):
                 try:
                     results[index] = fit_model(case["ModelParameter"][index], objective,
                                                cancelled=cancelled, progress=self.message.emit,
+                                               generation_progress=partial(self.generation.emit, index),
                                                **self.limits)
                 except (ValueError, RuntimeError, TimeoutError, FloatingPointError) as error:
                     errors[index] = str(error)
@@ -207,6 +212,74 @@ class EstimationJob(QThread):
             self.failed.emit(str(error))
         else:
             self.completed.emit(results, errors)
+
+
+class OptimizationProgress(QWidget):
+    def __init__(self, models):
+        super().__init__()
+        self.models = models
+        self.view = QChartView()
+        self.view.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.view, 1)
+        layout.addWidget(self.note)
+        self.clear()
+
+    def clear(self):
+        self.series = {}
+        self.chart = QChart()
+        self.chart.legend().setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self.x, self.y = QValueAxis(), QValueAxis()
+        self.x.setTitleText("Differential evolution generation")
+        self.x.setLabelFormat("%d")
+        self.x.setTickType(QValueAxis.TickType.TicksDynamic)
+        self.x.setTickAnchor(0)
+        self.x.setTickInterval(1)
+        self.x.setRange(0, 1)
+        self.y.setTitleText("Weighted mean squared error (WMSE)")
+        self.y.setLabelFormat("%.4g")
+        self.y.setRange(0, 1)
+        self.chart.addAxis(self.x, Qt.AlignmentFlag.AlignBottom)
+        self.chart.addAxis(self.y, Qt.AlignmentFlag.AlignLeft)
+        previous = self.view.chart()
+        self.view.setChart(self.chart)
+        previous.deleteLater()
+        self.note.setText("Generation data appears during differential evolution.")
+
+    def append(self, model, generation, mean, best):
+        if model not in self.series:
+            label = display_name(self.models[model], f"Model {model + 1}")
+            mean_line, best_line = QLineSeries(), QLineSeries()
+            for curve, statistic in ((mean_line, "mean"), (best_line, "best")):
+                curve.setName(f"{label} · {statistic}")
+                self.chart.addSeries(curve)
+                curve.setPointsVisible(True)
+                curve.attachAxis(self.x)
+                curve.attachAxis(self.y)
+            pen = best_line.pen()
+            pen.setColor(mean_line.color())
+            pen.setStyle(Qt.PenStyle.DashLine)
+            best_line.setPen(pen)
+            self.series[model] = mean_line, best_line
+        mean_line, best_line = self.series[model]
+        mean_line.append(generation, mean)
+        best_line.append(generation, best)
+        upper = max(generation, self.x.max())
+        self.x.setTickInterval(max(1, int(np.ceil(upper / 10))))
+        self.x.setMax(upper)
+        maximum = max(mean, best)
+        if self.y.max() < maximum or (len(self.series) == 1 and mean_line.count() == 1):
+            self.y.setMax(max(maximum * 1.05, np.finfo(float).tiny))
+        self.note.setText("Mean over the retained population and best WMSE for each model. "
+                          "The mean includes penalties for rejected trials retained in the population.")
+
+    def restore(self, results):
+        self.clear()
+        for model, fit in results.items():
+            for generation, mean, best in fit.generation_history:
+                self.append(model, int(generation), mean, best)
 
 
 class ParameterEstimation(QDialog):
@@ -285,10 +358,12 @@ class ParameterEstimation(QDialog):
         self.progress_log.setMaximumBlockCount(250)
         self.progress_log.setMinimumHeight(110)
         self.interval_view = IntervalView()
+        self.optimization_progress = OptimizationProgress(case["ModelParameter"])
         self.output_tabs = QTabWidget()
         self.output_tabs.addTab(self.interval_view, "Parameters and covariance")
         self.output_tabs.addTab(self.progress_log, "Optimization log")
-        self.output_tabs.setCurrentIndex(1)
+        self.output_tabs.addTab(self.optimization_progress, "Generation progress")
+        self.output_tabs.setCurrentWidget(self.progress_log)
         self.status = QLabel(f"{len(case['ExpData'])} experiments loaded.")
         self.status.setWordWrap(True)
         self.run_button = QPushButton("Run")
@@ -409,6 +484,7 @@ class ParameterEstimation(QDialog):
         self.results = {}
         self.summary.setRowCount(0)
         self.interval_view.clear_result()
+        self.optimization_progress.clear()
         self.save_button.setEnabled(False)
         self.details_button.setEnabled(False)
 
@@ -434,7 +510,8 @@ class ParameterEstimation(QDialog):
         models = range(len(self.case["ModelParameter"])) if choice is None else [choice]
         self.clear_results()
         self.progress_log.clear()
-        self.output_tabs.setCurrentIndex(1)
+        self.output_tabs.setCurrentWidget(self.optimization_progress if self.optimizer["global_iterations"]
+                                          else self.progress_log)
         self.run_button.setEnabled(False)
         self.advanced_button.setEnabled(False)
         self.save_case_button.setEnabled(False)
@@ -452,6 +529,7 @@ class ParameterEstimation(QDialog):
         limits = {**self.optimizer, "workers": self.workers}
         self.job = EstimationJob(self.case, models, weights, terms, limits, self)
         self.job.message.connect(self.log_progress)
+        self.job.generation.connect(self.optimization_progress.append)
         self.job.completed.connect(self.show_results)
         self.job.failed.connect(self.log_progress)
         self.job.finished.connect(self.finish_fit)
@@ -495,6 +573,8 @@ class ParameterEstimation(QDialog):
 
     def show_results(self, results, errors, *, remember=True):
         self.results = results
+        if not remember:
+            self.optimization_progress.restore(results)
         weights = {**{f"W{i}": control.value() for i, control in enumerate(self.weights, 1)},
                    "Terms": self.size_term()}
         if remember:

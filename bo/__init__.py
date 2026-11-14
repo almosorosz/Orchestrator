@@ -1,1 +1,1 @@
-"""Bayesian optimization setup and profile inspection."""
+"""Bayesian optimization and trajectory VAE profile inspection."""

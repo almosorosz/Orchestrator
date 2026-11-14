@@ -174,4 +174,5 @@ def unpack_fit(values):
         float(values["ssr"]), float(values["aic"]), bool(values["converged"]),
         unpack_intervals(values.get("intervals")), str(values.get("uncertainty_error", "")),
         int(values.get("simulation_count", 0)), float(values.get("simulation_seconds", 0.)),
-        float(values.get("wall_seconds", 0.)))
+        float(values.get("wall_seconds", 0.)),
+        np.asarray(values.get("generation_history", []), dtype=float).reshape(-1, 3))

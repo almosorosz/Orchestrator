@@ -1,5 +1,5 @@
 """Load, encode and assess profiles in BO's canonical units."""
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -135,14 +135,6 @@ def campaign_profiles(experiment, process, definition):
     return found
 
 
-def profile_family(profile, channel):
-    """Compare stage structure before aligning variables across experiments."""
-    if channel == "seed":
-        return ("scalar",)
-    change = np.sign(np.diff(profile.values)).astype(int)
-    return ("step" if profile.step else "linear", *change.tolist())
-
-
 def case_runs(case, folder=None):
     definition = read_json(Path(folder) / "definition.json") if folder else {}
     process_records = case.get("ProcInf", [])
@@ -219,49 +211,13 @@ def yields(solubility, process, initial, final, temperature, feed):
     return results
 
 
-def encode(profile, tolerance, channel):
-    """Keep endpoints and split at the largest value error until the tolerance is met."""
-    t, y = profile.time, profile.values
-    if channel == "seed" or len(t) < 3:
-        return profile
-    if profile.step:
-        keep = np.r_[True, np.diff(y) != 0]
-        keep[-1] = True
-        return replace(profile, time=t[keep], values=y[keep])
-    keep = {0, len(t) - 1}
-    pending = [(0, len(t) - 1)]
-    while pending:
-        first, last = pending.pop()
-        if last - first <= 1:
-            continue
-        slope = (y[last] - y[first]) / (t[last] - t[first])
-        errors = np.abs(y[first+1:last] - (y[first] + slope * (t[first+1:last] - t[first])))
-        split = first + 1 + int(errors.argmax())
-        if errors.max() > tolerance:
-            keep.add(split)
-            pending.extend(((first, split), (split, last)))
-    indices = sorted(keep)
-    candidate = replace(profile, time=t[indices], values=y[indices])
-    # Retain the original knots if a feed approximation would change the integrated dose.
-    if channel == "feed" and not np.isclose(candidate.total(), profile.total(), rtol=1e-6, atol=1e-8):
-        return profile
-    return candidate
-
-
-def components(channel, profile):
-    if channel == "seed":
-        return {"Mass": float(profile.values[0])}
-    values = {"Start value": float(profile.values[0])}
-    for index, (duration, value) in enumerate(zip(np.diff(profile.time), profile.values[1:]), 1):
-        values[f"Segment {index} duration"] = float(duration)
-        values[f"Segment {index} end value"] = float(value)
-    return values
-
-
 def constraint_values(channel, profile):
     if channel == "temperature" and len(profile.time) > 1:
-        rates = -60 * np.diff(profile.values) / np.diff(profile.time)
-        return "cooling", rates[rates > 0]
+        changes = -np.diff(profile.values)
+        cooling = changes > 0
+        rates = (np.full(np.count_nonzero(cooling), np.inf) if profile.step
+                 else 60 * changes[cooling] / np.diff(profile.time)[cooling])
+        return "cooling", rates
     if channel == "feed":
         return "feed", profile.values[profile.values > 0]
     if channel == "seed":

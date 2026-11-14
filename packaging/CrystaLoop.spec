@@ -14,10 +14,16 @@ hiddenimports = ["MAIN_WINDOW", "matplotlib.backends.backend_qtagg", "matplotlib
 for optional in ("nidaqmx", "sqlalchemy", "psycopg"):
     if find_spec(optional):
         hiddenimports.append(optional)
+# Include the BO runtime together when both optional dependencies are installed.
+bo_imports = ("torch", "sklearn")
+include_bo = all(find_spec(module) is not None for module in bo_imports)
+exclusions = ["PyQt5", "PyQt6", "PySide2", "tkinter", "pytest", "tensorflow", "keras",
+              "torchvision", "jax", "jaxlib", "numba", "dask", "notebook"]
+if not include_bo:
+    exclusions.extend([*bo_imports, "sympy"])
 a = Analysis([str(root / "launcher.py")], pathex=[str(root)], binaries=[], datas=datas,
              hiddenimports=hiddenimports, hookspath=[], hooksconfig={}, runtime_hooks=[],
-             excludes=["PyQt5", "PyQt6", "PySide2", "tkinter", "pytest", "tensorflow", "keras",
-                       "torch", "torchvision", "jax", "jaxlib", "numba", "sklearn", "dask", "notebook", "sympy"], noarchive=False)
+             excludes=exclusions, noarchive=False)
 
 # The Qt hook can collect linker objects from the QML tree. They are not
 # needed at runtime and their nested paths can exceed Windows' path limit.

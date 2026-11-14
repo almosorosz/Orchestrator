@@ -1,4 +1,4 @@
-"""Run the BO setup window independently of CrystalLoop."""
+"""Run the Bayesian optimization window independently of CrystalLoop."""
 import argparse
 import sys
 
