@@ -38,6 +38,8 @@ from gui.pages.experiment_page            import ExperimentPage
 from gui.pages.plots_page                 import PlotsPage
 from gui.pages.sentinel_page                 import SentinelPage
 from gui.pages.modeling_page              import ModelingPage
+from bo.settings                          import empty_settings as empty_bo_settings, validate_settings as validate_bo_settings
+from bo.window                            import BOWindow
 from gui.pages.imed_page                  import IMEDPage
 from imed_python.readable_theme            import readable_controls
 from gui.pages.control_panel_page         import ControlPanelPage
@@ -186,6 +188,10 @@ class MainWindow(QMainWindow):
         """Switch the active page and update navigation button states."""
 
         self.stack.setCurrentIndex(index)
+        if self.stack.currentWidget() is self.imed_page:
+            self.modeling_workflow = "imed"
+        elif self.stack.currentWidget() is self.bo_page:
+            self.modeling_workflow = "bo"
 
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
@@ -314,6 +320,7 @@ class MainWindow(QMainWindow):
         self.CONTROLLER = None
         self.create_experiments = None
         self._doe_assignments = ()
+        self._saved_doe_monitors = None
         self._assigned_doe_campaign = None
         self._assigned_doe_configs = {}
 
@@ -1509,10 +1516,12 @@ class MainWindow(QMainWindow):
         configs, _ = panel.collect_current_configuration()
         dialog = DoeAssignmentDialog(self.create_experiments, configs, panel.hardware, self._doe_assignments, self,
                                      calibration_editor=panel.edit_pump_calibrations)
+        dialog.selected_monitor_ids = self._saved_doe_monitors
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if accepted and dialog.campaign is not None:
             configs, _ = panel.collect_current_configuration()
             self._doe_assignments = dialog.assignments()
+            self._saved_doe_monitors = list(dialog.campaign.monitor_device_ids)
             for experiment in dialog.campaign.experiments:
                 if experiment.imed_simulation:
                     self.create_experiments.parameter_snapshots[experiment.name]["imed_simulation"]["monitors"] = (
@@ -1631,9 +1640,10 @@ class MainWindow(QMainWindow):
             write_preset(filename, panel, self.experiment_service.exp_par, self._doe_assignments,
                          environment, load_recording_settings(),
                          generated_doe=snapshot_doe(self.create_experiments),
-                         monitor_device_ids=(self._assigned_doe_campaign.monitor_device_ids
-                                             if self._assigned_doe_campaign is not None else ()),
-                         modeling=self.imed_page.panel.setup_settings())
+                         monitor_device_ids=self._saved_doe_monitors or (),
+                         modeling={**self.imed_page.panel.setup_settings(),
+                                   "active_workflow": self.modeling_workflow,
+                                   "bo": self.bo_page.settings()})
             self.log_message(f"Setup preset saved: {filename}", "SUCCESS")
         except Exception as error:
             QMessageBox.warning(self, "Preset save failed", str(error))
@@ -1652,7 +1662,12 @@ class MainWindow(QMainWindow):
             data, parameters, assignments = read_preset(filename)
             from imed_python.setup_snapshot import read_imed_settings
 
-            modeling = read_imed_settings(data.get("modeling"))
+            modeling_payload = data.get("modeling")
+            modeling = read_imed_settings(modeling_payload)
+            bo_settings = (validate_bo_settings(modeling_payload["bo"])
+                           if modeling_payload and "bo" in modeling_payload else empty_bo_settings())
+            if modeling_payload and modeling_payload["active_workflow"] == "bo" and "bo" not in modeling_payload:
+                raise ValueError("The setup preset is missing its BO setup.")
             panel = data["control_panel"]
             if not self.control_panel.apply_loaded_configuration(panel["devices"], panel.get("profiles", {}),
                     panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology")):
@@ -1662,6 +1677,7 @@ class MainWindow(QMainWindow):
             self._assigned_doe_campaign = None
             self._assigned_doe_configs = {}
             self._doe_assignments = assignments
+            self._saved_doe_monitors = data.get("monitor_device_ids")
             self.experiment_service.exp_par = parameters
             self.experiment_service._build_doe_dependencies()
             self.control_panel.simulation_speed.setValue(panel.get("simulation_speed", 1))
@@ -1692,8 +1708,11 @@ class MainWindow(QMainWindow):
             save_recording_settings(data["recording"])
             from experiment.recording import resume_sql
             resume_sql(data["recording"])
-            if modeling is not None:
-                self.imed_page.panel.restore_setup_settings(modeling)
+            self.imed_page.panel.restore_setup_settings(modeling if modeling is not None else {})
+            self.bo_page.restore(bo_settings)
+            self.modeling_workflow = modeling_payload["active_workflow"] if modeling_payload else "imed"
+            page = self.bo_page if self.modeling_workflow == "bo" else self.imed_page
+            self.switch_page(self.stack.indexOf(page))
             self._update_archive_roots()
             message = "Setup preset loaded. Connect the required devices before starting."
             if self.create_experiments is not None:
@@ -1990,6 +2009,10 @@ class MainWindow(QMainWindow):
 
         self.settings_page = SettingsPage(parent=self)
         self.imed_page = IMEDPage(parent=self)
+        self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case)
+        self.modeling_workflow = "imed"
+        self.imed_page.bo_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.bo_page)))
+        self.bo_page.imed_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.imed_page)))
 
         # ----------------------------------------------------------
         # ALLOW PAGES TO SHRINK
@@ -2004,6 +2027,7 @@ class MainWindow(QMainWindow):
             self.control_panel_page,
             self.settings_page,
             self.imed_page,
+            self.bo_page,
         ]
 
         for page in pages:
@@ -2179,6 +2203,7 @@ class MainWindow(QMainWindow):
         self.btn_control_panel = QPushButton("🎛  Control Panel")
         self.btn_settings = QPushButton("⚙️  Settings")
         self.btn_imed = QPushButton("🔬  IMED")
+        self.btn_bo = QPushButton("BO")
 
         self.nav_buttons = [
             self.btn_dashboard,
@@ -2189,6 +2214,7 @@ class MainWindow(QMainWindow):
             self.btn_control_panel,
             self.btn_settings,
             self.btn_imed,
+            self.btn_bo,
         ]
 
         for btn in self.nav_buttons:

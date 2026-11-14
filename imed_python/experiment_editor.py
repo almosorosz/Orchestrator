@@ -6,7 +6,7 @@ from io import StringIO
 import numpy as np
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -61,7 +61,7 @@ def clipboard_rows(text):
 
 
 class InputTable(QWidget):
-    def __init__(self, headers, report, row_labels=()):
+    def __init__(self, headers, report, row_labels=(), *, allow_rows=None):
         super().__init__()
         self.report = report
         self.fixed = bool(row_labels)
@@ -75,7 +75,8 @@ class InputTable(QWidget):
         paste = QPushButton("Paste from Excel")
         paste.clicked.connect(self.paste)
         actions.addWidget(paste)
-        if not self.fixed:
+        allow_rows = not self.fixed if allow_rows is None else allow_rows
+        if allow_rows:
             add = QPushButton("Add row")
             remove = QPushButton("Delete selected rows")
             add.clicked.connect(self.add_row)
@@ -134,6 +135,50 @@ class InputTable(QWidget):
                 for row in range(self.table.rowCount())]
 
 
+class ProcessTable(InputTable):
+    def __init__(self, report):
+        super().__init__(("Value",), report, allow_rows=True)
+        self.fixed = True
+        self.keys = []
+
+    def load_settings(self, process, *, new=False):
+        self.keys = [key for key in PROCESS_FIELDS if key in process or new]
+        self.table.setRowCount(len(self.keys))
+        self.table.setVerticalHeaderLabels([PROCESS_FIELDS[key] for key in self.keys])
+        self.load([[process.get(key, DEFAULTS.get(key))] for key in self.keys])
+
+    def add_row(self):
+        available = [key for key in PROCESS_FIELDS if key not in self.keys]
+        if not available:
+            self.report("All process settings are already listed.")
+            return
+        labels = [PROCESS_FIELDS[key] for key in available]
+        selected, ok = QInputDialog.getItem(self, "Add process setting", "Setting", labels, editable=False)
+        if ok:
+            key = available[labels.index(selected)]
+            row = self.table.rowCount()
+            self.keys.append(key)
+            self.table.insertRow(row)
+            self.table.setVerticalHeaderLabels([PROCESS_FIELDS[name] for name in self.keys])
+            self.put([[DEFAULTS.get(key)]], row)
+            self.table.setCurrentCell(row, 0)
+
+    def delete_rows(self):
+        selected = {index.row() for index in self.table.selectedIndexes()}
+        super().delete_rows()
+        self.keys = [key for row, key in enumerate(self.keys) if row not in selected]
+        self.table.setVerticalHeaderLabels([PROCESS_FIELDS[key] for key in self.keys])
+
+    def settings(self):
+        values = dict(DEFAULTS)
+        for key, row in zip(self.keys, self.rows()):
+            values[key] = number(row[0], PROCESS_FIELDS[key])
+        missing = [PROCESS_FIELDS[key] for key in PROCESS_FIELDS if key not in values]
+        if missing:
+            raise ValueError("Add the required process settings: " + ", ".join(missing))
+        return values
+
+
 def read_trace(rows, name):
     points = np.asarray([[number(cell, f"{name}, row {i}") for cell in row]
                          for i, row in enumerate(rows, 1) if any(row)]).reshape(-1, 2).T
@@ -172,7 +217,7 @@ class ExperimentEditor(QDialog):
         self.status = QLabel("Paste Excel cells into the selected row and column. Optional profiles may be blank.")
         self.status.setWordWrap(True)
         self.tabs = QTabWidget()
-        self.process = InputTable(("Value",), self.status.setText, tuple(PROCESS_FIELDS.values()))
+        self.process = ProcessTable(self.status.setText)
         self.tabs.addTab(self.process, "Process settings")
         self.traces = {key: InputTable(spec[1:], self.status.setText) for key, spec in TRACES.items()}
         for key, editor in self.traces.items():
@@ -212,14 +257,14 @@ class ExperimentEditor(QDialog):
         concentration = np.asarray(exp.get("ConcentrationData", [])).reshape(2, -1)
         initial = exp.get("InitialConcentration", concentration[1, 0] if concentration.size else "")
         self.initial.setText(str(initial) if np.size(initial) == 1 else "")
-        self.process.load([[process.get(key, DEFAULTS.get(key))] for key in PROCESS_FIELDS])
+        self.process.load_settings(process, new=index in self.new_records)
         self.sizes.load([np.asarray(exp.get(key, [])).reshape(-1).tolist()[:3] for key in PERCENTILES])
         for key, editor in self.traces.items():
             editor.load(np.asarray(exp.get(key, [])).reshape(2, -1).T.tolist())
         self.loaded_fields = self.fields()
 
     def fields(self):
-        return (self.name.text(), self.initial.text(), self.process.rows(), self.sizes.rows(),
+        return (self.name.text(), self.initial.text(), list(self.process.keys), self.process.rows(), self.sizes.rows(),
                 [editor.rows() for editor in self.traces.values()])
 
     def store_record(self):
@@ -251,8 +296,7 @@ class ExperimentEditor(QDialog):
                 raise ValueError(f"{label} cannot contain negative values.")
         if np.any(traces["ConcentrationData"][1] >= 1):
             raise ValueError("Measured concentration must be below 1 g/g solution.")
-        proc = {key: number(row[0], PROCESS_FIELDS[key])
-                for key, row in zip(PROCESS_FIELDS, self.process.rows())}
+        proc = self.process.settings()
         positive = {"SolvMass", "SolventDensity", "AntiSolventDensity", "SolidDensity", "ShapeFactor"}
         if any(value < 0 or (key in positive and value == 0) for key, value in proc.items()):
             raise ValueError("Enter positive solvent mass, densities and shape factor, and nonnegative other settings.")
@@ -301,10 +345,14 @@ class ExperimentEditor(QDialog):
         self.select(len(self.records) - 1)
 
     def remove_record(self):
+        if self.index < 0:
+            return
+        name = self.choices.currentText()
         self.records.pop(self.index)
         self.new_records = {i - int(i > self.index) for i in self.new_records if i != self.index}
         self.changed = True
         self.select(min(self.index, len(self.records) - 1))
+        self.status.setText(f"Removed {name}. Click Apply to save the change to this case.")
 
     def apply(self):
         try:

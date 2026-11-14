@@ -14,10 +14,12 @@ from PySide6.QtWidgets import (
 
 from .candidate_workers import max_cpu_workers
 from .model_file import save_checkpoint
-from .parameter_labels import PARAMETERS
+from .native_case import CASE_FILTER, MATLAB_FILTER, NATIVE_FILTER, save_native_case
+from .kernel_choice import add_kernel_choice, kernel_values
+from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
 from .solver import read_model
 from .solver_choice import SolverChoice
-from .session import display_name, history, record_step
+from .session import clear_matlab_fit_summaries, delete_models, display_name, history, record_step
 
 
 def table(headers):
@@ -79,8 +81,8 @@ class ControlPanel(QMainWindow):
             check.setEnabled(False)
             self.checks[key] = check
 
-        self.import_button = self.button("Import MATLAB (.mat)", self.choose_file)
-        self.save_button = self.button("Save Model", self.save_case)
+        self.import_button = self.button("Open IMED case", self.choose_file)
+        self.save_button = self.button("Save IMED case", self.save_case)
         self.campaign_button = self.button("Import CrystalLoop", self.choose_campaign)
         self.input_buttons = [self.button("Edit experimental inputs", self.edit_inputs)]
         self.review_inputs = self.button("Review saved inputs", self.show_inputs)
@@ -109,7 +111,7 @@ class ControlPanel(QMainWindow):
             self._build_diagram()
         else:
             self._build_embedded()
-        self.show_message("Import a MATLAB IMED case or a CrystalLoop recording.")
+        self.show_message("Open an IMED case or import a CrystalLoop recording.")
         self.refresh_status()
 
     def _build_embedded(self):
@@ -228,7 +230,7 @@ class ControlPanel(QMainWindow):
             self.message_label.setText(message)
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import MATLAB IMED case", "", "MAT files (*.mat)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open IMED case", "", CASE_FILTER)
         if path:
             self.open_case(path)
 
@@ -236,18 +238,10 @@ class ControlPanel(QMainWindow):
         try:
             case = read_model(path)
         except Exception as error:
-            QMessageBox.warning(self, "Import MATLAB", str(error))
+            QMessageBox.warning(self, "Open IMED case", str(error))
             return
-        self.case = case
-        self.source = Path(path)
-        self.campaign_path = None
-        self.parameter_edits.clear()
-        self.setting_edits.clear()
-        self.numerics.load_settings(case.get("pbmsetting"))
-        workflow = case.get("PythonWorkflow", {})
-        self.workers.setValue(int(workflow.get("cpu_workers", 1)))
-        self.show_message(f"Imported {self.source.name}")
-        self.refresh_status()
+        self._set_case(case, source=Path(path))
+        self.show_message(f"Opened {self.source.name}.")
 
     def choose_campaign(self):
         from .campaign_dialog import CampaignImportDialog
@@ -287,8 +281,7 @@ class ControlPanel(QMainWindow):
             workflow.pop("doe_factors", None)
         else:
             workflow["doe_factors"] = np.asarray(doe_factors, dtype=object)
-        for key in ("MDIteration", "MDsimulation", "PPsimulation", "summaryTable"):
-            self.case.pop(key, None)
+        clear_matlab_fit_summaries(self.case)
         old_weights = self.case.get("objweightfactor")
         weights = dict(old_weights) if isinstance(old_weights, dict) else {"W1": 0, "W2": 1, "W3": 1}
         for weight, field in (("W1", "CountsData"), ("W2", "ConcentrationData"),
@@ -305,22 +298,27 @@ class ControlPanel(QMainWindow):
         self.show_message(message)
 
     def save_case(self):
-        suggested = (self.source.with_name(f"{self.source.stem}_python.mat")
-                     if self.source is not None else Path("imed_checkpoint.mat"))
-        path, _ = QFileDialog.getSaveFileName(self, "Save IMED checkpoint", str(suggested),
-                                              "MAT files (*.mat)")
+        suggested = self.source or Path("imed_case.imed.json")
+        if suggested.suffix.lower() != ".json":
+            suggested = suggested.with_suffix(".imed.json")
+        path, selected = QFileDialog.getSaveFileName(self, "Save IMED case", str(suggested),
+                                                     f"{NATIVE_FILTER};;{MATLAB_FILTER}")
         if not path:
             return
         destination = Path(path)
-        if not destination.suffix:
-            destination = destination.with_suffix(".mat")
         try:
             case = self.checkpoint_case()
-            save_checkpoint(self.source, destination, case)
+            if selected == MATLAB_FILTER or destination.suffix.lower() == ".mat":
+                if destination.suffix.lower() != ".mat":
+                    destination = destination.with_suffix(".mat")
+                source = self.source if self.source and self.source.suffix.lower() == ".mat" else None
+                save_checkpoint(source, destination, case)
+            else:
+                destination = save_native_case(destination, case)
         except Exception as error:
-            QMessageBox.warning(self, "Save Model", str(error))
+            QMessageBox.warning(self, "Save IMED case", str(error))
         else:
-            self.show_message(f"Saved complete IMED checkpoint {destination.name}")
+            self.show_message(f"Saved IMED case {destination.name}.")
 
     def refresh_status(self):
         counts = {key: item_count(self.case.get(key)) for key in
@@ -337,7 +335,8 @@ class ControlPanel(QMainWindow):
         )))
         self.review_inputs.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
         self.configurations.setEnabled(counts["ModelParameter"] > 0)
-        self.save_button.setEnabled(any(counts[key] for key in ("ModelParameter", "ExpData", "Solubility")))
+        self.save_button.setEnabled(bool(self.source or history(self.case))
+                                    or any(counts[key] for key in ("ModelParameter", "ExpData", "Solubility")))
         self.save_button.setToolTip("Save current IMED inputs, results, confidence intervals and executed steps.")
         self.history_button.setEnabled(bool(history(self.case)))
         self.design.setEnabled(
@@ -383,20 +382,17 @@ class ControlPanel(QMainWindow):
                 self.case["Solubility"] = solubility
             else:
                 self.case["Solubility"] = {}
-            for key in ("MDIteration", "MDsimulation", "PPsimulation", "summaryTable"):
-                self.case.pop(key, None)
+            clear_matlab_fit_summaries(self.case)
+            history(self.case)
+            self.case["PythonWorkflow"].pop("simulation_selection", None)
+            self.parameter_edits.clear()
             for model in self.case.get("ModelParameter", []):
                 for key in ("para", "covmat", "resnorm", "resid", "jacobian", "nvars", "SSR",
                             "r", "FVector", "AICVector", "t_test", "Results"):
                     model.pop(key, None)
-            if "objweightfactor" not in self.case:
-                fields = ("CountsData", "ConcentrationData", "FinalD10D50D90")
-                weights = {f"W{i}": int(all(np.size(exp.get(field, [])) for exp, _ in records))
-                           for i, field in enumerate(fields, 1)} if records else {}
-                self.case["objweightfactor"] = {**weights, "Terms": "D10 D50 D90"}
             record_step(self.case, "experiment_edit", {"runs": len(records)})
             self.refresh_status()
-            self.show_message("Experimental inputs updated. Use Save Model to write a MATLAB checkpoint.")
+            self.show_message("Experimental inputs updated. Use Save IMED case to keep the changes.")
         dialog.deleteLater()
 
     def generate_candidate(self):
@@ -418,14 +414,17 @@ class ControlPanel(QMainWindow):
         return pack_imed_settings(self.checkpoint_case())
 
     def restore_setup_settings(self, case):
+        self._set_case(case)
+        self.show_message("Restored IMED settings from the setup preset.")
+
+    def _set_case(self, case, *, source=None):
         self.case = case
-        self.source = self.campaign_path = None
+        self.source, self.campaign_path = source, None
         self.parameter_edits.clear()
         self.setting_edits.clear()
         self.numerics.load_settings(case.get("pbmsetting"))
         self.workers.setValue(int(case.get("PythonWorkflow", {}).get("cpu_workers", 1)))
         self.refresh_status()
-        self.show_message("Restored IMED settings from the setup preset.")
 
     def checkpoint_case(self):
         case = self.simulation_case()
@@ -512,15 +511,19 @@ class ControlPanel(QMainWindow):
 
     def show_configurations(self):
         dialog, layout = self.dialog("IMED | Model Configurations")
-        layout.addWidget(QLabel("Edit parameter values, bounds, and estimation flags. "
-                                "Changes clear fitted results for the affected model."))
+        dialog.resize(1040, 570)
+        layout.addWidget(QLabel("Edit parameters or delete the selected model. "
+                                "Save applies changes to this case."))
         models = self.case["ModelParameter"]
         tabs = QTabWidget()
         layout.addWidget(tabs)
         tables = {}
+        indices = {}
+        removed = set()
         for index, model in enumerate(models):
             parameters = table(("Parameter", "Meaning", "Nominal", "Lower Bound", "Upper Bound", "Est."))
             tabs.addTab(parameters, display_name(model, f"Model {index + 1}"))
+            indices[parameters] = index
             entries = np.asarray(model.get("paraset", []), dtype=float)
             if entries.shape != (len(PARAMETERS), 4):
                 continue
@@ -535,16 +538,43 @@ class ControlPanel(QMainWindow):
                 flag = parameters.item(row, 5)
                 flag.setFlags(flag.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 flag.setCheckState(Qt.CheckState.Checked if estimate else Qt.CheckState.Unchecked)
+                if row in KERNEL_OPTIONS:
+                    add_kernel_choice(parameters, row, 2, row, entries[row, 1])
+            parameters.resizeColumnsToContents()
             parameters.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                        | QAbstractItemView.EditTrigger.EditKeyPressed)
             tables[index] = (parameters, entries)
 
+        delete_button = QPushButton("Delete selected model")
+        layout.addWidget(delete_button)
+
+        def remove_model():
+            position = tabs.currentIndex()
+            if position >= 0:
+                removed.add(indices[tabs.currentWidget()])
+                tabs.removeTab(position)
+                delete_button.setEnabled(tabs.count() > 0)
+
+        delete_button.clicked.connect(remove_model)
+
         def apply_changes():
             changes = {}
             for index, (parameters, original) in tables.items():
+                if index in removed:
+                    continue
                 updated = original.copy()
                 for row, (name, _) in enumerate(PARAMETERS):
                     try:
+                        if row in KERNEL_OPTIONS:
+                            choice = parameters.cellWidget(row, 2)
+                            if choice.currentIndex() == choice.initial_choice:
+                                continue
+                            values = kernel_values(choice)
+                            if (row == BREAKAGE_DISTRIBUTION and values[1] == 2
+                                    and updated[28, 1] != -np.inf and updated[33, 2] <= 0):
+                                raise ValueError("Gaussian fragment volume requires a positive σ.")
+                            updated[row] = values
+                            continue
                         active = parameters.item(row, 5).checkState() == Qt.CheckState.Checked
                         nominal, lower, upper = (float(parameters.item(row, c).text())
                                                  for c in (2, 3, 4))
@@ -565,14 +595,20 @@ class ControlPanel(QMainWindow):
                         return
                 if not np.array_equal(updated, original, equal_nan=True):
                     changes[index] = updated
+            if removed:
+                positions = delete_models(self.case, removed)
+                self.parameter_edits = {positions[index]: model for index, model in self.parameter_edits.items()
+                                        if index in positions}
+                changes = {positions[index]: updated for index, updated in changes.items()}
             for index, updated in changes.items():
-                models[index] = {**{k: models[index][k] for k in ("Name",) if k in models[index]},
-                                 "paraset": updated, "para": np.empty(0)}
-                self.parameter_edits[index] = models[index]
+                model = self.case["ModelParameter"][index]
+                self.case["ModelParameter"][index] = {**{k: model[k] for k in ("Name",) if k in model},
+                                                      "paraset": updated, "para": np.empty(0)}
+                self.parameter_edits[index] = self.case["ModelParameter"][index]
                 record_step(self.case, "model_configuration", {"paraset": updated}, model_index=index)
-            if changes:
+            if changes or removed:
                 self.refresh_status()
-                self.show_message("Updated model parameters. Use Save Model to write a MAT file.")
+                self.show_message("Model list updated. Use Save IMED case to keep the changes.")
             dialog.accept()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
@@ -605,18 +641,18 @@ class ControlPanel(QMainWindow):
     def show_estimation(self):
         from .estimation_dialog import ParameterEstimation
 
-        dialog = ParameterEstimation(self.simulation_case(), self, workers=self.cpu_workers())
+        dialog = ParameterEstimation(self.checkpoint_case(), self, workers=self.cpu_workers())
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if dialog.saved_settings:
             self.case.update(dialog.saved_settings)
             self.setting_edits.update(dialog.saved_settings)
-            self.show_message("Saved PE settings for this case. Use Save Model to write a MAT file.")
+            self.show_message("Applied PE settings to this case.")
         if accepted:
             for index, model in dialog.fitted_models.items():
                 self.case["ModelParameter"][index] = model
                 self.parameter_edits[index] = model
             self.refresh_status()
-            self.show_message("Applied fitted parameters. Use Save Model to write a MAT file.")
+            self.show_message("Applied fitted parameters. Use Save IMED case to keep the changes.")
         self.refresh_status()
         dialog.deleteLater()
 

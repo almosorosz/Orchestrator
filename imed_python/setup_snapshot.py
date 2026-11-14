@@ -1,24 +1,22 @@
 """Embed an IMED checkpoint in the versioned CrystalLoop setup preset."""
-from base64 import b64decode, b64encode
+from base64 import b64decode
 from io import BytesIO
 
-from scipy.io import savemat
-
-from .model_file import checkpoint_variables
+from .native_case import pack_case, unpack_case
 from .solver import read_model
 
 
 def pack_imed_settings(case):
-    payload = BytesIO()
-    savemat(payload, checkpoint_variables(case), do_compression=True)
-    return {"active_workflow": "imed", "imed_mat": b64encode(payload.getvalue()).decode("ascii")}
+    return {"active_workflow": "imed", "imed_case": pack_case(case)}
 
 
 def read_imed_settings(settings):
     if settings is None:
         return None
-    if not isinstance(settings, dict) or settings.get("active_workflow") != "imed":
+    if not isinstance(settings, dict) or settings.get("active_workflow") not in ("imed", "bo"):
         raise ValueError("Unsupported modeling workflow in the setup preset.")
+    if "imed_case" in settings:
+        return unpack_case(settings["imed_case"])
     encoded = settings.get("imed_mat")
     if not isinstance(encoded, str):
         raise ValueError("The setup preset is missing its IMED checkpoint.")

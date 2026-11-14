@@ -9,7 +9,7 @@ from .comparison import percentile_history
 from .distribution import d_values
 from .estimation import TRIAL_ERRORS, series
 from .parameter_labels import PARAMETERS
-from .session import history, signature, unpack_fit, unpack_intervals
+from .session import history, pe_signatures, signature, unpack_fit, unpack_intervals
 from .simulated_profile import editable_groups, prediction_inputs, stirring_power_ratio
 from .solver import model_parameters, simulate
 from .uncertainty import DISCRETE_PARAMETERS, intervals_from_covariance
@@ -32,13 +32,13 @@ def model_intervals(case, model_index):
     current = model_parameters(model)
     active = np.flatnonzero(np.asarray(model["paraset"])[:, 0] == 1)
     contexts = {
-        "parameter_uncertainty": signature(case, model_index, include_weights=False),
-        "parameter_estimation": signature(case, model_index, include_values=False),
+        "parameter_uncertainty": (signature(case, model_index, include_weights=False),),
+        "parameter_estimation": pe_signatures(case, model_index),
     }
     for step in reversed(history(case)):
         if (int(step["model_index"]) != model_index
                 or step["action"] not in contexts
-                or step["signature"] != contexts[step["action"]]):
+                or step["signature"] not in contexts[step["action"]]):
             continue
         result = (unpack_intervals(step["result"].get("intervals"))
                   if step["action"] == "parameter_uncertainty"

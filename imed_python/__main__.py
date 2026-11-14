@@ -9,7 +9,7 @@ from .simulation import Window
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("case", nargs="?", help="IMED MAT case to open at startup")
+    parser.add_argument("case", nargs="?", help="CrystalLoop IMED case or MATLAB MAT case to open at startup")
     parser.add_argument("--simulate", action="store_true", help="Open the forward simulator directly")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])

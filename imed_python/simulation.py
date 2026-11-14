@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from .distribution import percent_density, volume_distribution
 from .simulated_profile import editable_groups, prediction_inputs, remember_active_doe
 from .simulated_profile_dialog import SimulatedProfileDialog
+from .native_case import CASE_FILTER
 from .solver import load_case, model_parameters, pbm_backend_label, simulate
 from .solver_choice import SolverChoice
 from .session import display_name, history, record_step, signature
@@ -59,7 +60,7 @@ class Window(QMainWindow):
         self.case = None
         self.worker = None
         self.last_profile = None
-        self.open_button = QPushButton("Import MATLAB (.mat)")
+        self.open_button = QPushButton("Open IMED case")
         self.open_button.clicked.connect(self.choose_file)
         self.model = QComboBox()
         self.experiment = QComboBox()
@@ -114,7 +115,7 @@ class Window(QMainWindow):
         self.numerics.currentIndexChanged.connect(self.restore_result)
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import MATLAB IMED case", "", "MAT files (*.mat)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open IMED case", "", CASE_FILTER)
         if path:
             self.open_case(path)
 

@@ -181,6 +181,7 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
             break
     return {
         "TemperatureData": temperature, "ConcentrationData": concentration,
+        "RecordingStart_s": origin,
         "InitialConcentration": initial_concentration, "CountsData": within_window("FBRM"),
         "FlowRateData": feed, "AntisolventScaleData": scale, "AddedAntisolventData": added,
         "InitialCSDsData": seed_distribution(seed_percentiles) if seed_percentiles else EMPTY.copy(),

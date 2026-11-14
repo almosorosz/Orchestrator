@@ -11,9 +11,21 @@ from experiment.models import ExperimentDefinition
 from experiment.recording import validate_settings
 
 
+def validate_manual_experiments(panel):
+    devices = panel["devices"]
+    for index, saved in enumerate(panel.get("experiments", []), 1):
+        frame = pd.DataFrame(**saved)
+        missing = [column for column in frame if column != "time_s" and column not in devices]
+        if missing:
+            raise ValueError(f"Saved Control Panel experiment {index} references missing devices: "
+                             f"{', '.join(missing)}. Restore those devices or remove the stale "
+                             "Control Panel experiment. Generated DoE profiles are stored separately.")
+        ExperimentDefinition.from_frame(frame, devices)
+
+
 def read_preset(filename):
     data = json.loads(Path(filename).read_text(encoding="utf-8"))
-    if data.get("format") != "crystalloop-setup" or data.get("version") not in (1, 2, 3):
+    if data.get("format") != "crystalloop-setup" or data.get("version") not in (1, 2, 3, 4):
         raise ValueError("Unsupported setup preset format/version")
     panel = data["control_panel"]
     from control_panel.control_panel import HARDWARE_TYPES
@@ -30,8 +42,7 @@ def read_preset(filename):
         if config.get("pump_calibration"):
             from experiment.pump_calibration_files import validate_calibration
             validate_calibration(config["pump_calibration"], config["type"])
-    for frame in panel.get("experiments", []):
-        ExperimentDefinition.from_frame(pd.DataFrame(**frame), devices)
+    validate_manual_experiments(panel)
     for key, saved in panel.get("profiles", {}).items():
         frame = pd.DataFrame(**saved)
         if key not in devices or not {"time_s", "value"}.issubset(frame.columns):
@@ -80,8 +91,8 @@ def read_preset(filename):
             raise ValueError(f"Invalid value for {field.name}")
         setattr(parameters, field.name, value)
     assignments = tuple(ProfileAssignment(**row) for row in data.get("assignments", []))
-    if len({a.role for a in assignments}) != len(assignments):
-        raise ValueError("Duplicate profile roles in preset")
+    if len({a.role for a in assignments}) != len(assignments) or len({a.device_id for a in assignments}) != len(assignments):
+        raise ValueError("Duplicate profile roles or devices in preset")
     for assignment in assignments:
         if assignment.role not in ROLES or assignment.device_id not in devices or devices[assignment.device_id]["type"] not in ROLES[assignment.role].compatible_types:
             raise ValueError(f"Invalid assignment: {assignment.role}")
@@ -96,13 +107,14 @@ def read_preset(filename):
 
 def write_preset(filename, panel, parameters, assignments, environment, recording, generated_doe=None, *, monitor_device_ids=(), modeling=None):
     from app.version import __version__
+    validate_manual_experiments(panel)
     payload = {"format": "crystalloop-setup", "version": 2, "application_version": __version__,
                "control_panel": panel, "process": asdict(parameters),
                "assignments": [asdict(a) for a in assignments], "environment": environment,
                "recording": validate_settings(recording), "generated_doe": generated_doe,
                "monitor_device_ids": list(monitor_device_ids)}
     if modeling is not None:
-        payload["version"] = 3
+        payload["version"] = 4 if "bo" in modeling else 3
         payload["modeling"] = modeling
     from experiment.recording import atomic_json
     atomic_json(Path(filename), payload)

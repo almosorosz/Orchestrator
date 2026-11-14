@@ -17,7 +17,7 @@ from .parameter_labels import PARAMETERS
 from .solver import model_parameters, pbm_backend_label
 from .size_data import TREND_SIZE_TERM
 from .uncertainty import local_intervals
-from .session import latest_step, pack_intervals, record_step, signature, unpack_fit, unpack_intervals
+from .session import latest_pe_step, latest_step, pack_intervals, record_step, signature, unpack_fit, unpack_intervals
 
 
 class UncertaintyJob(QThread):
@@ -146,8 +146,7 @@ class ParameterUncertainty(QDialog):
                            context=signature(case, model_index, include_weights=False))
         result = unpack_intervals(step["result"].get("intervals")) if step is not None else None
         if result is None:
-            fit_step = latest_step(case, "parameter_estimation", model_index=model_index,
-                                   context=signature(case, model_index, include_values=False))
+            fit_step = latest_pe_step(case, model_index)
             if fit_step is not None:
                 fit = unpack_fit(fit_step["result"])
                 model = case["ModelParameter"][model_index]

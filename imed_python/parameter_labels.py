@@ -1,5 +1,21 @@
 """Parameter labels and meanings from IMED ModelSet/ParaSet.m."""
 
+AGGLOMERATION_KERNEL = 26
+BREAKAGE_DISTRIBUTION = 34
+KERNEL_OPTIONS = {
+    AGGLOMERATION_KERNEL: {
+        1: "Constant · 1",
+        2: "Size ratio · (Lᵢ + Lⱼ)² / (LᵢLⱼ)",
+        3: "Cubed sum · (Lᵢ + Lⱼ)³",
+        4: "Sum of cubes · Lᵢ³ + Lⱼ³",
+        5: "Size difference · (Lᵢ + Lⱼ)²(Lᵢ − Lⱼ)²",
+    },
+    BREAKAGE_DISTRIBUTION: {
+        1: "Inverse volume · 2/V",
+        2: "Gaussian in fragment volume · μ and σ",
+    },
+}
+
 PARAMETERS = (
     ('log_10(k_p)', 'Primary nucleation rate constant'),
     ('p', 'Primary nucleation supersaturation exponent'),
@@ -27,7 +43,7 @@ PARAMETERS = (
     ('χ_d', 'Dissolution solvent composition dependency'),
     ('log_10(k_agg)', 'Agglomeration rate constant'),
     ('agg', 'Agglomeration supersaturation exponent'),
-    ('Kernel', 'Agglomeration size-dependent kernel'),
+    ('Kernel', 'Agglomeration collision kernel'),
     ('ξ_agg', 'Agglomeration power ratio dependency'),
     ('log_10(k_br)', 'Breakage rate constant'),
     ('br', 'Breakage size exponent'),
@@ -35,5 +51,5 @@ PARAMETERS = (
     ('L_cr', 'Critical crystal size of breakage'),
     ('μ', 'Breakage fragment distribution function parameter'),
     ('σ', 'Breakage fragment distribution function parameter'),
-    ('Break Dist.', 'Breakage distribution'),
+    ('Break Dist.', 'Breakage fragment distribution'),
 )

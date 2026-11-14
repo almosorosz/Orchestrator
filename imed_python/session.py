@@ -6,6 +6,8 @@ import json
 
 import numpy as np
 
+from .model_file import MATLAB_FIT_SUMMARIES
+from .pe_settings import PE_PBM_KEY, PE_WEIGHTS_KEY, effective_pe_pbm
 from .uncertainty import ParameterIntervals
 
 
@@ -17,8 +19,12 @@ def display_name(record, fallback):
     return name.strip() if isinstance(name, str) and name.strip() else fallback
 
 
+def history_workflow(case):
+    return case.setdefault(WORKFLOW_KEY, {"version": 1, "steps": []})
+
+
 def history(case):
-    workflow = case.setdefault(WORKFLOW_KEY, {"version": 1, "steps": []})
+    workflow = history_workflow(case)
     steps = workflow.get("steps", [])
     if isinstance(steps, dict):
         steps = [steps]
@@ -78,6 +84,59 @@ def latest_step(case, action, *, model_index=-1, context=None):
                 and (context is None or step.get("signature") == context)):
             return step
     return None
+
+
+def pe_signatures(case, model_index):
+    fitting_case = {**case, "pbmsetting": effective_pe_pbm(case)}
+    if PE_WEIGHTS_KEY in case:
+        fitting_case["objweightfactor"] = case[PE_WEIGHTS_KEY]
+    current = signature(fitting_case, model_index, include_values=False)
+    if PE_PBM_KEY in case or PE_WEIGHTS_KEY in case:
+        return (current,)
+    return current, signature(case, model_index, include_values=False)
+
+
+def latest_pe_step(case, model_index):
+    for context in pe_signatures(case, model_index):
+        step = latest_step(case, "parameter_estimation", model_index=model_index, context=context)
+        if step is not None:
+            return step
+    return None
+
+
+def clear_matlab_fit_summaries(case):
+    for key in MATLAB_FIT_SUMMARIES:
+        if key in case:
+            case[key] = np.empty(0)
+
+
+def delete_models(case, removed):
+    """Drop models and reindex the history of the models still in the case."""
+    models = case["ModelParameter"]
+    surviving = [index for index in range(len(models)) if index not in removed]
+    positions = {old: new for new, old in enumerate(surviving)}
+    steps = history(case)
+    retained = []
+    for step in steps:
+        index = int(step["model_index"])
+        if step["action"] in ("d_optimal_design", "model_discrimination"):
+            continue
+        if index < 0:
+            retained.append(step)
+        elif index in positions:
+            result = step["result"]
+            if isinstance(result, dict) and "model_index" in result:
+                result = {**result, "model_index": positions[index]}
+            retained.append({**step, "model_index": positions[index], "result": result})
+    steps[:] = retained
+    workflow = history_workflow(case)
+    selection = workflow.pop("simulation_selection", None)
+    if isinstance(selection, dict) and (index := int(selection.get("model_index", -1))) in positions:
+        workflow["simulation_selection"] = {**selection, "model_index": positions[index]}
+    case["ModelParameter"] = [models[index] for index in surviving]
+    clear_matlab_fit_summaries(case)
+    record_step(case, "model_delete", {"models": len(removed)})
+    return positions
 
 
 def pack_intervals(result):

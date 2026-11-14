@@ -6,32 +6,20 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .parameter_labels import PARAMETERS
+from .kinetic_defaults import MATLAB_KINETIC_DEFAULTS
+from .kernel_choice import add_kernel_choice, kernel_values
+from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
 
 MECHANISMS = (
-    ("Primary nucleation", 0, 5, (5., 3., 7.)),
-    ("Secondary nucleation", 5, 12, (4., 2., 6.)),
-    ("Growth", 12, 18, (-.5, -2., 1.)),
-    ("Dissolution", 18, 24, (-.5, -2., 1.)),
-    ("Agglomeration", 24, 28, (-8., -10., -6.)),
-    ("Breakage", 28, 35, (-2., -4., 0.)),
+    ("Primary nucleation", 0, 5),
+    ("Secondary nucleation", 5, 12),
+    ("Growth", 12, 18),
+    ("Dissolution", 18, 24),
+    ("Agglomeration", 24, 28),
+    ("Breakage", 28, 35),
 )
 LOG_ACTIVATION = {3, 9, 16, 22}
-SELECTORS = {8: range(2), 26: range(1, 6), 34: range(1, 3)}
-DISCRETE_DEFAULTS = {8: 0, 26: 1, 34: 1}
-
-
-def mechanism_defaults(start, stop, rate):
-    rows = np.zeros((stop - start, 4))
-    rows[0] = (1, *rate)
-    for index in range(start + 1, stop):
-        if index in DISCRETE_DEFAULTS:
-            rows[index - start, 1:] = DISCRETE_DEFAULTS[index]
-        elif index in LOG_ACTIVATION:
-            rows[index - start, 1:] = -np.inf
-        elif index == 33:
-            rows[index - start, 1:] = 1.
-    return rows
+SELECTORS = {8: (1, 2), **KERNEL_OPTIONS}
 
 
 class CandidateModelDialog(QDialog):
@@ -46,15 +34,15 @@ class CandidateModelDialog(QDialog):
         form.addRow("Model name", self.name)
         self.tabs = QTabWidget()
         self.mechanisms = []
-        for name, start, stop, rate in MECHANISMS:
+        for name, start, stop in MECHANISMS:
             page = QWidget()
             layout = QVBoxLayout(page)
             enabled = QCheckBox(f"Enable {name.lower()}")
-            enabled.setChecked(name in {"Primary nucleation", "Growth"})
+            enabled.setChecked(True)
             layout.addWidget(enabled)
             parameters = QTableWidget(stop - start, 5)
             parameters.setHorizontalHeaderLabels(("Parameter", "Nominal", "Minimum", "Maximum", "Estimate"))
-            for row, (estimate, nominal, lower, upper) in enumerate(mechanism_defaults(start, stop, rate)):
+            for row, (estimate, nominal, lower, upper) in enumerate(MATLAB_KINETIC_DEFAULTS[start:stop]):
                 index = start + row
                 label, meaning = PARAMETERS[index]
                 item = QTableWidgetItem(label)
@@ -69,6 +57,8 @@ class CandidateModelDialog(QDialog):
                 if index in SELECTORS:
                     flag.setFlags(flag.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 parameters.setItem(row, 4, flag)
+                if index in KERNEL_OPTIONS:
+                    add_kernel_choice(parameters, row, 1, index, nominal)
             parameters.resizeColumnsToContents()
             parameters.horizontalHeader().setStretchLastSection(True)
             enabled.toggled.connect(parameters.setEnabled)
@@ -76,7 +66,7 @@ class CandidateModelDialog(QDialog):
             layout.addWidget(parameters)
             self.tabs.addTab(page, name)
             self.mechanisms.append((enabled, parameters, start, stop))
-        self.status = QLabel("Review the starting values and bounds before fitting. Log parameters use base 10.")
+        self.status = QLabel("Starting values and bounds follow MATLAB IMED. Log parameters use base 10.")
         self.status.setWordWrap(True)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Add candidate")
@@ -103,6 +93,12 @@ class CandidateModelDialog(QDialog):
                 continue
             for row, index in enumerate(range(start, stop)):
                 try:
+                    if index in KERNEL_OPTIONS:
+                        values = kernel_values(editor.cellWidget(row, 1))
+                        if index == BREAKAGE_DISTRIBUTION and values[1] == 2 and table[33, 2] <= 0:
+                            raise ValueError("Gaussian fragment volume requires a positive σ.")
+                        table[index] = values
+                        continue
                     estimated = editor.item(row, 4).checkState() == Qt.CheckState.Checked
                     values = [float(editor.item(row, column).text()) for column in (1, 2, 3)]
                     nominal, lower, upper = values
@@ -111,8 +107,6 @@ class CandidateModelDialog(QDialog):
                         raise ValueError("Use finite, ordered bounds around the nominal value.")
                     if index in SELECTORS and nominal not in SELECTORS[index]:
                         raise ValueError(f"Choose one of {', '.join(map(str, SELECTORS[index]))}.")
-                    if index == 34 and nominal == 2 and table[33, 2] <= 0:
-                        raise ValueError("A Gaussian breakage distribution requires a positive width.")
                     table[index] = (estimated, *values)
                 except ValueError as error:
                     self.tabs.setCurrentIndex(tab)

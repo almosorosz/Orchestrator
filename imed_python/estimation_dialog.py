@@ -1,21 +1,28 @@
 """Parameter Estimation dialog backed by the standalone fitting engine."""
 from datetime import datetime
+import json
+from pathlib import Path
 from math import isfinite
 from threading import Event
 
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout,
 )
 
+from experiment.recording import atomic_json
+
 from .control_panel import fill_table, table
-from .estimation import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, FitObjective, fit_model
+from .estimation import FitObjective, fit_model
+from .native_case import NATIVE_FILTER, save_native_case
+from .pe_settings import (PE_PBM_KEY, PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, WEIGHT_DEFAULTS,
+                          effective_pe_pbm, pbm_for_pe, pe_file, pe_mesh, read_pe_file)
 from .parameter_labels import PARAMETERS
 from .solver import pbm_backend_label
 from .size_data import SIZE_SAMPLE_OPTIONS, TREND_SIZE_TERM
-from .session import display_name, latest_step, pack_fit, record_step, signature, unpack_fit
+from .session import display_name, history, latest_pe_step, pack_fit, pe_signatures, record_step, unpack_fit
 
 
 class AdvancedSettings(QDialog):
@@ -26,16 +33,16 @@ class AdvancedSettings(QDialog):
         self.pbm, self.optimizer = dict(pbm), dict(optimizer)
         mode = pbm.get("Numerics", "conservative")
         jax = mode == "jax"
-        rtol, atol = (1e-7, 1e-9) if jax else (1e-3, 1e-6)
+        defaults = pbm_for_pe({"Numerics": mode})
 
         self.mesh_fields = (
-            ("Lmin", "Minimum size, Lmin (µm)", 0., float),
-            ("Lmax", "Maximum size, Lmax (µm)", 250., float),
-            ("N", "Number of bins", 250, int),
-            ("RelTol", "Relative error tolerance", rtol, float),
-            ("AbsTol", "Absolute error tolerance", atol, float),
-            ("MaxSteps", "Maximum JAX steps", 100_000, int) if jax else
-            ("MaxIterationTime", "Max. time per simulation (s)", 30., float),
+            ("Lmin", "Minimum size, Lmin (µm)", defaults["Lmin"], float),
+            ("Lmax", "Maximum size, Lmax (µm)", defaults["Lmax"], float),
+            ("N", "Number of bins", defaults["N"], int),
+            ("RelTol", "Relative error tolerance", defaults["RelTol"], float),
+            ("AbsTol", "Absolute error tolerance", defaults["AbsTol"], float),
+            ("MaxSteps", "Maximum JAX steps", defaults["MaxSteps"], int) if jax else
+            ("MaxIterationTime", "Max. time per simulation (s)", defaults["MaxIterationTime"], float),
         )
         self.optimizer_fields = tuple(
             (key, label, PYFIT_DEFAULTS[key], type(PYFIT_DEFAULTS[key]))
@@ -172,8 +179,7 @@ class EstimationJob(QThread):
         case = self.case
         cancelled = self.cancel_requested.is_set
         try:
-            settings = case.get("pbmsetting")
-            settings = settings if isinstance(settings, dict) else {}
+            settings = effective_pe_pbm(case)
             self.message.emit(f"Solver · {pbm_backend_label(settings)}")
             objective = FitObjective(case["ExpData"], case["ProcInf"], case["Solubility"],
                                      settings, self.weights, self.terms, cancelled=cancelled)
@@ -210,7 +216,8 @@ class ParameterEstimation(QDialog):
 
         self.setWindowTitle("IMED | Parameter Estimation")
         self.resize(900, 720)
-        self.case = case
+        history(case)
+        self.case = dict(case)
         self.workers = workers
         self.job = None
         self.fitted_models = {}
@@ -225,12 +232,12 @@ class ParameterEstimation(QDialog):
         self.model.addItem("All models", None)
         for index, model in enumerate(case["ModelParameter"]):
             self.model.addItem(display_name(model, f"Model {index + 1}"), index)
-        saved = case.get("objweightfactor")
+        saved = case.get(PE_WEIGHTS_KEY, case.get("objweightfactor"))
         saved = saved if isinstance(saved, dict) else {}
         self.weights = []
         self.terms = QComboBox()
         self.terms.addItems(["CSD", "D10 D50 D90"])
-        if saved.get("Terms", "CSD") != "CSD":
+        if saved.get("Terms") in {value for _, value in SIZE_SAMPLE_OPTIONS}:
             self.terms.setCurrentIndex(1)
         self.size_samples = QComboBox()
         for label, value in SIZE_SAMPLE_OPTIONS:
@@ -244,7 +251,11 @@ class ParameterEstimation(QDialog):
             weight = QDoubleSpinBox()
             weight.setRange(0, 10000)
             weight.setDecimals(8)
-            weight.setValue(float(saved.get(f"W{index}", int(index == 2))))
+            value = saved.get(f"W{index}", WEIGHT_DEFAULTS[f"W{index}"])
+            try:
+                weight.setValue(float(value))
+            except (ValueError, TypeError):
+                weight.setValue(WEIGHT_DEFAULTS[f"W{index}"])
             self.weights.append(weight)
             form.addRow(label, weight)
         form.addRow("Size terms", self.terms)
@@ -252,6 +263,18 @@ class ParameterEstimation(QDialog):
         self.advanced_button = QPushButton("Advanced Settings")
         self.advanced_button.clicked.connect(self.edit_settings)
         form.addRow(self.advanced_button)
+        self.save_case_button = QPushButton("Save PE case…")
+        self.save_case_button.setToolTip("Save experiments, model definitions, current PE settings, and completed fits.")
+        self.save_case_button.clicked.connect(self.save_pe_case)
+        self.save_settings_button = QPushButton("Save PE settings…")
+        self.load_settings_button = QPushButton("Load PE settings…")
+        self.save_settings_button.clicked.connect(self.save_pe_settings)
+        self.load_settings_button.clicked.connect(self.load_pe_settings)
+        settings_buttons = QHBoxLayout()
+        settings_buttons.addWidget(self.save_case_button)
+        settings_buttons.addWidget(self.save_settings_button)
+        settings_buttons.addWidget(self.load_settings_button)
+        form.addRow(settings_buttons)
         self.uncertainty_button = QPushButton("Calculate parameter CIs")
         self.uncertainty_button.clicked.connect(self.show_uncertainty)
         form.addRow(self.uncertainty_button)
@@ -298,8 +321,7 @@ class ParameterEstimation(QDialog):
         self.summary.currentCellChanged.connect(self.update_interval_view)
         restored = {}
         for index in range(len(case["ModelParameter"])):
-            step = latest_step(case, "parameter_estimation", model_index=index,
-                               context=signature(case, index, include_values=False))
+            step = latest_pe_step(case, index)
             if step is not None:
                 restored[index] = unpack_fit(step["result"])
         if restored:
@@ -307,12 +329,77 @@ class ParameterEstimation(QDialog):
             self.save_button.setEnabled(True)
             self.details_button.setEnabled(True)
 
+    def save_pe_case(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save PE case", "imed_pe.imed.json", NATIVE_FILTER)
+        if not path:
+            return
+        try:
+            case = {**self.case, **self.current_pe_settings()}
+            # Results remain in the workflow history until applied to the model.
+            destination = save_native_case(path, case)
+        except (OSError, TypeError, ValueError) as error:
+            self.status.setText(str(error))
+        else:
+            self.status.setText(f"Saved PE case {destination.name}. Reopen it from IMED.")
+
+    def current_pe_settings(self):
+        return {PYFIT_SETTINGS_KEY: dict(self.optimizer),
+                PE_WEIGHTS_KEY: {**{f"W{i}": control.value()
+                                    for i, control in enumerate(self.weights, 1)},
+                                 "Terms": self.size_term()}}
+
+    def save_pe_settings(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save PE settings", "imed_pe.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            pbm = effective_pe_pbm(self.case)
+            for key in ("N", "MaxSteps"):
+                if key in pbm and float(pbm[key]).is_integer():
+                    pbm[key] = int(pbm[key])
+            if "UseArchivedTolerances" in pbm:
+                pbm["UseArchivedTolerances"] = bool(pbm["UseArchivedTolerances"])
+            settings = self.current_pe_settings()
+            optimizer = settings[PYFIT_SETTINGS_KEY]
+            for key, default in PYFIT_DEFAULTS.items():
+                if type(default) is int and float(optimizer[key]).is_integer():
+                    optimizer[key] = int(optimizer[key])
+            data = pe_file(pbm, optimizer, settings[PE_WEIGHTS_KEY])
+            read_pe_file(data)
+            atomic_json(Path(path), data)
+        except (OSError, TypeError, ValueError) as error:
+            self.status.setText(str(error))
+        else:
+            self.status.setText(f"Saved PE settings to {Path(path).name}.")
+
+    def load_pe_settings(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load PE settings", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            pbm, optimizer, weights = read_pe_file(json.loads(Path(path).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as error:
+            self.status.setText(str(error))
+            return
+        backend = effective_pe_pbm(self.case).get("Numerics", "conservative")
+        settings = pe_mesh(pbm_for_pe({"Numerics": backend, **pbm}))
+        self.optimizer = optimizer
+        loaded = {PE_PBM_KEY: settings, PYFIT_SETTINGS_KEY: optimizer, PE_WEIGHTS_KEY: weights}
+        self.saved_settings.update(loaded)
+        self.case.update(loaded)
+        for index, control in enumerate(self.weights, 1):
+            control.setValue(weights[f"W{index}"])
+        term = weights["Terms"]
+        self.terms.setCurrentIndex(int(term != "CSD"))
+        self.size_samples.setCurrentIndex(self.size_samples.findData(term) if term != "CSD" else 0)
+        self.objective_changed()
+        self.status.setText(f"Loaded PE settings from {Path(path).name}.")
+
     def edit_settings(self):
-        settings = self.case.get("pbmsetting")
-        dialog = AdvancedSettings(settings if isinstance(settings, dict) else {}, self.optimizer, self)
+        dialog = AdvancedSettings(effective_pe_pbm(self.case), self.optimizer, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.optimizer = dialog.optimizer
-            self.saved_settings = {"pbmsetting": dialog.pbm, PYFIT_SETTINGS_KEY: dialog.optimizer}
+            self.saved_settings.update({PE_PBM_KEY: pe_mesh(dialog.pbm), PYFIT_SETTINGS_KEY: dialog.optimizer})
             self.case = {**self.case, **self.saved_settings}
             self.clear_results()
             self.status.setText("Advanced settings saved. Run parameter estimation to use them.")
@@ -350,6 +437,9 @@ class ParameterEstimation(QDialog):
         self.output_tabs.setCurrentIndex(1)
         self.run_button.setEnabled(False)
         self.advanced_button.setEnabled(False)
+        self.save_case_button.setEnabled(False)
+        self.save_settings_button.setEnabled(False)
+        self.load_settings_button.setEnabled(False)
         self.uncertainty_button.setEnabled(False)
         self.close_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -388,6 +478,9 @@ class ParameterEstimation(QDialog):
         self.job = None
         self.run_button.setEnabled(True)
         self.advanced_button.setEnabled(True)
+        self.save_case_button.setEnabled(True)
+        self.save_settings_button.setEnabled(True)
+        self.load_settings_button.setEnabled(True)
         self.uncertainty_button.setEnabled(True)
         self.close_button.setEnabled(True)
         self.stop_button.setEnabled(False)
@@ -404,12 +497,13 @@ class ParameterEstimation(QDialog):
         self.results = results
         weights = {**{f"W{i}": control.value() for i, control in enumerate(self.weights, 1)},
                    "Terms": self.size_term()}
-        self.saved_settings["objweightfactor"] = weights
-        self.case["objweightfactor"] = weights
         if remember:
+            self.saved_settings[PE_WEIGHTS_KEY] = weights
+            self.case[PE_WEIGHTS_KEY] = weights
+        if remember and results:
             for index, fit in results.items():
                 record_step(self.case, "parameter_estimation", pack_fit(fit), model_index=index,
-                            context=signature(self.case, index, include_values=False))
+                            context=pe_signatures(self.case, index)[0])
         rows = [(index + 1, len(fit.parameters), fit.ssr, fit.aic,
                  "Converged" if fit.converged else "Evaluation limit reached",
                  "Ready" if fit.intervals is not None else fit.uncertainty_error)
@@ -451,7 +545,7 @@ class ParameterEstimation(QDialog):
         models = list(self.case["ModelParameter"])
         for number, fit in self.results.items():
             models[number] = {**models[number], "para": fit.parameters.copy()}
-        case = {**self.case, "ModelParameter": models,
+        case = {**self.case, "ModelParameter": models, "pbmsetting": effective_pe_pbm(self.case),
                 "objweightfactor": {**{f"W{i}": control.value()
                                       for i, control in enumerate(self.weights, 1)},
                                     "Terms": self.size_term()}}
@@ -505,9 +599,5 @@ class ParameterEstimation(QDialog):
                          resid=fit.residuals, jacobian=fit.jacobian, nvars=len(fit.parameters),
                          SSR=fit.ssr, AICVector=fit.aic)
             self.fitted_models[index] = model
-        self.saved_settings[PYFIT_SETTINGS_KEY] = dict(self.optimizer)
-        self.saved_settings["objweightfactor"] = {
-            **{f"W{index}": control.value() for index, control in enumerate(self.weights, 1)},
-            "Terms": self.size_term(),
-        }
+        self.saved_settings.update(self.current_pe_settings())
         self.accept()

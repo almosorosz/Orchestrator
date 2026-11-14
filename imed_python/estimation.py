@@ -10,21 +10,12 @@ from scipy.stats import qmc
 
 from .candidate_workers import candidate_map
 from .distribution import cell_volumes, d_values
+from .pe_settings import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY
 from .solver import pbm_backend_label, simulate
 from .size_data import TREND_SIZE_TERM
 from .uncertainty import DISCRETE_PARAMETERS, ParameterIntervals, intervals_from_covariance
 
 
-PYFIT_SETTINGS_KEY = "pyfitsettings"
-PYFIT_DEFAULTS = {
-    "global_iterations": 20,
-    "population_size": 200,
-    "global_tolerance": 0.01,
-    "mutation_min": 0.5,
-    "mutation_max": 1.0,
-    "recombination": 0.7,
-    "local_evaluations": 1500,
-}
 TRIAL_ERRORS = (ValueError, RuntimeError, TimeoutError, FloatingPointError)
 REJECTED_RESIDUAL = 1e4
 

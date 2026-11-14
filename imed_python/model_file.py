@@ -85,11 +85,20 @@ def _atomic_write(destination, payload):
             temporary.unlink(missing_ok=True)
 
 
+CHECKPOINT_FIELDS = (
+    "ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
+    "objweightfactor", "pyfitsettings", "pepbmsettings", "peweights", "PythonWorkflow",
+)
+MATLAB_FIT_SUMMARIES = ("MDIteration", "MDsimulation", "PPsimulation", "summaryTable")
+
+
 def checkpoint_variables(case):
     """Convert current IMED case fields to MATLAB-compatible records."""
-    mutable = ("ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
-               "objweightfactor", "pyfitsettings", "PythonWorkflow")
-    updates = {key: case[key] for key in mutable if key in case}
+    updates = {key: case[key] for key in CHECKPOINT_FIELDS if key in case}
+    for key in MATLAB_FIT_SUMMARIES:
+        value = case.get(key)
+        if isinstance(value, np.ndarray) and not value.size:
+            updates[key] = value
     # Write empty records when an editor explicitly removes the last experiment.
     # Empty solver inputs are normalized on read.
     if isinstance(updates.get("Solubility"), dict) and not updates["Solubility"]:

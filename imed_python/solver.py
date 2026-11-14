@@ -36,9 +36,13 @@ def pbm_backend_label(settings):
 
 
 def read_model(path: str | Path | BinaryIO, *, allow_settings_only=False):
+    if isinstance(path, (str, Path)) and Path(path).suffix.lower() == ".json":
+        from .native_case import read_native_case
+
+        return read_native_case(path)
     keys = ("ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
             "MDIteration", "MDsimulation", "PPsimulation", "summaryTable",
-            "objweightfactor", "pyfitsettings", "PythonWorkflow")
+            "objweightfactor", "pyfitsettings", "pepbmsettings", "peweights", "PythonWorkflow")
     try:
         data = loadmat(path, variable_names=keys, simplify_cells=True)
     except NotImplementedError as error:
