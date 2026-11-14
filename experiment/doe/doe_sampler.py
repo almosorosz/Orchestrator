@@ -49,13 +49,13 @@ class DoESampler:
         return sum([default_weights[0]*weighted_av, default_weights[1]*weighted_min, -default_weights[2]*weighted_std] ) 
 
     def greedy_minimax(self,n_samples, n_dims, n_candidates=1000): 
+        n_candidates = max(n_candidates, n_samples)
         sampler = qmc.Sobol(d=n_dims, scramble=True, seed=42)
         candidates = sampler.random_base2(m=int(np.ceil(np.log2(n_candidates))))[:n_candidates]
         points = [candidates[np.random.randint(n_candidates)]] # Choose an integer from the interval {0 ; n_candidates}
 
         for _ in range(n_samples - 1): 
             dist = cdist(candidates, np.array(points)) # Calculate the distance between the points and the candidates
-            np.fill_diagonal(dist, np.inf)
             min_dist = dist.min(axis=1) # Minimal distance from         print
             next_idx = np.argmax(min_dist) 
             points.append(candidates[next_idx]) 
@@ -184,7 +184,13 @@ class DoESampler:
         if types == 'FACT':
             N = 1
 
-        results = Parallel( n_jobs=-1, verbose=0 )( delayed(self.generate_and_evaluate)(n_samples, n_dims, weights, types,Fraction) for _ in range(N) )
+        if N == 1:
+            results = [self.generate_and_evaluate(n_samples, n_dims, weights, types, Fraction)]
+        else:
+            results = Parallel(n_jobs=min(N, os.cpu_count() or 1), verbose=0)(
+                delayed(self.generate_and_evaluate)(n_samples, n_dims, weights, types, Fraction)
+                for _ in range(N)
+            )
         best = float(-1e5)
         best_points = None
 
@@ -286,11 +292,8 @@ class DoESampler:
 
     def scaler(self,A):
         B = A - np.min(A,axis=0)
-        if sum(np.max(B,axis=0)) != 0:
-            C = B / np.max(B,axis=0)
-        else:
-            C = B
-        return C
+        span = np.max(B, axis=0)
+        return np.divide(B, span, out=np.zeros_like(B, dtype=float), where=span != 0)
 
     def two_factplotter(self,A):
         plt.figure(figsize=(2,2))
@@ -300,47 +303,15 @@ class DoESampler:
         return
 
     def factorial_design(self,n_dims, Fraction=0):
-        factors = ['a','b','c','d','e','f']
-        msg = ''
-        if n_dims > 10:
-            msg = 'please select n_dims to be <10'
-            print(msg)
-            return np.zeros([1,n_dims])
-        if Fraction >= 3:
-            Fraction = 0
-            msg = 'please select Fraction to be 0 <= Fraction <= 2'
-            print(msg)
-            return np.zeros([1,n_dims])
-        if n_dims == 4 and Fraction > 1:
-            Fraction = 0
-            msg = 'please select Fraction to be 0 <= Fraction <= 1 if n_dims==4'
-            print(msg)
-            return np.zeros([1,n_dims])
-        if n_dims == 3 and Fraction>1:
-            Fraction = 0
-            msg = 'please select Fraction to be 0 <= Fraction <= 1 if n_dims==3'
-            print(msg)
-            return np.zeros([1,n_dims])
-
-        else:       
-
-            if n_dims < 3 and Fraction > 0:
-                Fraction = 0
-
-            base = factors[:n_dims-Fraction]
-            generated = [base[0] + base[i+1] for i in range(Fraction)]
-            design_string = ' '.join(base + generated)
-            design_matrix = fracfact(design_string)
-            factor_levels = dict()
-
-            for i in range(n_dims):
-                factor_levels[f"X{i+1}"] = np.array([0, 1])
-
-            plan_ml = pd.DataFrame(design_matrix, columns = factor_levels.keys())
-            for col, values in factor_levels.items():
-                plan_ml[col] = plan_ml[col].map(lambda x: values[0] if x == -1 else values[1])
-
-            return np.vstack(plan_ml.values)
+        if not isinstance(n_dims, int) or not 1 <= n_dims <= 10:
+            raise ValueError("Factorial designs support 1 to 10 dimensions")
+        if Fraction not in (0, 1, 2) or (Fraction and n_dims - Fraction < Fraction + 1):
+            raise ValueError("Unsupported factorial fraction for this dimension count")
+        factors = list('abcdefghij')
+        base = factors[:n_dims-Fraction]
+        generated = [base[0] + base[i+1] for i in range(Fraction)]
+        design_matrix = fracfact(' '.join(base + generated))
+        return np.where(design_matrix == -1, 0, 1)
 
     def descaler(self,DoE_level,minmaxvals):
         return [float(minmaxvals.min_val + (minmaxvals.max_val-minmaxvals.min_val)*DoE_level)] + [minmaxvals.min_val, minmaxvals.max_val]

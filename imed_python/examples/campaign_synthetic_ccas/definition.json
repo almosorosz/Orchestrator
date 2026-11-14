@@ -1,0 +1,206 @@
+{
+  "campaign": {
+    "campaign_id": "496ccf26f172516a904fa8d32ab5a847",
+    "name": "Synthetic CCAS | IMED import demo",
+    "experiments": [
+      {
+        "name": "CCAS A | Moderate feed",
+        "source": "synthetic",
+        "experiment_id": "8fd04051c9155d32b4b61203ef48a341",
+        "profiles": [
+          {
+            "device_id": "T1",
+            "unit": "C",
+            "interpolation": "linear",
+            "points": [
+              {
+                "time_s": 0.0,
+                "target": 35
+              },
+              {
+                "time_s": 10.0,
+                "target": 35
+              },
+              {
+                "time_s": 25.0,
+                "target": 27
+              },
+              {
+                "time_s": 40.0,
+                "target": 20
+              },
+              {
+                "time_s": 55.0,
+                "target": 20
+              },
+              {
+                "time_s": 60.0,
+                "target": 20
+              }
+            ]
+          },
+          {
+            "device_id": "PAS1",
+            "unit": "mL/min",
+            "interpolation": "linear",
+            "points": [
+              {
+                "time_s": 0.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 10.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 25.0,
+                "target": 1.5
+              },
+              {
+                "time_s": 40.0,
+                "target": 1.5
+              },
+              {
+                "time_s": 55.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 60.0,
+                "target": 0.0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "CCAS B | Higher feed",
+        "source": "synthetic",
+        "experiment_id": "7a5fed10e7885ee6b16f136e21c9317c",
+        "profiles": [
+          {
+            "device_id": "T1",
+            "unit": "C",
+            "interpolation": "linear",
+            "points": [
+              {
+                "time_s": 0.0,
+                "target": 35
+              },
+              {
+                "time_s": 10.0,
+                "target": 35
+              },
+              {
+                "time_s": 25.0,
+                "target": 25
+              },
+              {
+                "time_s": 40.0,
+                "target": 16
+              },
+              {
+                "time_s": 55.0,
+                "target": 16
+              },
+              {
+                "time_s": 60.0,
+                "target": 16
+              }
+            ]
+          },
+          {
+            "device_id": "PAS1",
+            "unit": "mL/min",
+            "interpolation": "linear",
+            "points": [
+              {
+                "time_s": 0.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 10.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 25.0,
+                "target": 2.6999999999999997
+              },
+              {
+                "time_s": 40.0,
+                "target": 2.6999999999999997
+              },
+              {
+                "time_s": 55.0,
+                "target": 0.0
+              },
+              {
+                "time_s": 60.0,
+                "target": 0.0
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "monitor_device_ids": [
+      "WAS1",
+      "IR1",
+      "FBRM1",
+      "D101",
+      "D501",
+      "D901"
+    ]
+  },
+  "devices": {
+    "T1": {
+      "name": "Reactor temperature (°C)",
+      "type": "huber",
+      "simulated": true,
+      "plot_index": 0
+    },
+    "PAS1": {
+      "name": "Antisolvent pump (mL/min)",
+      "type": "ismatec",
+      "simulated": true,
+      "plot_index": 1
+    },
+    "WAS1": {
+      "name": "Antisolvent reservoir scale (g)",
+      "type": "mettler",
+      "simulated": true,
+      "plot_index": 2
+    },
+    "IR1": {
+      "name": "Dissolved API (g/g solution)",
+      "type": "opcua",
+      "simulated": true,
+      "plot_index": 3
+    },
+    "FBRM1": {
+      "name": "Synthetic FBRM count",
+      "type": "opcua",
+      "simulated": true,
+      "plot_index": 4
+    },
+    "D101": {
+      "name": "Volume D10 (µm)",
+      "type": "opcua",
+      "simulated": true,
+      "plot_index": 5
+    },
+    "D501": {
+      "name": "Volume D50 (µm)",
+      "type": "opcua",
+      "simulated": true,
+      "plot_index": 6
+    },
+    "D901": {
+      "name": "Volume D90 (µm)",
+      "type": "opcua",
+      "simulated": true,
+      "plot_index": 7
+    }
+  },
+  "settings": {},
+  "synthetic": true
+}

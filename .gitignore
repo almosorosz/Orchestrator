@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+logs/
+data/runs/
+data/control_panel_runs/
+data/runtime/
+.build-deps/
+release/

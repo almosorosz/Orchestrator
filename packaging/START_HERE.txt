@@ -1,0 +1,17 @@
+CrystaLoop 0.4.0 — Windows x64
+
+Extract the entire ZIP into a folder. Double-click Install.cmd for a per-user
+installation with desktop/Start menu shortcuts and an uninstall entry.
+Alternatively, run CrystaLoop/CrystaLoop.exe directly. Python is not required.
+
+Settings and default recordings: %LOCALAPPDATA%/CrystaLoop/data
+Existing source-checkout settings are not imported automatically. Use setup presets.
+Uninstall retains all recordings, presets, and settings.
+
+Campaigns: Data & Plots > Recorded campaigns. Select executed experiments and
+Plot selected experiments while remaining experiments are running or queued.
+Recovery replays saved data only; it never restarts devices or queued experiments.
+
+This build is unsigned. Device operation still requires the vendor drivers,
+network settings, and appropriate instrument configuration on the target PC.
+See BUILD_INFO.json for optional NI-DAQ/PostgreSQL modules included in this build.

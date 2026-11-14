@@ -14,16 +14,17 @@
 import sys            
 import os
 import time
+from copy import deepcopy
 
 from pathlib import Path
 
 from matplotlib.figure                    import Figure
-from matplotlib.backends.backend_qtagg    import FigureCanvasQTAgg as FigureCanvas
 from datetime                             import datetime
 
-from PySide6.QtGui                        import QPainterPath, QRegion, QIcon, QPixmap
+from PySide6.QtGui                        import QPainterPath, QRegion, QPixmap
+from app.branding import configure_application_icon, configure_windows_identity
 from PySide6.QtCore                       import QTimer, Qt, Slot, QRect
-from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabel, QScrollArea,QFormLayout,QSizePolicy,
+from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabel, QScrollArea,QFormLayout,
                                                    QPushButton,QLineEdit,QMessageBox,QProgressBar,QFrame,
                                                    QWidget,QDialog,QVBoxLayout,QHBoxLayout,QStyle,QComboBox,
                                                    QStackedWidget,QGroupBox,QTextEdit,QGridLayout)
@@ -35,8 +36,10 @@ from gui.stylish_widgets                  import MetricCard, LogViewer, StatusBa
 from gui.pages.dashboard_page             import DashboardPage
 from gui.pages.experiment_page            import ExperimentPage
 from gui.pages.plots_page                 import PlotsPage
-from gui.pages.brain_page                 import BrainPage
+from gui.pages.sentinel_page                 import SentinelPage
 from gui.pages.modeling_page              import ModelingPage
+from gui.pages.imed_page                  import IMEDPage
+from imed_python.readable_theme            import readable_controls
 from gui.pages.control_panel_page         import ControlPanelPage
 from gui.pages.settings_page              import SettingsPage
 
@@ -63,15 +66,23 @@ from app.paths                            import (
 
 
 from app.controller                       import Controller, Stage
-from app.data_plotter                     import DataPlotter
+from app.logging_config import attach_gui_logging
+from experiment.doe_campaign import DoeCampaignService
+from experiment.models import Campaign, ExperimentDefinition
+from hardware_devices.capabilities import is_monitor_only
+from gui.doe_assignment_dialog import DoeAssignmentDialog
+from PySide6.QtWidgets import QFileDialog
+import logging
 
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("CrystaLoop — Experiment Control Center")
 
         self.setWindowFlags( Qt.WindowType.Window |  Qt.WindowType.FramelessWindowHint |  Qt.WindowType.WindowSystemMenuHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        configure_application_icon(QApplication.instance(), self)
 
 
         self.SPACING_1 = 8
@@ -135,6 +146,12 @@ class MainWindow(QMainWindow):
         self._initialize_experiment_services()
 
         self._initialize_runtime_state()
+        self._log_bridge, self._log_handler = attach_gui_logging(self, self._display_log_message)
+        from gui.recording_settings_dialog import load_recording_settings
+        from experiment.recording import resume_sql
+        resume_sql(load_recording_settings())
+        self.plots_page.browser.message.connect(self.log_message)
+        self._update_archive_roots(recover=True)
 
         self.log_message("🌟 App opened up successfully.", "INFO")
 
@@ -147,6 +164,23 @@ class MainWindow(QMainWindow):
             self.showMaximized()
             self.btn_maximize.setText("❐")
             self.btn_maximize.setToolTip("Restore")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Apply again after the native taskbar window has been created. This
+        # also covers restoring/re-showing a window launched through Python/IDE.
+        configure_application_icon(QApplication.instance(), self)
+        QTimer.singleShot(0, self._refresh_taskbar_icon)
+
+    def _refresh_taskbar_icon(self):
+        configure_application_icon(QApplication.instance(), self)
+
+    def nativeEvent(self, event_type, message):
+        from app.windows_taskbar import is_taskbar_created
+        if bytes(event_type) == b"windows_generic_MSG" and is_taskbar_created(message):
+            # Explorer creates the taskbar button asynchronously, after show().
+            QTimer.singleShot(0, self._refresh_taskbar_icon)
+        return super().nativeEvent(event_type, message)
 
     def switch_page(self, index):
         """Switch the active page and update navigation button states."""
@@ -278,8 +312,10 @@ class MainWindow(QMainWindow):
     def _initialize_runtime_state(self):
 
         self.CONTROLLER = None
-        self.DATAPROCESSOR = None
         self.create_experiments = None
+        self._doe_assignments = ()
+        self._assigned_doe_campaign = None
+        self._assigned_doe_configs = {}
 
         self.execution = ExperimentCoordinator(parent=self)
 
@@ -288,6 +324,13 @@ class MainWindow(QMainWindow):
         self.execution.stage_changed.connect(self.on_stage_changed)
         self.execution.experiment_progress.connect(self.on_experiment_progress)
         self.execution.error_occurred.connect(self.on_execution_error)
+        self.execution.next_experiment_required.connect(self.on_next_experiment_required)
+
+    @Slot(dict)
+    def on_next_experiment_required(self, result):
+        self.set_buttons_enabled(True)
+        self.dashboard_page.set_monitoring_state(bool(result.get("awaiting_campaign")))
+        self.log_message("MODEL completed. OMNI monitoring is active and ready for the next campaign. End the previous session, then use Start to review and launch the next DoE.", "INFO")
 
     def mouseMoveEvent(self, event):
 
@@ -514,6 +557,20 @@ class MainWindow(QMainWindow):
                     background: #2563eb;
                     border: 1px solid #3b82f6;
                     color: white;
+                }
+
+                #imedWorkflow QPushButton:!hover:!pressed {
+                    background: #0b1728;
+                }
+
+                #imedWorkflow QPushButton:focus:enabled {
+                    border-color: #3b82f6;
+                }
+
+                #imedWorkflow QPushButton:disabled {
+                    background: #0b1728;
+                    color: #8594aa;
+                    border-color: #16263d;
                 }
 
                 QPushButton#plot_button {
@@ -879,7 +936,7 @@ class MainWindow(QMainWindow):
                 QPushButton#theme_toggle:pressed {
                     background-color: #22262c;
                 }
-                """)
+                """ + readable_controls(dark))
             #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: white; background: transparent;")
 
         else:
@@ -1018,6 +1075,20 @@ class MainWindow(QMainWindow):
                     background: #dbeafe;
                 }
 
+                #imedWorkflow QPushButton:!hover:!pressed {
+                    background: #ffffff;
+                }
+
+                #imedWorkflow QPushButton:focus:enabled {
+                    border-color: #3b82f6;
+                }
+
+                #imedWorkflow QPushButton:disabled {
+                    background: #f1f5f9;
+                    color: #64748b;
+                    border-color: #d8dee8;
+                }
+
                 QPushButton:checked {
                     background: #2563eb;
                     border: 1px solid #3b82f6;
@@ -1122,7 +1193,7 @@ class MainWindow(QMainWindow):
                 QScrollBar::sub-page:vertical {
                     background: transparent;
                 }
-            """)
+            """ + readable_controls(dark))
             #self.logo_label.setStyleSheet("font-weight: bold; font-size: 15px; color: black; background: transparent;")
 
 
@@ -1294,6 +1365,7 @@ class MainWindow(QMainWindow):
             )
         self.settings_page.update_plot_theme(self.dark_mode)
         self.dashboard_page.set_theme(self.dark_mode)
+        self.plots_page.browser.dark_mode = self.dark_mode
         self.control_panel_page.control_panel.set_theme(self.dark_mode)
 
         # Update embedded ExperimentDashboard
@@ -1303,6 +1375,10 @@ class MainWindow(QMainWindow):
             dashboard.set_theme(self.dark_mode)
 
     def show_doe_plots(self):
+
+        if self.create_experiments is None:
+            self.log_message("Generate a DoE before viewing its profiles.", "WARNING")
+            return
 
         figures = self.create_experiments.plot_doe_experiments()
 
@@ -1324,16 +1400,21 @@ class MainWindow(QMainWindow):
             )
 
     def define_doe(self):
-
-        if self.CONTROLLER is None:
-            QMessageBox.warning(self, "Error", "Please define environment variables first!")
-            self.log_message("Environment variables not set. Set environment variables first.","ERROR",)
+        if self.control_panel.experiment_running() or (self.execution.timer.isActive() and not self.execution.awaiting_campaign):
+            self.log_message("Finish the active experiment/monitoring run before regenerating the DoE.", "WARNING")
+            return
+        try:
+            initial_exp_count = (2 if self.settings_page.get_sampling_strategy() == "Full Factorial DoE generation"
+                                 else int(self.settings_page.exp_number_input.text()))
+            if initial_exp_count < 1:
+                raise ValueError
+        except ValueError:
+            self.settings_page.set_message(error="Enter a positive integer number of experiments")
             return
 
-
-        self.define_command()
-
         self.settings_page.show_doe_generating()
+        self._assigned_doe_campaign = None
+        self.settings_page.set_assignment_available(False)
 
         QApplication.processEvents()
 
@@ -1351,20 +1432,25 @@ class MainWindow(QMainWindow):
         strategy_code = dict_for_strategy_selection.get(SAMPLING_STRATEGY_SELECTED, "GREEDY")
 
         # Create experiments generator
-        self.create_experiments = (
-            self.experiment_service.generate_initial_doe(
-                self.CONTROLLER.initial_exp_count,
-                strategy_code
+        try:
+            self.create_experiments = self.experiment_service.generate_initial_doe(
+                initial_exp_count, strategy_code
             )
-        )
+        except Exception as error:
+            self.create_experiments = None
+            self.execution.set_experiment_creator(None)
+            self.settings_page.set_doe_available(False)
+            self.settings_page.set_message(error=f"DoE generation failed: {error}")
+            self.log_message(f"DoE generation failed: {error}", "ERROR")
+            return
 
         self.execution.set_experiment_creator(
             self.create_experiments
         )
 
-        self.CONTROLLER.exp_num(
-            len(self.create_experiments.exp_storage.data)
-        )
+        actual_count = len(self.create_experiments.exp_storage.data)
+        if self.CONTROLLER is not None:
+            self.CONTROLLER.exp_num(actual_count)
 
         if self.create_experiments.DoE_val.keys():
 
@@ -1391,9 +1477,9 @@ class MainWindow(QMainWindow):
                 "had been taken."
             )
 
-        self.settings_page.set_doe_info( displayed_text, self.create_experiments.dimensions, f"{self.CONTROLLER.initial_exp_count} {added_comment}")
+        self.settings_page.set_doe_info( displayed_text, self.create_experiments.dimensions, f"{actual_count} {added_comment}")
 
-        self.log_message(f"{self.CONTROLLER.initial_exp_count} samples in the initial DoE.", "INFO")
+        self.log_message(f"{actual_count} samples in the initial DoE.", "INFO")
         self.log_message( f"{self.create_experiments.dimensions} changed dimensions in the initial DoE.","INFO",)
         self.log_message( f"Sampling strategy selected: {self.create_experiments.TYPE}.", "INFO",)
 
@@ -1405,9 +1491,223 @@ class MainWindow(QMainWindow):
         self.settings_page.update_plot_theme(self.dark_mode)
 
         self.settings_page.set_generate_success()
+        self.settings_page.set_doe_available(True)
+
+    def assign_doe_devices(self):
+        self._choose_doe_campaign(False)
+
+    def _choose_doe_campaign(self, for_loop=False):
+        if for_loop:
+            return self._start_assigned_doe(for_loop=True)
+        if self.create_experiments is None:
+            return
+        panel = self.control_panel
+        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
+                or (self.execution.timer.isActive() and not self.execution.awaiting_campaign)):
+            self.log_message("End the active session/monitoring run before assigning a DoE campaign.", "WARNING")
+            return
+        configs, _ = panel.collect_current_configuration()
+        dialog = DoeAssignmentDialog(self.create_experiments, configs, panel.hardware, self._doe_assignments, self,
+                                     calibration_editor=panel.edit_pump_calibrations)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted and dialog.campaign is not None:
+            configs, _ = panel.collect_current_configuration()
+            self._doe_assignments = dialog.assignments()
+            for experiment in dialog.campaign.experiments:
+                if experiment.imed_simulation:
+                    self.create_experiments.parameter_snapshots[experiment.name]["imed_simulation"]["monitors"] = (
+                        dict(experiment.imed_simulation["monitors"]))
+            self._apply_doe_campaign(dialog.campaign, configs)
+            self.log_message("DoE assignments applied. Use Start DoE independent from loop, or Dashboard Start for the EXP–MODEL loop.", "SUCCESS")
+
+    def _apply_doe_campaign(self, campaign, configs):
+        ids = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
+        ids.update(campaign.monitor_device_ids)
+        self._assigned_doe_configs = deepcopy({key: configs[key] for key in ids})
+        self._assigned_doe_campaign = campaign
+        self.settings_page.set_assignment_available(True)
+
+    def start_independent_doe(self):
+        return self._start_assigned_doe(for_loop=False)
+
+    def _start_assigned_doe(self, for_loop=False):
+        campaign = self._assigned_doe_campaign
+        if campaign is None:
+            self.log_message("Generate a DoE and apply device assignments before starting.", "WARNING")
+            return
+        panel = self.control_panel
+        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
+                or (self.execution.timer.isActive() and not (for_loop and self.execution.awaiting_campaign))):
+            self.log_message("End the active experiment/monitoring session before starting the DoE.", "WARNING")
+            return
+        configs, _ = panel.collect_current_configuration()
+        fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity")
+        for key, previous in self._assigned_doe_configs.items():
+            current = configs.get(key)
+            if current is None or any(current.get(field) != previous.get(field) for field in fields):
+                self._assigned_doe_campaign = None
+                self.settings_page.set_assignment_available(False)
+                self.log_message("Device configuration changed. Apply DoE assignments again before starting.", "WARNING")
+                return
+        if for_loop:
+            if any(experiment.imed_simulation for experiment in campaign.experiments):
+                self.log_message("Run the IMED validation preset with Start DoE independent from loop.", "WARNING")
+                return
+            return self._start_loop_campaign(campaign)
+        return panel.start_campaign(campaign)
+
+    def _start_loop_campaign(self, campaign):
+        self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
+        dashboard = self.control_panel.start_campaign(campaign, {"enabled": True, "output_folder": self.CONTROLLER.omni_folder})
+        if dashboard is None:
+            return
+        self.execution.begin_campaign(campaign)
+        self._loop_dashboard = dashboard
+        dashboard.recording_started.connect(self.execution.set_campaign_folder)
+        dashboard.campaign_finished.connect(self.on_loop_campaign_finished)
+        self.set_buttons_enabled(False)
+        self.dashboard_page.set_experiment_count(0)
+        self.dashboard_page.set_monitoring_state(True)
+        self.log_message(f"LOOP started with {campaign.name}. Completed recordings will advance it to MODEL.", "INFO")
+
+    @Slot(dict)
+    def on_loop_campaign_finished(self, result):
+        if (self.execution.campaign_mode and result.get("campaign_id") == self.execution.campaign_id
+                and result["status"] == "stopped"):
+            self.stop_command()
+            return
+        if (self.execution.campaign_mode and result.get("campaign_id") == self.execution.campaign_id
+                and not self.CONTROLLER.process_stop and result["status"] != "completed"):
+            self.execution.handle_monitoring_error(RuntimeError(f"Campaign {result['status']}: {result.get('error', '')}"))
+
+    def export_doe_csv(self):
+        if self.create_experiments is None:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export generated DoE CSV to a new subfolder")
+        if not folder:
+            return
+        try:
+            output = DoeCampaignService(self.create_experiments).export_csv(folder)
+            self.log_message(f"Generated DoE exported to {output}", "SUCCESS")
+        except Exception as error:
+            self.log_message(f"DoE CSV export failed: {error}", "ERROR")
+
+    def configure_recording(self):
+        from gui.recording_settings_dialog import RecordingSettingsDialog
+        dialog = RecordingSettingsDialog(self)
+        dialog.exec()
+        from gui.recording_settings_dialog import load_recording_settings
+        from experiment.recording import resume_sql
+        resume_sql(load_recording_settings())
+        self._update_archive_roots()
+
+    def _update_archive_roots(self, recover=False):
+        from gui.recording_settings_dialog import load_recording_settings
+        settings = load_recording_settings()
+        from app.logging_config import set_output_log_root
+        set_output_log_root(settings["output_folder"])
+        self.plots_page.browser.set_roots([settings["output_folder"], self.control_panel.control_output_path.text(),
+                                           self.settings_page.exp_path_input.text().strip()], recover=recover)
+
+    def save_setup_preset(self):
+        from app.presets import write_preset
+        from experiment.doe_snapshot import snapshot_doe
+        from gui.recording_settings_dialog import load_recording_settings
+        filename, _ = QFileDialog.getSaveFileName(self, "Save setup preset", "setup.json", "JSON (*.json)")
+        if not filename:
+            return
+        try:
+            devices, profiles = self.control_panel.collect_current_configuration()
+            panel = {"devices": devices, "profiles": profiles,
+                     "experiments": [frame.to_dict(orient="split") for frame in self.control_panel.experiments],
+                     "recording_folder": self.control_panel.control_output_path.text(),
+                     "system_topology": self.control_panel.current_system_topology(),
+                     "simulation_speed": self.control_panel.simulation_speed.value()}
+            environment = {"experiment_path": self.settings_page.exp_path_input.text(),
+                           "model_path": self.settings_page.MODEL_path_input.text(),
+                           "experiment_count": self.settings_page.exp_number_input.text(),
+                           "pbm_size_term": self.settings_page.pbm_size_samples.currentData(),
+                           "sampling_strategy": self.settings_page.get_sampling_strategy()}
+            write_preset(filename, panel, self.experiment_service.exp_par, self._doe_assignments,
+                         environment, load_recording_settings(),
+                         generated_doe=snapshot_doe(self.create_experiments),
+                         monitor_device_ids=(self._assigned_doe_campaign.monitor_device_ids
+                                             if self._assigned_doe_campaign is not None else ()),
+                         modeling=self.imed_page.panel.setup_settings())
+            self.log_message(f"Setup preset saved: {filename}", "SUCCESS")
+        except Exception as error:
+            QMessageBox.warning(self, "Preset save failed", str(error))
+
+    def load_setup_preset(self):
+        if (self.control_panel.hardware_manager.is_busy or self.control_panel.experiment_window_attached()
+                or self.execution.timer.isActive()):
+            self.log_message("End the experiment session and stop monitoring before loading a setup preset.", "WARNING")
+            return
+        filename, _ = QFileDialog.getOpenFileName(self, "Load setup preset", "", "JSON (*.json)")
+        if not filename:
+            return
+        try:
+            from app.presets import read_preset
+            from gui.recording_settings_dialog import save_recording_settings
+            data, parameters, assignments = read_preset(filename)
+            from imed_python.setup_snapshot import read_imed_settings
+
+            modeling = read_imed_settings(data.get("modeling"))
+            panel = data["control_panel"]
+            if not self.control_panel.apply_loaded_configuration(panel["devices"], panel.get("profiles", {}),
+                    panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology")):
+                return
+            self.execution.reset()
+            self.CONTROLLER = self.create_experiments = None
+            self._assigned_doe_campaign = None
+            self._assigned_doe_configs = {}
+            self._doe_assignments = assignments
+            self.experiment_service.exp_par = parameters
+            self.experiment_service._build_doe_dependencies()
+            self.control_panel.simulation_speed.setValue(panel.get("simulation_speed", 1))
+            environment = data.get("environment", {})
+            self.settings_page.exp_path_input.setText(environment.get("experiment_path", ""))
+            self.settings_page.MODEL_path_input.setText(environment.get("model_path", ""))
+            self.settings_page.exp_number_input.setText(environment.get("experiment_count", ""))
+            self.settings_page.pbm_size_samples.setCurrentIndex(
+                self.settings_page.pbm_size_samples.findData(environment.get(
+                    "pbm_size_term", self.settings_page.pbm_size_samples.itemData(0))))
+            self.settings_page.doe_type_combo.setCurrentText(environment.get("sampling_strategy", "Random sampling"))
+            self.settings_page.set_doe_available(False)
+            self.settings_page.set_doe_info("", "", "")
+            self.settings_page.reset_plots(self.dark_mode)
+            from experiment.doe_snapshot import restore_doe
+            self.create_experiments = restore_doe(self.experiment_service, data.get("generated_doe"))
+            self.execution.set_experiment_creator(self.create_experiments)
+            if self.create_experiments is not None:
+                creator = self.create_experiments
+                self.settings_page.set_doe_info(", ".join(creator.DoE_val), creator.dimensions, str(len(creator.exp_storage.data)))
+                self.settings_page.set_doe_available(True)
+                self.settings_page.set_generate_success()
+                self.settings_page.render_doe_plots(creator, self.dark_mode)
+            self.dashboard_page.reset_status()
+            if environment.get("experiment_path", "").strip() and environment.get("model_path", "").strip():
+                count = len(self.create_experiments.exp_storage.data) if self.create_experiments is not None else None
+                self.define_command(default_count=count)
+            save_recording_settings(data["recording"])
+            from experiment.recording import resume_sql
+            resume_sql(data["recording"])
+            if modeling is not None:
+                self.imed_page.panel.restore_setup_settings(modeling)
+            self._update_archive_roots()
+            message = "Setup preset loaded. Connect the required devices before starting."
+            if self.create_experiments is not None:
+                message += " Open Assign devices in Settings and apply the current device assignments to run the saved DoE."
+            self.log_message(message, "SUCCESS")
+        except Exception as error:
+            QMessageBox.warning(self, "Preset load failed", str(error))
 
 
     def log_message(self, message, level="INFO"):
+        numeric_level = getattr(logging, level.upper(), logging.INFO)
+        logging.getLogger("orchestrator.app").log(numeric_level, message, extra={"gui_level": level})
+
+    def _display_log_message(self, message, level="INFO"):
         if hasattr(self, "dashboard_page"):
             self.dashboard_page.add_log(message, level)
 
@@ -1473,7 +1773,8 @@ class MainWindow(QMainWindow):
             self.dashboard_page.set_model_status("Running")
 
         else:
-            # Stop/Reset handles the individual status labels.
+            self.dashboard_page.set_omni_status("Inactive")
+            self.dashboard_page.set_model_status("Inactive")
             self.dashboard_page.set_current_stage("None")
             return
 
@@ -1481,13 +1782,16 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_total_runs( self.execution.omni_run_count + self.execution.model_run_count)
 
 
-    def define_command(self):
+    def define_command(self, *, default_count=None):
 
         self.settings_page.set_message()
 
         folder_loc, folder_MODEL_loc, no_exp = (
             self.settings_page.get_environment_inputs()
         )
+        if not no_exp and default_count is not None:
+            no_exp = str(default_count)
+            self.settings_page.exp_number_input.setText(no_exp)
 
         if not folder_loc or not folder_MODEL_loc or not no_exp:
             self.settings_page.set_message(
@@ -1527,6 +1831,7 @@ class MainWindow(QMainWindow):
             no_exp,
             self.omni_filename,
             self.MODEL_filename,
+            pbm_size_term=self.settings_page.pbm_size_samples.currentData(),
         )
 
         # Give the coordinator the SAME controller instance.
@@ -1538,81 +1843,69 @@ class MainWindow(QMainWindow):
             "🌎 Environment variables set.",
             "SUCCESS",
         )
+        return True
+
+    def _choose_loop_source(self):
+        if not self.control_panel.experiments:
+            return "doe"
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Start LOOP")
+        dialog.setText("Choose the experiments to run before MODEL.")
+        manual = dialog.addButton(
+            f"Use Control Panel experiments ({len(self.control_panel.experiments)})",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        doe = None
+        if self._assigned_doe_campaign is not None:
+            doe = dialog.addButton("Use assigned DoE", QMessageBox.ButtonRole.ActionRole)
+        elif self.create_experiments is not None:
+            dialog.setInformativeText("To run the saved DoE, apply device assignments in Settings first.")
+        cancel = dialog.addButton(QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        selected = dialog.clickedButton()
+        if selected is manual:
+            return "manual"
+        if doe is not None and selected is doe:
+            return "doe"
+        return None
 
     def start_command(self):
-
+        panel = self.control_panel
+        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
+                or (self.execution.timer.isActive() and not self.execution.awaiting_campaign)):
+            self.log_message("End the active experiment or monitoring session before starting another LOOP batch.", "WARNING")
+            return
+        source = self._choose_loop_source()
+        if source is None:
+            return
+        if self.CONTROLLER is None and source == "manual":
+            self.define_command(default_count=len(panel.experiments))
         if self.CONTROLLER is None:
-            QMessageBox.warning(self,"Error", "Please define environment variables first!")
-            self.log_message("Controller not initialized. Define environment variables first.","ERROR")
+            self.log_message('Define the Experiment and MODEL folders first.', 'WARNING')
             return
-
-        # Check for existing OMNI experiment directories
-        if any(
-            entry.is_dir()
-            for entry in os.scandir(self.CONTROLLER.omni_folder)
-        ):
-            QMessageBox.warning(
-                self,
-                "Error",
-                "OMNI folder already contains experiment directories"
-            )
-            self.log_message(
-                "OMNI root folder is not empty.",
-                "ERROR"
-            )
+        if not all(os.path.isdir(path) for path in (self.CONTROLLER.omni_folder, self.CONTROLLER.model_folder)):
+            self.log_message('Experiment and MODEL folders must exist.', 'ERROR')
             return
-
-        # Check for existing MODEL directories
-        if any(
-            entry.is_dir()
-            for entry in os.scandir(self.CONTROLLER.model_folder)
-        ):
-            QMessageBox.warning(
-                self,
-                "Error",
-                "MODEL folder already contains experiment directories"
+        if source == "doe":
+            return self._choose_doe_campaign(True)
+        configs, _ = panel.collect_current_configuration()
+        try:
+            experiments = tuple(
+                ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
+                for number, frame in enumerate(panel.experiments, 1)
             )
-            self.log_message(
-                "MODEL root folder is not empty.",
-                "ERROR"
-            )
+        except (ValueError, TypeError) as error:
+            self.log_message(f"Cannot start Control Panel experiments: {error}", "ERROR")
             return
-
-        if self.create_experiments is None:
-            QMessageBox.warning(  self,   "Error",  "Generate the initial DoE first!" )
-            self.log_message( "Initial DoE not defined.",  "ERROR" )
-            return
-
-        if self.CONTROLLER.process_stop:
-            QMessageBox.warning(
-                self,
-                "Reset Required",
-                "The previous execution was stopped. "
-                "Please Reset and configure a new experiment "
-                "before starting again."
-            )
-            return
-
-        self.set_buttons_enabled(False)
-
-        self.DATAPROCESSOR = DataPlotter( self.omni_filename,  self.MODEL_filename )
-
-        self.execution.set_data_processor(self.DATAPROCESSOR)
-
-        self.execution.start_execution(
-            omni_root=self.CONTROLLER.omni_folder,
-            initial_exp_count=self.CONTROLLER.initial_exp_count
-        )
-
-        self.dashboard_page.set_monitoring_state( True )
-
-        self.log_message( "Experiment started", "INFO", )
-
-
-
-        self.switch_page(0)
+        monitors = tuple(key for key, config in configs.items()
+                         if is_monitor_only(config) and panel.device_widgets[key].is_connected())
+        return self._start_loop_campaign(Campaign("Control Panel experiments", experiments, monitor_device_ids=monitors))
 
     def stop_command(self):
+        dashboard = getattr(self, '_loop_dashboard', None)
+        if dashboard is not None and dashboard.is_execution_active():
+            dashboard.stop_orchestrator()
 
         if self.CONTROLLER is None:
             return
@@ -1636,6 +1929,9 @@ class MainWindow(QMainWindow):
 
 
     def reset_command(self):
+        if self.control_panel.hardware_manager.is_busy:
+            self.log_message("Wait for experiment cleanup before resetting the loop.", "WARNING")
+            return
 
         # ----------------------------------------------------------
         # BACKEND TEARDOWN
@@ -1651,7 +1947,8 @@ class MainWindow(QMainWindow):
 
         self.create_experiments = None
         self.CONTROLLER = None
-        self.DATAPROCESSOR = None
+        self._assigned_doe_campaign = None
+        self._assigned_doe_configs = {}
 
 
         # ----------------------------------------------------------
@@ -1659,18 +1956,13 @@ class MainWindow(QMainWindow):
         # ----------------------------------------------------------
 
         self.dashboard_page.reset_status()
+        self.set_buttons_enabled(True)
 
         self.settings_page.reset_ui()
 
         self.settings_page.reset_plots(self.dark_mode)
 
-        while self.plots_page.plot_container_layout.count():
-            item = (self.plots_page.plot_container_layout.takeAt(0))
-
-            widget = item.widget()
-
-            if widget:
-                widget.deleteLater()
+        self.plots_page.browser.clear_plots()
 
         self.log_message("Reset settings","SUCCESS",)
 
@@ -1685,7 +1977,7 @@ class MainWindow(QMainWindow):
 
         self.experiment_page    = ExperimentPage( parent=self)    
         self.plots_page         = PlotsPage(parent=self)
-        self.brain_page         = BrainPage(parent=self)    
+        self.sentinel_page         = SentinelPage(parent=self)
         self.modeling_page      = ModelingPage(parent=self)    
         self.control_panel_page = ControlPanelPage(parent=self)
         self.control_panel_page.control_panel.set_theme(
@@ -1697,6 +1989,7 @@ class MainWindow(QMainWindow):
         self.hardware = (self.control_panel_page.hardware)
 
         self.settings_page = SettingsPage(parent=self)
+        self.imed_page = IMEDPage(parent=self)
 
         # ----------------------------------------------------------
         # ALLOW PAGES TO SHRINK
@@ -1706,10 +1999,11 @@ class MainWindow(QMainWindow):
             self.dashboard_page,
             self.experiment_page,
             self.plots_page,
-            self.brain_page,
+            self.sentinel_page,
             self.modeling_page,
             self.control_panel_page,
             self.settings_page,
+            self.imed_page,
         ]
 
         for page in pages:
@@ -1734,8 +2028,7 @@ class MainWindow(QMainWindow):
         """
         End the embedded ExperimentDashboard session safely.
 
-        The dashboard remains attached if its experiment
-        worker cannot be stopped.
+        Active runs must be stopped explicitly before ending the session.
         """
 
         page = self.experiment_page
@@ -1744,12 +2037,16 @@ class MainWindow(QMainWindow):
         if dashboard is None:
             return
 
+        if dashboard.is_execution_active():
+            self.log_message("Stop the experiment and wait for cleanup before ending the session.", "WARNING")
+            return
+
         panel = self.control_panel_page.control_panel
 
         print("[MAIN WINDOW] Ending experiment session...")
 
         # --------------------------------------------------
-        # 1. Stop worker and close dashboard
+        # 1. Close the idle dashboard
         # --------------------------------------------------
 
         try:
@@ -1801,6 +2098,7 @@ class MainWindow(QMainWindow):
 
         if panel.experiment_window is dashboard:
             panel.experiment_window = None
+        panel.refresh_connectivity_fields()
 
         print(
             "[MAIN WINDOW] Experiment session ended. "
@@ -1827,6 +2125,14 @@ class MainWindow(QMainWindow):
         self.settings_page.profile_requested.connect(self.open_profile_dialog)
 
         self.settings_page.plot_doe_requested.connect(self.show_doe_plots)
+        self.settings_page.assign_doe_requested.connect(self.assign_doe_devices)
+        self.settings_page.start_independent_doe_requested.connect(self.start_independent_doe)
+        self.settings_page.export_doe_requested.connect(self.export_doe_csv)
+        self.settings_page.recording_requested.connect(self.configure_recording)
+        self.settings_page.save_preset_requested.connect(self.save_setup_preset)
+        self.settings_page.load_preset_requested.connect(self.load_setup_preset)
+        self.control_panel.control_output_path.editingFinished.connect(self._update_archive_roots)
+        self.settings_page.exp_path_input.editingFinished.connect(self._update_archive_roots)
 
         # Experiment
         self.experiment_page.end_session_button.clicked.connect(self.end_experiment_session)
@@ -1868,19 +2174,21 @@ class MainWindow(QMainWindow):
         self.btn_dashboard = QPushButton("🏠  Dashboard")
         self.btn_experiment = QPushButton("🧪  Experiment")
         self.btn_plots = QPushButton("📊  Data & Plots")
-        self.btn_brain = QPushButton("🧠  Brain")
+        self.btn_sentinel = QPushButton("🛡  Sentinel")
         self.btn_modeling = QPushButton("📐  Modeling")
         self.btn_control_panel = QPushButton("🎛  Control Panel")
         self.btn_settings = QPushButton("⚙️  Settings")
+        self.btn_imed = QPushButton("🔬  IMED")
 
         self.nav_buttons = [
             self.btn_dashboard,
             self.btn_experiment,
             self.btn_plots,
-            self.btn_brain,
+            self.btn_sentinel,
             self.btn_modeling,
             self.btn_control_panel,
             self.btn_settings,
+            self.btn_imed,
         ]
 
         for btn in self.nav_buttons:
@@ -2008,60 +2316,19 @@ class MainWindow(QMainWindow):
         self.switch_page(0)
 
     def plot_expts(self):
-        if self.DATAPROCESSOR is None:
-            QMessageBox.warning(self, "Error", "No data available yet!")
-            return
-
-        try:
-            self.DATAPROCESSOR.read_data_from = self.CONTROLLER.current_omni_folder
-        except Exception as e:
-            self.log_message(f"Possibly deleted fodler, error message: {e}", "ERROR")
-
-        # --------------------------------------------------------------------------------------------------------------#
-        # FOR TESTING #
-        #self.DATAPROCESSOR = DataPlotter(self.omni_filename, self.MODEL_filename)
-        #self.DATAPROCESSOR.read_data_from = r"C:\Users\abotondo\OneDrive - purdue.edu\ECNDATA\Desktop\ORCHESTRATOR_test"
-        # --------------------------------------------------------------------------------------------------------------#
-
-        self.DATAPROCESSOR.data_reader()
-
-        fig = self.DATAPROCESSOR.plot_generator()
-
-        if fig:
-            self.log_message("Data plotted successfully.", "SUCCESS")
-
-        # Remove existing plot
-        while self.plots_page.plot_container_layout.count():
-            item = self.plots_page.plot_container_layout.takeAt(0)
-            widget = item.widget()
-
-            if widget:
-                widget.setParent(None)
-                widget.deleteLater()
-
-        # Create Matplotlib canvas
-        self.canvas_embedded = FigureCanvas(fig)
-
-        # Allow canvas to expand, but set a sensible minimum height based on row count
-        num_rows = len(self.DATAPROCESSOR.EVAL)
-        min_height = num_rows * 220  # 220px per experiment row
-
-        self.canvas_embedded.setMinimumSize(800, min_height)
-        self.canvas_embedded.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed) # Fixed height allows QScrollArea to handle overflow)
-
-
-        # Transparent Qt background
-        self.canvas_embedded.setStyleSheet("background: transparent;")
-
-        # Add to layout
-        self.plots_page.plot_container_layout.addWidget(self.canvas_embedded,1)
-
-        # Draw after adding to layout
-        self.canvas_embedded.draw_idle()
-
+        self._update_archive_roots()
         self.switch_page(2)
 
     def closeEvent(self, event):
+        if not self.imed_page.panel.close_simulation():
+            event.ignore()
+            return
+
+        from experiment.recording import pending_csv_recorders
+        if pending_csv_recorders():
+            QMessageBox.warning(self, "CSV saving is waiting", "Close the experiment CSV files in Excel before exiting. Pending data will be saved automatically once the files are closed.")
+            event.ignore()
+            return
 
         # --------------------------------------------------
         # 0. Block MainWindow close while session is attached
@@ -2098,14 +2365,28 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
+        if not self.plots_page.browser.shutdown():
+            QMessageBox.warning(self, "Plots are busy", "Waiting for campaign file access to finish. Retry closing shortly.")
+            event.ignore()
+            return
+
         # --------------------------------------------------
         # 2. Existing MainWindow cleanup
         # --------------------------------------------------
+
+        if hasattr(self, "sentinel_page"):
+            self.sentinel_page.shutdown()
 
         self.reset_command()
 
         if hasattr(self, "dashboard_page"):
             self.dashboard_page.system_monitor.closeEvent(event)
+
+        if hasattr(self, "_log_handler"):
+            logging.getLogger("orchestrator").removeHandler(self._log_handler)
+            self._log_handler.close()
+            from app.logging_config import detach_output_logging_if_idle
+            detach_output_logging_if_idle()
 
         super().closeEvent(event)
 
@@ -2115,36 +2396,19 @@ class MainWindow(QMainWindow):
 #                       MAIN                                 #
 # ========================================================== #
 # 1. Set App ID BEFORE creating QApplication instance
-if sys.platform == "win32":
-    import ctypes
-    my_app_id = "crystalloop.controlcenter.1.0"
-    try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(my_app_id)
-    except Exception as e:
-        print(f"Failed to set AppUserModelID: {e}")
-
-# Resolve absolute path to avoid relative path resolution bugs
-try:
-    BASE_DIR = Path(__file__).resolve().parent
-except NameError:
-    BASE_DIR = Path.cwd()
+configure_windows_identity()
 
 if __name__ == "__main__":
+    if "--smoke-test" in sys.argv:
+        from utilities.package_smoke import run
+        raise SystemExit(run(sys.argv[sys.argv.index("--smoke-test") + 1]))
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
 
-    # 2. Check path & set Application Icon globally
-    if LOGO_PATH.exists():
-        app_icon = QIcon(str(LOGO_PATH))
-        app.setWindowIcon(app_icon)
+    configure_application_icon(app)
 
     window = MainWindow()
-
-    # 3. Explicitly apply icon directly to MainWindow instance
-    if LOGO_PATH.exists():
-        window.setWindowIcon(QIcon(str(LOGO_PATH)))
-
 
     window.show()
     app.exec()
