@@ -383,28 +383,10 @@ class HuberController(BaseDevice):
         self.ser = None
         self._lock = threading.RLock()
 
-    def _parse_temperature(self, response):
-        """Convert Huber temperature response to °C."""
-        if response is None:
-            return None
-    
-        text = str(response).strip()
-    
-        try:
-            return float(text)
-        except ValueError:
-            pass
-    
-        match = re.search(r"([-+]?\d+)\s*$", text)
-    
-        if not match:
-            return None
-    
-        try:
-            return int(match.group(1)) / 100.0
-        except Exception as e:
-            print(f"[{self.name}] Could not parse temperature response '{response}': {e}")
-            return None
+    def _parse_temperature(self, response: str, register: str) -> float | None:
+        """Decode a PP temperature reply for the requested register."""
+        match = re.fullmatch(rf"(?:{register}\s*)?([+-][0-9]{{5}})", response, re.IGNORECASE)
+        return int(match.group(1)) / 100 if match else None
 
 
     def connect(self) -> bool:
@@ -427,7 +409,7 @@ class HuberController(BaseDevice):
                 response = self._exchange("TI?")
                 if not response:
                     raise RuntimeError("no complete reply to the TI? temperature query")
-                if not re.fullmatch(r"(?:TI\s*)?[+-][0-9]{5}", response):
+                if self._parse_temperature(response, "TI") is None:
                     raise RuntimeError(f"unexpected reply to TI? ({response!r})")
             except Exception as exc:
                 self._close_serial()
@@ -442,6 +424,10 @@ class HuberController(BaseDevice):
         if self.ser.write(request) != len(request):
             raise serial.SerialTimeoutException("incomplete HUBER command write")
         response = self.ser.readline()
+        # After a setpoint readback, a delayed SP echo can leave an extra SP
+        # frame queued. Skip it when waiting for a different PP register.
+        if command[:2] != "SP" and re.fullmatch(rb"SP\s*[+-][0-9]{5}\r?\n", response):
+            response = self.ser.readline()
         if not response.endswith(b"\n"):
             return ""
         return response.decode("ascii").strip()
@@ -471,26 +457,55 @@ class HuberController(BaseDevice):
         return re.fullmatch(r"CA\s*[+]?0+", response) is not None
 
 
-    def set_target(self,temp_celsius: float,**kwargs) -> bool:
-        """
-        Sets Huber temperature setpoint.
-
-        Uses the original Huber SP@ protocol from your driver.
-        """
-
+    def set_target(self, temp_celsius: float, **kwargs) -> bool:
+        """Set the temperature and require a matching PP reply or readback."""
         try:
-
             value = int(round(temp_celsius * 100))
-            command = f"SP@ {value:+06d}"
-            response = self.send_command(command)
-            return bool(response)
-
-        except (TypeError, ValueError) as e:
-
-            print(f"[{self.name}] Invalid temperature {temp_celsius}: {e}")
-
+        except (TypeError, ValueError, OverflowError):
             return False
 
+        with self._lock:
+            if not self.is_connected or self.ser is None or not self.ser.is_open:
+                raise RuntimeError(f"HUBER serial connection on {self.port} is closed.")
+
+            command = f"SP@ {value:+06d}"
+            response = self.send_command(command)
+            if not response and self.is_connected:
+                # The write may have succeeded even if the echo was lost.
+                response = self.send_command("SP?")
+            actual = self._setpoint_reply(response) if response else self._recover_setpoint(command, value)
+            if actual != value:
+                raise RuntimeError(
+                    f"HUBER reports {actual / 100:g} °C on {self.port}, "
+                    f"expected {value / 100:g} °C."
+                )
+            return True
+
+    def _setpoint_reply(self, response: str) -> int:
+        match = re.fullmatch(r"SP\s*([+-][0-9]{5})", response, re.IGNORECASE)
+        if match is None:
+            detail = f"unexpected reply {response!r}" if response else "no setpoint reply"
+            raise RuntimeError(f"HUBER setpoint on {self.port} ({detail}).")
+        return int(match.group(1))
+
+    def _recover_setpoint(self, command: str, value: int) -> int:
+        """Reopen once and read back before reissuing an unconfirmed write."""
+        try:
+            self._close_serial()
+            self.connect()
+            actual = self._setpoint_reply(self.send_command("SP?"))
+            if actual == value:
+                return actual
+
+            response = self.send_command(command)
+            if not response and self.is_connected:
+                response = self.send_command("SP?")
+            return self._setpoint_reply(response)
+        except (RuntimeError, OSError) as exc:
+            self._close_serial()
+            raise RuntimeError(
+                f"HUBER could not confirm {value / 100:g} °C after reopening {self.port} ({exc})."
+            ) from exc
 
     def _set_control_mode(self, mode: str, value: int) -> str:
         # PP mode selectors use a single digit.
@@ -527,9 +542,9 @@ class HuberController(BaseDevice):
             return {
                 "name": self.name,
                 "connected": self.is_connected,
-                "setpoint": self._parse_temperature(setpoint_raw),
-                "temp_internal": self._parse_temperature(internal_raw),
-                "temp_external": self._parse_temperature(external_raw)
+                "setpoint": self._parse_temperature(setpoint_raw, "SP"),
+                "temp_internal": self._parse_temperature(internal_raw, "TI"),
+                "temp_external": self._parse_temperature(external_raw, "TE")
             }
     
         except Exception as e:
