@@ -1,5 +1,5 @@
 """Process workers for the independent trials in a differential evolution search."""
-from concurrent.futures import ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from functools import partial
 from multiprocessing import get_context
@@ -21,7 +21,7 @@ def _run_trial(candidate):
 
 
 @contextmanager
-def candidate_map(workers, evaluate, collect, cancelled):
+def candidate_map(workers, evaluate, collect, cancelled, *, completed=None):
     """Provide SciPy's map interface and keep progress reporting in the parent."""
     context = get_context("spawn")
     stop = context.Event()
@@ -36,6 +36,14 @@ def candidate_map(workers, evaluate, collect, cancelled):
         # The SciPy objective closes over parent state. Workers use their own evaluator.
         check_stop()
         pending = [(candidate, executor.submit(_run_trial, candidate)) for candidate in candidates]
+        if completed is not None:
+            # Notify on completion and collect in input order so draws and outputs stay aligned.
+            unfinished = {trial for _, trial in pending}
+            while unfinished:
+                check_stop()
+                finished, unfinished = wait(unfinished, timeout=0.1, return_when=FIRST_COMPLETED)
+                for trial in finished:
+                    completed(trial.result())
         scores = []
         for candidate, trial in pending:
             while not trial.done():

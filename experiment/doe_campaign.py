@@ -47,6 +47,14 @@ class ProfileAssignment:
     density_g_ml: float | None = None
 
 
+def sampled_doe_factors(creator):
+    factors = set(getattr(creator, "DoE_val", {}))
+    snapshots = getattr(creator, "parameter_snapshots", {}).values()
+    if len({snapshot.get("ARR") for snapshot in snapshots} - {None}) > 1:
+        factors.add("ARR")
+    return tuple(sorted(factors))
+
+
 class DoeCampaignService:
     def __init__(self, creator):
         self.creator = creator
@@ -153,7 +161,9 @@ class DoeCampaignService:
             # The shared validator applies the currently configured device limits.
             ExperimentDefinition.from_frame(definition.to_frame(), configs)
             experiments.append(definition)
-        return Campaign("Generated DoE", tuple(experiments), monitor_device_ids=tuple(monitor_device_ids))
+        factors = sampled_doe_factors(self.creator)
+        return Campaign("Generated DoE", tuple(experiments), monitor_device_ids=tuple(monitor_device_ids),
+                        doe_factors=(factors or None) if self.imed_simulations else factors)
 
     def assignment_details(self, assignments, configs):
         result = []

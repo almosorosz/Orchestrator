@@ -6,6 +6,7 @@ import json
 import sys
 
 from copy import deepcopy
+from pathlib import Path
 from app.paths import DATA_DIR
 from hardware_devices.capabilities import is_monitor_only
 from hardware_devices.simulated import SimulatedDevice
@@ -1373,11 +1374,11 @@ class DeviceWidget(QGroupBox):
 
                 control_mode = options.get("control_mode")
 
-                if control_mode == "Jacket":
-                    self.device.set_jacket_control()
+                if control_mode == "Jacket" and not self.device.set_jacket_control():
+                    raise RuntimeError("Huber did not confirm Jacket control.")
 
-                elif control_mode == "Process":
-                    self.device.set_process_control()
+                if control_mode == "Process" and not self.device.set_process_control():
+                    raise RuntimeError("Huber did not confirm Process control.")
 
                 success = self.device.set_target(target)
 
@@ -1414,6 +1415,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
     def _start_device(self):
@@ -1509,6 +1512,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
     def _read_device(self):
@@ -1523,6 +1528,8 @@ class DeviceWidget(QGroupBox):
 
         except Exception as e:
             self.status_label.setText(f"Error: {e}")
+        finally:
+            self._update_connection_state()
 
 
 # In[52]:
@@ -2157,13 +2164,18 @@ class ControlPanel(QWidget):
                     "Configuration contains no devices."
                 )
     
-            self.apply_loaded_configuration(
-                devices,
-                profiles_data,
-                experiments_data,
-                data.get("recording_folder"),
-                data.get("system_topology"),
-            )
+            from app.presets import validate_manual_experiments
+
+            validate_manual_experiments({"devices": devices, "experiments": experiments_data})
+            speed = float(data.get("simulation_speed", 1))
+            if not self.simulation_speed.minimum() <= speed <= self.simulation_speed.maximum():
+                raise ValueError("Invalid Control Panel simulation speed.")
+            if not self.apply_loaded_configuration(
+                devices, profiles_data, experiments_data,
+                data.get("recording_folder"), data.get("system_topology"),
+            ):
+                return
+            self.simulation_speed.setValue(speed)
     
             print(
                 f"[CONTROL PANEL] "
@@ -2195,6 +2207,7 @@ class ControlPanel(QWidget):
             "version": 3,
             "system_topology": self.current_system_topology(),
             "recording_folder": self.control_output_path.text().strip(),
+            "simulation_speed": self.simulation_speed.value(),
             "devices": devices,
             "profiles": profiles,
             "experiments": [
@@ -2221,18 +2234,11 @@ class ControlPanel(QWidget):
             file_path += ".json"
     
         try:
-    
-            with open(
-                file_path,
-                "w",
-                encoding="utf-8"
-            ) as f:
-    
-                json.dump(
-                    data,
-                    f,
-                    indent=4
-                )
+            from app.presets import validate_manual_experiments
+            from experiment.recording import atomic_json
+
+            validate_manual_experiments(data)
+            atomic_json(Path(file_path), data)
     
             print(
                 f"[CONTROL PANEL] "

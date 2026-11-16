@@ -13,10 +13,13 @@ from PySide6.QtWidgets import (
 )
 
 from .candidate_workers import max_cpu_workers
-from .model_file import save_model
-from .parameter_labels import PARAMETERS
+from .model_file import save_checkpoint
+from .native_case import CASE_FILTER, MATLAB_FILTER, NATIVE_FILTER, save_native_case
+from .kernel_choice import add_kernel_choice, kernel_values
+from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
 from .solver import read_model
 from .solver_choice import SolverChoice
+from .session import clear_matlab_fit_summaries, delete_models, display_name, history, record_step
 
 
 def table(headers):
@@ -78,15 +81,23 @@ class ControlPanel(QMainWindow):
             check.setEnabled(False)
             self.checks[key] = check
 
-        self.import_button = self.button("Import MATLAB (.mat)", self.choose_file)
-        self.save_button = self.button("Save Model", self.save_case)
+        self.import_button = self.button("Open IMED case", self.choose_file)
+        self.save_button = self.button("Save IMED case", self.save_case)
         self.campaign_button = self.button("Import CrystalLoop", self.choose_campaign)
-        self.input_buttons = [self.button("Initial DoE / Inputs", self.show_inputs)]
+        self.input_buttons = [self.button("Edit experimental inputs", self.edit_inputs)]
+        self.review_inputs = self.button("Review saved inputs", self.show_inputs)
+        self.candidate_button = self.button("Generate candidate model", self.generate_candidate)
         self.configurations = self.button("Model Configurations", self.show_configurations)
         self.estimation_buttons = [self.button("Parameter Estimation", self.show_estimation)]
+        self.uncertainty_button = self.button("Parameter Uncertainty", self.show_uncertainty)
+        self.uncertainty_button.setToolTip("Calculate local confidence intervals at the current "
+                                           "parameter values using measured data.")
         self.md_button = self.button("Model Discrimination", lambda: self.show_design(False))
         self.dopt_button = self.button("D-Optimal Design", lambda: self.show_design(True))
         self.design = self.button("Digital Design", self.show_simulation)
+        self.reliability = self.button("Model reliability", lambda: self.show_probabilistic(False))
+        self.sensitivity = self.button("Probabilistic sensitivity", lambda: self.show_probabilistic(True))
+        self.history_button = self.button("Executed steps", self.show_history)
         self.design.setToolTip("Open forward simulation. Sensitivity analysis is pending.")
         self.numerics = SolverChoice(self.body)
         self.workers = QSpinBox(self.body)
@@ -100,7 +111,7 @@ class ControlPanel(QMainWindow):
             self._build_diagram()
         else:
             self._build_embedded()
-        self.show_message("Import a MATLAB IMED case or a CrystalLoop recording.")
+        self.show_message("Open an IMED case or import a CrystalLoop recording.")
         self.refresh_status()
 
     def _build_embedded(self):
@@ -128,8 +139,10 @@ class ControlPanel(QMainWindow):
         workflow = QGroupBox("Modeling workflow")
         workflow_layout = QVBoxLayout(workflow)
         self.design.setProperty("imedPrimary", True)
-        for button in (*self.input_buttons, self.configurations, *self.estimation_buttons,
-                       self.md_button, self.dopt_button, self.design):
+        for button in (*self.input_buttons, self.review_inputs, self.candidate_button,
+                       self.configurations, *self.estimation_buttons,
+                       self.uncertainty_button, self.md_button, self.dopt_button, self.design,
+                       self.reliability, self.sensitivity, self.history_button):
             button.setMinimumHeight(42)
             workflow_layout.addWidget(button)
         layout.addWidget(workflow)
@@ -169,7 +182,7 @@ class ControlPanel(QMainWindow):
         for index, check in enumerate(self.checks.values()):
             check.setGeometry(15, 22 + 32 * index, 140, 24)
 
-        self.input_buttons.extend(self.button("Experimental Input", self.show_inputs) for _ in range(2))
+        self.input_buttons.extend(self.button("Experimental Input", self.edit_inputs) for _ in range(2))
         self.estimation_buttons.append(self.button("Parameter Estimation", self.show_estimation))
         for widget, position in (
             (self.input_buttons[0], (106, 425, 155, 30)),
@@ -178,9 +191,12 @@ class ControlPanel(QMainWindow):
             (self.configurations, (107, 367, 154, 22)),
             (self.estimation_buttons[0], (106, 295, 154, 22)),
             (self.estimation_buttons[1], (302, 70, 154, 22)),
+            (self.uncertainty_button, (302, 222, 157, 22)),
             (self.md_button, (105, 222, 156, 22)),
             (self.dopt_button, (106, 148, 157, 20)),
             (self.design, (302, 148, 157, 20)),
+            (self.reliability, (302, 120, 157, 20)),
+            (self.sensitivity, (302, 92, 157, 20)),
         ):
             font = QFont("Arial")
             font.setPixelSize(11)
@@ -194,6 +210,9 @@ class ControlPanel(QMainWindow):
         self.place(self.numerics, 495, 118, 162, 26)
         self.place(QLabel("CPU workers", self.body), 495, 90, 162, 20)
         self.place(self.workers, 495, 62, 162, 26)
+        self.place(self.history_button, 495, 24, 162, 26)
+        self.place(self.candidate_button, 302, 24, 157, 26)
+        self.place(self.review_inputs, 105, 24, 157, 26)
 
     def place(self, widget, x, bottom, width, height):
         # MATLAB figure coordinates are measured up from the bottom.
@@ -211,7 +230,7 @@ class ControlPanel(QMainWindow):
             self.message_label.setText(message)
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import MATLAB IMED case", "", "MAT files (*.mat)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open IMED case", "", CASE_FILTER)
         if path:
             self.open_case(path)
 
@@ -219,20 +238,14 @@ class ControlPanel(QMainWindow):
         try:
             case = read_model(path)
         except Exception as error:
-            QMessageBox.warning(self, "Import MATLAB", str(error))
+            QMessageBox.warning(self, "Open IMED case", str(error))
             return
-        self.case = case
-        self.source = Path(path)
-        self.campaign_path = None
-        self.parameter_edits.clear()
-        self.setting_edits.clear()
-        self.numerics.load_settings(case.get("pbmsetting"))
-        self.show_message(f"Imported {self.source.name}")
-        self.refresh_status()
+        self._set_case(case, source=Path(path))
+        self.show_message(f"Opened {self.source.name}.")
 
     def choose_campaign(self):
         from .campaign_dialog import CampaignImportDialog
-        from .campaign_import import campaign_runs
+        from .campaign_import import campaign_runs, read_json
         from .demo_campaign import import_simulated_campaign
 
         folder = QFileDialog.getExistingDirectory(self, "Select CrystalLoop campaign folder")
@@ -240,27 +253,35 @@ class ControlPanel(QMainWindow):
             return
         try:
             simulated = import_simulated_campaign(folder)
+            definition = read_json(Path(folder) / "definition.json")
+            doe_factors = definition.get("campaign", {}).get("doe_factors")
             if simulated is not None:
                 self.case = simulated
                 self.source = None
                 self.parameter_edits.clear()
                 self.setting_edits.clear()
                 self.numerics.load_settings(simulated.get("pbmsetting"))
-                self.use_campaign(folder, simulated["ExpData"], simulated["ProcInf"])
+                self.use_campaign(folder, simulated["ExpData"], simulated["ProcInf"], doe_factors=doe_factors)
                 return
             dialog = CampaignImportDialog(campaign_runs(folder), self.case, self)
         except (ValueError, OSError, KeyError) as error:
             QMessageBox.warning(self, "Import CrystalLoop", str(error))
             return
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.use_campaign(folder, dialog.experiments, dialog.processes)
+            self.use_campaign(folder, dialog.experiments, dialog.processes, doe_factors=doe_factors)
         dialog.deleteLater()
 
-    def use_campaign(self, folder, experiments, processes):
+    def use_campaign(self, folder, experiments, processes, *, doe_factors=None):
         self.campaign_path = Path(folder)
         self.case.update(ExpData=experiments, ProcInf=processes)
-        for key in ("MDIteration", "MDsimulation", "PPsimulation", "summaryTable"):
-            self.case.pop(key, None)
+        history(self.case)
+        workflow = self.case["PythonWorkflow"]
+        workflow.pop("profile_doe_factors", None)
+        if doe_factors is None:
+            workflow.pop("doe_factors", None)
+        else:
+            workflow["doe_factors"] = np.asarray(doe_factors, dtype=object)
+        clear_matlab_fit_summaries(self.case)
         old_weights = self.case.get("objweightfactor")
         weights = dict(old_weights) if isinstance(old_weights, dict) else {"W1": 0, "W2": 1, "W3": 1}
         for weight, field in (("W1", "CountsData"), ("W2", "ConcentrationData"),
@@ -269,6 +290,7 @@ class ControlPanel(QMainWindow):
                 weights[weight] = 0
         weights["Terms"] = "D10 D50 D90"
         self.case["objweightfactor"] = weights
+        record_step(self.case, "campaign_import", {"folder": str(folder), "runs": len(experiments)})
         self.refresh_status()
         message = f"Imported {len(experiments)} CrystalLoop run(s)."
         if not self.design.isEnabled():
@@ -276,20 +298,27 @@ class ControlPanel(QMainWindow):
         self.show_message(message)
 
     def save_case(self):
-        suggested = self.source.with_name(f"{self.source.stem}_python.mat")
-        path, _ = QFileDialog.getSaveFileName(self, "Save IMED model", str(suggested),
-                                              "MAT files (*.mat)")
+        suggested = self.source or Path("imed_case.imed.json")
+        if suggested.suffix.lower() != ".json":
+            suggested = suggested.with_suffix(".imed.json")
+        path, selected = QFileDialog.getSaveFileName(self, "Save IMED case", str(suggested),
+                                                     f"{NATIVE_FILTER};;{MATLAB_FILTER}")
         if not path:
             return
         destination = Path(path)
-        if not destination.suffix:
-            destination = destination.with_suffix(".mat")
         try:
-            save_model(self.source, destination, self.parameter_edits, self.setting_edits)
+            case = self.checkpoint_case()
+            if selected == MATLAB_FILTER or destination.suffix.lower() == ".mat":
+                if destination.suffix.lower() != ".mat":
+                    destination = destination.with_suffix(".mat")
+                source = self.source if self.source and self.source.suffix.lower() == ".mat" else None
+                save_checkpoint(source, destination, case)
+            else:
+                destination = save_native_case(destination, case)
         except Exception as error:
-            QMessageBox.warning(self, "Save Model", str(error))
+            QMessageBox.warning(self, "Save IMED case", str(error))
         else:
-            self.show_message(f"Saved {destination.name}")
+            self.show_message(f"Saved IMED case {destination.name}.")
 
     def refresh_status(self):
         counts = {key: item_count(self.case.get(key)) for key in
@@ -302,19 +331,22 @@ class ControlPanel(QMainWindow):
             f"Discrimination runs: {counts['MDsimulation']}",
             f"D-optimal runs: {counts['PPsimulation']}",
             f"Estimation runs: {counts['MDIteration'] + bool(counts['summaryTable'])}",
+            f"Executed Python steps: {len(history(self.case))}",
         )))
-        for button in self.input_buttons:
-            button.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
+        self.review_inputs.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
         self.configurations.setEnabled(counts["ModelParameter"] > 0)
-        self.save_button.setEnabled(self.source is not None and self.campaign_path is None)
-        self.save_button.setToolTip(
-            "Imported campaign data are available for this session. MAT saving is disabled."
-            if self.campaign_path is not None else "Save a new copy of the loaded MAT model.")
+        self.save_button.setEnabled(bool(self.source or history(self.case))
+                                    or any(counts[key] for key in ("ModelParameter", "ExpData", "Solubility")))
+        self.save_button.setToolTip("Save current IMED inputs, results, confidence intervals and executed steps.")
+        self.history_button.setEnabled(bool(history(self.case)))
         self.design.setEnabled(
             counts["ExpData"] > 0 and counts["ProcInf"] >= counts["ExpData"]
             and counts["Solubility"] > 0 and counts["ModelParameter"] > 0)
         for button in self.estimation_buttons:
             button.setEnabled(self.design.isEnabled() and counts["ProcInf"] == counts["ExpData"])
+        self.uncertainty_button.setEnabled(self.estimation_buttons[0].isEnabled())
+        self.reliability.setEnabled(self.design.isEnabled())
+        self.sensitivity.setEnabled(self.design.isEnabled())
         fitted = [model for model in self.case.get("ModelParameter", [])
                   if item_count(model.get("para"))]
         self.md_button.setEnabled(self.design.isEnabled() and len(fitted) >= 2)
@@ -337,6 +369,68 @@ class ControlPanel(QMainWindow):
         dialog.exec()
         dialog.deleteLater()
 
+    def edit_inputs(self):
+        from .experiment_editor import ExperimentEditor
+
+        dialog = ExperimentEditor(self.case, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.changed:
+            records, solubility = dialog.result
+            self.case["ExpData"] = [experiment for experiment, _ in records]
+            self.case["ProcInf"] = [{**process, "No": index}
+                                    for index, (_, process) in enumerate(records, 1)]
+            if solubility:
+                self.case["Solubility"] = solubility
+            else:
+                self.case["Solubility"] = {}
+            clear_matlab_fit_summaries(self.case)
+            history(self.case)
+            self.case["PythonWorkflow"].pop("simulation_selection", None)
+            self.parameter_edits.clear()
+            for model in self.case.get("ModelParameter", []):
+                for key in ("para", "covmat", "resnorm", "resid", "jacobian", "nvars", "SSR",
+                            "r", "FVector", "AICVector", "t_test", "Results"):
+                    model.pop(key, None)
+            record_step(self.case, "experiment_edit", {"runs": len(records)})
+            self.refresh_status()
+            self.show_message("Experimental inputs updated. Use Save IMED case to keep the changes.")
+        dialog.deleteLater()
+
+    def generate_candidate(self):
+        from .candidate_model_dialog import CandidateModelDialog
+
+        models = self.case.setdefault("ModelParameter", [])
+        dialog = CandidateModelDialog({display_name(model, "").casefold() for model in models}, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            models.append(dialog.model)
+            record_step(self.case, "model_configuration", {"paraset": dialog.model["paraset"]},
+                        model_index=len(models) - 1)
+            self.refresh_status()
+            self.show_message(f"Added candidate {dialog.model['Name']}.")
+        dialog.deleteLater()
+
+    def setup_settings(self):
+        from .setup_snapshot import pack_imed_settings
+
+        return pack_imed_settings(self.checkpoint_case())
+
+    def restore_setup_settings(self, case):
+        self._set_case(case)
+        self.show_message("Restored IMED settings from the setup preset.")
+
+    def _set_case(self, case, *, source=None):
+        self.case = case
+        self.source, self.campaign_path = source, None
+        self.parameter_edits.clear()
+        self.setting_edits.clear()
+        self.numerics.load_settings(case.get("pbmsetting"))
+        self.workers.setValue(int(case.get("PythonWorkflow", {}).get("cpu_workers", 1)))
+        self.refresh_status()
+
+    def checkpoint_case(self):
+        case = self.simulation_case()
+        case["PythonWorkflow"]["cpu_workers"] = self.workers.value()
+        return case
+
     def show_inputs(self):
         dialog, layout = self.dialog("IMED | Initial DoE / Experimental input")
         layout.addWidget(QLabel("Review saved experimental inputs"))
@@ -356,7 +450,7 @@ class ControlPanel(QMainWindow):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             choices = QComboBox()
-            choices.addItems(entry.get("Name", f"Experiment {index + 1}")
+            choices.addItems(display_name(entry, f"Experiment {index + 1}")
                              for index, entry in enumerate(entries))
             values = table(("Field", "Value" if is_process else "Stored data"))
 
@@ -374,7 +468,7 @@ class ControlPanel(QMainWindow):
             page_layout.addWidget(choices)
             page_layout.addWidget(values)
             tabs.addTab(page, label)
-        if self.campaign_path is not None:
+        if self.campaign_path is not None and experiments:
             self.add_recording_tab(tabs, experiments)
             tabs.setCurrentIndex(tabs.count() - 1)
         self.show_dialog(dialog, layout)
@@ -383,7 +477,8 @@ class ControlPanel(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         runs = QComboBox()
-        runs.addItems(experiment["Name"] for experiment in experiments)
+        runs.addItems(str(experiment.get("Name", f"Experiment {i + 1}"))
+                      for i, experiment in enumerate(experiments))
         signals = QComboBox()
         for field, label in (
             ("TemperatureData", "Temperature (°C)"), ("ConcentrationData", "Concentration (g/g solution)"),
@@ -399,7 +494,10 @@ class ControlPanel(QMainWindow):
             layout.addWidget(widget)
 
         def refresh():
-            points = experiments[runs.currentIndex()][signals.currentData()]
+            index = runs.currentIndex()
+            if index < 0:
+                return
+            points = np.asarray(experiments[index].get(signals.currentData(), [])).reshape(2, -1)
             count = points.shape[1]
             status.setText(f"{count:,} samples" if count else "No valid recorded samples")
             plot = points[:, np.linspace(0, count - 1, min(count, 2000), dtype=int)]
@@ -413,15 +511,19 @@ class ControlPanel(QMainWindow):
 
     def show_configurations(self):
         dialog, layout = self.dialog("IMED | Model Configurations")
-        layout.addWidget(QLabel("Edit parameter values, bounds, and estimation flags. "
-                                "Changes clear fitted results for the affected model."))
+        dialog.resize(1040, 570)
+        layout.addWidget(QLabel("Edit parameters or delete the selected model. "
+                                "Save applies changes to this case."))
         models = self.case["ModelParameter"]
         tabs = QTabWidget()
         layout.addWidget(tabs)
         tables = {}
+        indices = {}
+        removed = set()
         for index, model in enumerate(models):
             parameters = table(("Parameter", "Meaning", "Nominal", "Lower Bound", "Upper Bound", "Est."))
-            tabs.addTab(parameters, f"Model {index + 1}")
+            tabs.addTab(parameters, display_name(model, f"Model {index + 1}"))
+            indices[parameters] = index
             entries = np.asarray(model.get("paraset", []), dtype=float)
             if entries.shape != (len(PARAMETERS), 4):
                 continue
@@ -436,16 +538,43 @@ class ControlPanel(QMainWindow):
                 flag = parameters.item(row, 5)
                 flag.setFlags(flag.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 flag.setCheckState(Qt.CheckState.Checked if estimate else Qt.CheckState.Unchecked)
+                if row in KERNEL_OPTIONS:
+                    add_kernel_choice(parameters, row, 2, row, entries[row, 1])
+            parameters.resizeColumnsToContents()
             parameters.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
                                        | QAbstractItemView.EditTrigger.EditKeyPressed)
             tables[index] = (parameters, entries)
 
+        delete_button = QPushButton("Delete selected model")
+        layout.addWidget(delete_button)
+
+        def remove_model():
+            position = tabs.currentIndex()
+            if position >= 0:
+                removed.add(indices[tabs.currentWidget()])
+                tabs.removeTab(position)
+                delete_button.setEnabled(tabs.count() > 0)
+
+        delete_button.clicked.connect(remove_model)
+
         def apply_changes():
             changes = {}
             for index, (parameters, original) in tables.items():
+                if index in removed:
+                    continue
                 updated = original.copy()
                 for row, (name, _) in enumerate(PARAMETERS):
                     try:
+                        if row in KERNEL_OPTIONS:
+                            choice = parameters.cellWidget(row, 2)
+                            if choice.currentIndex() == choice.initial_choice:
+                                continue
+                            values = kernel_values(choice)
+                            if (row == BREAKAGE_DISTRIBUTION and values[1] == 2
+                                    and updated[28, 1] != -np.inf and updated[33, 2] <= 0):
+                                raise ValueError("Gaussian fragment volume requires a positive σ.")
+                            updated[row] = values
+                            continue
                         active = parameters.item(row, 5).checkState() == Qt.CheckState.Checked
                         nominal, lower, upper = (float(parameters.item(row, c).text())
                                                  for c in (2, 3, 4))
@@ -466,12 +595,20 @@ class ControlPanel(QMainWindow):
                         return
                 if not np.array_equal(updated, original, equal_nan=True):
                     changes[index] = updated
+            if removed:
+                positions = delete_models(self.case, removed)
+                self.parameter_edits = {positions[index]: model for index, model in self.parameter_edits.items()
+                                        if index in positions}
+                changes = {positions[index]: updated for index, updated in changes.items()}
             for index, updated in changes.items():
-                models[index] = {"paraset": updated, "para": np.empty(0)}
-                self.parameter_edits[index] = models[index]
-            if changes:
+                model = self.case["ModelParameter"][index]
+                self.case["ModelParameter"][index] = {**{k: model[k] for k in ("Name",) if k in model},
+                                                      "paraset": updated, "para": np.empty(0)}
+                self.parameter_edits[index] = self.case["ModelParameter"][index]
+                record_step(self.case, "model_configuration", {"paraset": updated}, model_index=index)
+            if changes or removed:
                 self.refresh_status()
-                self.show_message("Updated model parameters. Use Save Model to write a MAT file.")
+                self.show_message("Model list updated. Use Save IMED case to keep the changes.")
             dialog.accept()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
@@ -483,8 +620,20 @@ class ControlPanel(QMainWindow):
         dialog.deleteLater()
 
     def simulation_case(self):
+        history(self.case)
         settings = self.numerics.apply_settings(self.case.get("pbmsetting"))
         return {**self.case, "pbmsetting": settings}
+
+    def prediction_case(self):
+        case = self.simulation_case()
+        creator = getattr(self.window(), "create_experiments", None)
+        if creator is not None and "doe_factors" not in case["PythonWorkflow"]:
+            from experiment.doe_campaign import sampled_doe_factors
+
+            factors = sampled_doe_factors(creator)
+            if factors:
+                case["active_doe_factors"] = factors
+        return case
 
     def cpu_workers(self):
         return 1 if self.numerics.currentData()[0] == "jax" else self.workers.value()
@@ -492,18 +641,19 @@ class ControlPanel(QMainWindow):
     def show_estimation(self):
         from .estimation_dialog import ParameterEstimation
 
-        dialog = ParameterEstimation(self.simulation_case(), self, workers=self.cpu_workers())
+        dialog = ParameterEstimation(self.checkpoint_case(), self, workers=self.cpu_workers())
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if dialog.saved_settings:
             self.case.update(dialog.saved_settings)
             self.setting_edits.update(dialog.saved_settings)
-            self.show_message("Saved PE settings for this case. Use Save Model to write a MAT file.")
+            self.show_message("Applied PE settings to this case.")
         if accepted:
             for index, model in dialog.fitted_models.items():
                 self.case["ModelParameter"][index] = model
                 self.parameter_edits[index] = model
             self.refresh_status()
-            self.show_message("Applied fitted parameters. Use Save Model to write a MAT file.")
+            self.show_message("Applied fitted parameters. Use Save IMED case to keep the changes.")
+        self.refresh_status()
         dialog.deleteLater()
 
     def show_design(self, optimal):
@@ -512,6 +662,34 @@ class ControlPanel(QMainWindow):
         dialog = DesignDialog(self.simulation_case(), optimal, self, workers=self.cpu_workers())
         dialog.exec()
         dialog.deleteLater()
+        self.refresh_status()
+
+    def show_uncertainty(self):
+        from .uncertainty_dialog import ParameterUncertainty
+
+        dialog = ParameterUncertainty(self.simulation_case(), self)
+        dialog.exec()
+        dialog.deleteLater()
+        self.refresh_status()
+
+    def show_history(self):
+        dialog, layout = self.dialog("IMED | Executed steps")
+        steps = table(("Completed (UTC)", "Step", "Model"))
+        fill_table(steps, [(step["completed_at"], step["action"].replace("_", " "),
+                            int(step["model_index"]) + 1 if int(step["model_index"]) >= 0 else "—")
+                           for step in history(self.case)])
+        layout.addWidget(steps)
+        self.show_dialog(dialog, layout)
+
+    def show_probabilistic(self, sensitivity):
+        from .probabilistic_dialog import ProbabilisticDialog
+
+        case = self.prediction_case() if sensitivity else self.simulation_case()
+        dialog = ProbabilisticDialog(case, self, sensitivity=sensitivity,
+                                     workers=self.cpu_workers())
+        dialog.exec()
+        dialog.deleteLater()
+        self.refresh_status()
 
     def show_simulation(self):
         if self.simulator is not None and self.simulator.isVisible():
@@ -520,9 +698,11 @@ class ControlPanel(QMainWindow):
             return
         if self.simulator is None:
             self.simulator = self.simulation_window(self)
+            if hasattr(self.simulator, "workflow_changed"):
+                self.simulator.workflow_changed.connect(self.refresh_status)
         self.simulator.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.simulator.setWindowTitle("IMED | Digital Design | Forward simulation")
-        self.simulator.set_case(self.simulation_case(),
+        self.simulator.set_case(self.prediction_case(),
                                 "Choose a model and experiment, then run the forward simulation.")
         self.simulator.show()
 

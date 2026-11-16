@@ -7,6 +7,7 @@ campaign. The page provides forward PBM simulation, parameter estimation, model
 discrimination, and D-optimal design. To use campaign data for modeling, load a
 MATLAB case with the relevant kinetics and solubility before importing the campaign.
 See the [IMED workflow guide](imed_python/README.md) for input and solver details.
+For PBM fitting, IMED Parameter Estimation offers final D10/D50/D90 or all recorded size trends under **Size samples**. **Settings → PBM size samples in LOOP** chooses the same data mode for the automated EXP–MODEL handoff and is retained in setup presets. Campaign MODEL inputs carry the choice in `campaign_input.json` under `pbm_fitting.size_term`. The CSV-based external loop writes `pbm_fitting.json` in its MODEL folder. External MODEL scripts should read this value when constructing their fitting objective. The Python fitter accepts it as the `terms` argument to `FitObjective`.
 JAX/Diffrax is optional when running from source and is not bundled in the
 Windows release; use SciPy PBM in the packaged app.
 
@@ -94,6 +95,54 @@ including random samples. Open **Assign devices** to review the saved selections
 against the current devices, then preview and apply the assignments. Connect the
 required devices before starting. Valid saved LOOP folders are restored automatically.
 Presets without generated data still require DoE generation.
+
+## Bayesian optimization
+
+Install the BO runtime in the Python environment running CrystalLoop.
+
+```powershell
+python -m pip install -r requirements-bo.txt
+python -m bo
+```
+
+The same workflow is available under **IMED → BO** in CrystalLoop. Open an
+IMED MATLAB or CrystalLoop case, import a recorded campaign, or reuse the current
+IMED case. Select completed experiments, set input bounds, enable the targets,
+then configure optional output limits under **Output screening**. Give each
+target a scale in its own unit so that weights compare dimensionless losses.
+
+**Physical profiles** starts with temperature and antisolvent stage lists inferred
+from the selected experiments. Add, delete, or reorder stages, then set durations
+and endpoints in seconds, °C, or g/s. Equal temperature endpoints define a hold.
+Antisolvent stages can turn the pump off, hold a positive rate, or ramp the rate.
+Select up to four decision controls per profile. Choices include individual
+stage settings and grouped controls such as start delay, final temperature,
+and total antisolvent dose.
+
+BO fits the selected physical controls to the recorded profiles and estimates
+the proposed recipe from those fits. Compare recorded and fitted traces before
+searching. BO uses the longest selected experiment as the fixed batch horizon.
+Temperature holds at the final setpoint after its last stage and antisolvent
+feed stops after its last stage. Duration bounds apply to the fixed horizon.
+Seeded proposals add seed at time zero, and unseeded proposals use zero seed mass.
+
+**Propose experiment** shows the physical recipe, input history, and one-dimensional
+GP projections through the proposal. **Observed inputs** shows standardized
+values together or any input in its own units. **GP projections** shows the
+predicted mean, a predictive band at ±1.96 standard deviations, the acquisition
+for the weighted objective, and the actual measured points when available. The
+output filter uses the selected margin and requires the full predicted interval
+to meet every enabled bound. With small datasets, use the plots and reconstruction
+errors to judge whether the proposed recipe is suitable for experimental review.
+
+**Save BO setup** includes the selected runs, settings, stage templates, and
+chosen physical controls. Older setups migrate their data and settings to
+physical stages. **Save proposed recipe** exports the stages, plotted profiles,
+and predictions as JSON for review. Install scikit-learn in the Windows build
+environment to include the BO optimizer.
+
+In IMED Parameter Estimation, **Optimization progress** shows the live
+generation plot beside the optimization log. Drag the divider to resize them.
 
 ## Unit operations and MSI connectivity
 

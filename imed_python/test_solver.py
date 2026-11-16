@@ -1,5 +1,6 @@
 import unittest
 import warnings
+from types import SimpleNamespace
 from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -15,6 +16,24 @@ from imed_python.validation.matlab_ode45 import integrate_matlab_ode45
 
 
 class ForwardModelTests(unittest.TestCase):
+    def test_scipy_cleans_only_negligible_negative_tail_bins(self):
+        inputs = Case("cooling", "growth").inputs(4)
+        parameters, experiment, process, solubility, settings = inputs
+        process = {**process, "SeedMass": 0}
+        settings = {**settings, "AbsTol": 1e-5}
+        for negative in (-2.3e-5, -0.1):
+            def solution(_rhs, _span, initial, *, t_eval, **kwargs):
+                state = np.tile(initial[:, None], (1, len(t_eval)))
+                state[0] = negative
+                state[1] = 2e8
+                return SimpleNamespace(success=True, y=state)
+
+            with self.subTest(negative=negative), patch("imed_python.solver.solve_ivp", solution):
+                _, _, csd, history = simulate(parameters, experiment, process, solubility,
+                                              settings, return_history=True)
+                self.assertEqual(csd[1, 0], 0. if negative == -2.3e-5 else negative)
+                self.assertEqual(history[0, -1], negative)
+
     def test_unstable_aggregation_fails_without_warning_cascade(self):
         parameters, experiment, process, solubility, settings = Case("combined", "full").inputs(20)
         parameters[24] = 300  # Finite coefficient, but the collision rate overflows.

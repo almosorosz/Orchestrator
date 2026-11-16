@@ -1,6 +1,6 @@
 """Residuals and two-stage SciPy fitting for IMED."""
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic
 
@@ -10,19 +10,12 @@ from scipy.stats import qmc
 
 from .candidate_workers import candidate_map
 from .distribution import cell_volumes, d_values
+from .pe_settings import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY
 from .solver import pbm_backend_label, simulate
+from .size_data import TREND_SIZE_TERM
+from .uncertainty import DISCRETE_PARAMETERS, ParameterIntervals, intervals_from_covariance
 
 
-PYFIT_SETTINGS_KEY = "pyfitsettings"
-PYFIT_DEFAULTS = {
-    "global_iterations": 20,
-    "population_size": 200,
-    "global_tolerance": 0.01,
-    "mutation_min": 0.5,
-    "mutation_max": 1.0,
-    "recombination": 0.7,
-    "local_evaluations": 1500,
-}
 TRIAL_ERRORS = (ValueError, RuntimeError, TimeoutError, FloatingPointError)
 REJECTED_RESIDUAL = 1e4
 
@@ -45,13 +38,15 @@ def normalized(values, denominator):
 
 
 class FitObjective:
-    def __init__(self, experiments, processes, solubility, settings, weights, terms, *, cancelled=None):
+    def __init__(self, experiments, processes, solubility, settings, weights, terms, *,
+                 cancelled=None, at_measurements=False):
         if not len(experiments) or len(experiments) != len(processes):
             raise ValueError("Each experiment requires a process information record")
         self.settings = settings
         self.solubility = solubility
         self.terms = terms
         self.cancelled = cancelled
+        self.at_measurements = at_measurements
         self.weights = np.asarray(weights, dtype=float)
         if (self.weights.shape != (3,) or not np.isfinite(self.weights).all()
                 or (self.weights < 0).any() or not self.weights.any()):
@@ -61,45 +56,116 @@ class FitObjective:
         self.sample_count = 0
         edges = np.linspace(settings.get("Lmin", 0), settings.get("Lmax", 250),
                             int(settings.get("N", 250)) + 1)
+        centers = edges[1:] - np.diff(edges) / 2
+        if at_measurements and centers.size < 2:
+            raise ValueError("Use a PBM grid with at least two bins.")
         for experiment, process in zip(experiments, processes):
             observed = {}
             for index, key in enumerate(("CountsData", "ConcentrationData", "FinalCSDsData")):
                 if not self.weights[index]:
                     continue
-                if index == 2 and terms != "CSD":
-                    values = np.asarray(experiment["FinalD10D50D90"], dtype=float).reshape(-1)
+                if index == 2 and terms == TREND_SIZE_TERM:
+                    end = np.asarray(experiment["TemperatureData"], dtype=float).reshape(2, -1)[0].max()
+                    final = np.asarray(experiment.get("FinalD10D50D90", []), dtype=float).reshape(-1)
+                    traces = {}
+                    for column, name in enumerate(("D10Data", "D50Data", "D90Data")):
+                        points = np.empty((2, 0))
+                        if np.size(experiment.get(name, [])):
+                            points = series(experiment[name], name)
+                            points = points[:, (points[0] >= 0) & (points[0] <= end) & (points[1] > 0)]
+                        if not points.size and final.size == 3 and np.isfinite(final[column]) and final[column] > 0:
+                            points = np.array([[end], [final[column]]])
+                        if points.size:
+                            traces[column] = points
+                    if not traces:
+                        if at_measurements:
+                            continue
+                        raise ValueError("Trend fitting requires recorded D10/D50/D90 data or final measured sizes.")
+                    observed[index] = traces
+                    count = sum(points.shape[1] for points in traces.values())
+                    self.residual_count += count
+                    self.sample_count += count
+                    continue
+                percentiles = index == 2 and terms != "CSD"
+                field = "FinalD10D50D90" if percentiles else key
+                data = experiment.get(field)
+                if at_measurements and (data is None or not np.size(data)):
+                    continue
+                if percentiles:
+                    values = np.asarray(experiment[field], dtype=float).reshape(-1)
                     if values.shape != (3,) or not np.isfinite(values).all():
                         raise ValueError("FinalD10D50D90 requires three finite values")
                     observed[index] = values
                     self.residual_count += 3
                     self.sample_count += 3
                 else:
-                    points = series(experiment[key], key)
+                    points = series(experiment[field], field)
+                    if at_measurements:
+                        if index == 1:
+                            points = points[:, points[0] > 0]
+                        elif index == 2:
+                            points = points[:, (points[0] >= centers[0]) & (points[0] <= centers[-1])]
+                        if points.shape[1] <= int(index != 1):
+                            continue
                     observed[index] = points
-                    self.residual_count += len(edges) - 1 if index == 2 else points.shape[1]
-                    self.sample_count += points.shape[1]
+                    self.residual_count += (len(centers) if index == 2 and not at_measurements
+                                            else points.shape[1])
+                    # Peak or total normalization removes one independent component.
+                    self.sample_count += points.shape[1] - int(at_measurements and index != 1)
+            if at_measurements and not observed:
+                continue
             volumes = cell_volumes(edges, process["ShapeFactor"])
             self.experiments.append((experiment, process, observed, volumes))
+        if not self.experiments:
+            raise ValueError("Select a response with usable measurements inside the PBM grid.")
 
     def residuals(self, parameters, *, global_stage=False):
+        self.simulation_times = []
         result = []
         for experiment_number, (experiment, process, observed, volumes) in enumerate(self.experiments, 1):
+            trends = self.terms == TREND_SIZE_TERM and 2 in observed
+            started = monotonic()
             try:
-                outputs = simulate(parameters, experiment, process, self.solubility, self.settings,
-                                   cancelled=self.cancelled)
+                simulation = simulate(parameters, experiment, process, self.solubility, self.settings,
+                                      return_history=trends, cancelled=self.cancelled)
+                outputs = simulation[:3]
             except (FloatingPointError, TimeoutError) as error:
                 raise type(error)(f"Experiment {experiment_number}: {error}") from error
+            finally:
+                self.simulation_times.append(monotonic() - started)
             for index, measured in observed.items():
                 x, prediction = outputs[index]
-                if np.any(prediction < 0) or not np.isfinite(prediction).all():
-                    raise ValueError("The predicted data contain invalid values")
+                label = ("particle count", "concentration", "size distribution")[index]
+                if not np.isfinite(prediction).all():
+                    raise ValueError(f"Experiment {experiment_number} has nonfinite predicted {label}.")
+                if np.any(prediction < 0):
+                    worst = np.argmin(prediction)
+                    unit = "µm" if index == 2 else "s"
+                    raise ValueError(f"Experiment {experiment_number} has negative predicted {label} "
+                                     f"({prediction[worst]:.5g}) at {x[worst]:.6g} {unit}.")
                 if index == 2:
                     volume_density = prediction * volumes
-                    if self.terms == "CSD":
-                        interpolated = np.interp(x, *measured, left=np.nan, right=np.nan)
-                        difference = (normalized(volume_density, volume_density.sum())
-                                      - normalized(interpolated, interpolated.sum()))
-                        count = len(x) if global_stage else measured.shape[1]
+                    if trends:
+                        from .comparison import percentile_history
+
+                        percentiles = percentile_history(outputs[2], simulation[3], process, self.settings,
+                                                          cancelled=self.cancelled)
+                        difference = np.concatenate([
+                            np.interp(points[0], outputs[0][0], percentiles[column], left=np.nan, right=np.nan)
+                            - points[1] for column, points in measured.items()])
+                        count = len(difference)
+                    elif self.terms == "CSD":
+                        if self.at_measurements:
+                            predicted = np.interp(measured[0], x, volume_density,
+                                                  left=np.nan, right=np.nan)
+                            observed_density = measured[1]
+                            count = len(predicted)
+                        else:
+                            predicted = volume_density
+                            observed_density = np.interp(x, *measured, left=np.nan, right=np.nan)
+                            count = len(x) if global_stage else measured.shape[1]
+                        difference = (normalized(predicted, predicted.sum())
+                                      - normalized(observed_density, observed_density.sum()))
                     else:
                         difference = d_values(x, volume_density) - measured
                         count = 3
@@ -129,6 +195,12 @@ class FitResult:
     ssr: float
     aic: float
     converged: bool
+    intervals: ParameterIntervals | None = None
+    uncertainty_error: str = ""
+    simulation_count: int = 0
+    simulation_seconds: float = 0.
+    wall_seconds: float = 0.
+    generation_history: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
 
 
 def _global_trial(candidate, *, objective, baseline, free, cancelled):
@@ -140,8 +212,8 @@ def _global_trial(candidate, *, objective, baseline, free, cancelled):
     try:
         errors = objective.residuals(parameters, global_stage=True)
     except TRIAL_ERRORS as error:
-        return objective.residual_count * REJECTED_RESIDUAL**2, str(error)
-    return float(errors @ errors), None
+        return objective.residual_count * REJECTED_RESIDUAL**2, str(error), getattr(objective, "simulation_times", [])
+    return float(errors @ errors), None, getattr(objective, "simulation_times", [])
 
 
 def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iterations"],
@@ -150,7 +222,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
               mutation_min=PYFIT_DEFAULTS["mutation_min"], mutation_max=PYFIT_DEFAULTS["mutation_max"],
               recombination=PYFIT_DEFAULTS["recombination"],
               local_evaluations=PYFIT_DEFAULTS["local_evaluations"], cancelled=None, progress=None,
-              workers=1):
+              workers=1, generation_progress=None):
     """Fit the model, optionally evaluating global trials in separate CPU processes."""
     if isinstance(objective, FitObjective) and objective.settings.get("Numerics") == "jax":
         if workers != 1:
@@ -176,6 +248,11 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
     current = None
     next_update = 0.
     last_report = None
+    latest_times = []
+    total_simulations = 0
+    simulation_seconds = 0.
+    fit_started = monotonic()
+    generation_history = []
 
     def begin_phase(name):
         nonlocal phase, evaluations, rejected, generation, best, current, next_update, last_report
@@ -199,6 +276,9 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
             line += f" · current objective {value}"
         if generation:
             line += f" · generation {generation}/{int(global_iterations)} · best WMSE {best:.5g}"
+        if latest_times:
+            line += (f" · PBM {len(latest_times)} simulation(s) in {sum(latest_times):.3f} s"
+                     f" · mean {np.mean(latest_times):.3f} s")
         if line != last_report:
             progress(line)
             last_report = line
@@ -207,10 +287,23 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
         nonlocal generation, best
         generation = intermediate_result.nit
         best = intermediate_result.fun
+        scores = intermediate_result.population_energies
+        if np.isfinite(scores).all():
+            point = (generation, float(np.mean(scores)), float(best))
+            generation_history.append(point)
+            if generation_progress is not None:
+                generation_progress(*point)
         report_progress(force=generation == 1)
 
-    def record_trial(score, error):
+    def record_timing(times):
+        nonlocal latest_times, total_simulations, simulation_seconds
+        latest_times = times
+        total_simulations += len(times)
+        simulation_seconds += sum(times)
+
+    def record_trial(score, error, times=None):
         nonlocal evaluations, rejected, current
+        record_timing(getattr(objective, "simulation_times", []) if times is None else times)
         if error is not None:
             rejected += 1
             if rejected == 1 and progress is not None:
@@ -235,6 +328,8 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
         else:
             if penalize:
                 record_trial(float(errors @ errors) if progress is not None else None, None)
+            else:
+                record_timing(getattr(objective, "simulation_times", []))
         return errors
 
     def score(candidate):
@@ -254,7 +349,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
                        tol=float(global_tolerance), polish=False,
                        mutation=(float(mutation_min), float(mutation_max)),
                        recombination=float(recombination),
-                       callback=report_generation if progress else None)
+                       callback=report_generation)
         if workers == 1:
             global_result = differential_evolution(score, bounds, **options)
         else:
@@ -304,4 +399,26 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
     aic = np.nan
     if sample_count > nvars + 2 and ssr > 0:
         aic = np.log(ssr) + (sample_count + nvars) / (sample_count - nvars - 2)
-    return FitResult(values.copy(), errors, jacobian, covariance, ssr, aic, converged)
+    intervals = None
+    uncertainty_error = ""
+    selected = np.flatnonzero(active)
+    positions = np.flatnonzero(free & ~np.isin(selected, DISCRETE_PARAMETERS))
+    if progress is not None:
+        progress("Calculating parameter confidence intervals")
+    try:
+        if not positions.size:
+            raise ValueError("No freely estimated continuous kinetic parameters.")
+        intervals = intervals_from_covariance(
+            selected[positions], values[positions], covariance[np.ix_(positions, positions)], degrees)
+    except ValueError as error:
+        uncertainty_error = str(error)
+        if progress is not None:
+            progress(f"Confidence intervals unavailable · {error}")
+    wall_seconds = monotonic() - fit_started
+    if progress is not None:
+        average = simulation_seconds / total_simulations if total_simulations else 0.
+        progress(f"Simulation timing · {total_simulations} PBM runs · total compute {simulation_seconds:.3f} s"
+                 f" · mean {average:.3f} s/run · fit wall time {wall_seconds:.3f} s")
+    return FitResult(values.copy(), errors, jacobian, covariance, ssr, aic, converged,
+                     intervals, uncertainty_error, total_simulations, simulation_seconds, wall_seconds,
+                     np.asarray(generation_history, dtype=float).reshape(-1, 3))

@@ -72,9 +72,11 @@ class DoeAssignmentDialog(QDialog):
                 self.table.setCellWidget(row, 1, combo)
                 self.table.setItem(row, 2, QTableWidgetItem("Recorded channel"))
         layout.addWidget(self.table)
+        self.selected_monitor_ids = None
         self.include_monitors = QCheckBox("Include connected read-only monitors")
         self.include_monitors.setChecked(True)
         self.include_monitors.toggled.connect(self.invalidate)
+        self.include_monitors.clicked.connect(lambda: setattr(self, "selected_monitor_ids", None))
         layout.addWidget(self.include_monitors)
         self.summary = QLabel("Preview required before execution.")
         self.summary.setWordWrap(True)
@@ -154,6 +156,7 @@ class DoeAssignmentDialog(QDialog):
         try:
             monitors = tuple(key for key, config in self.configs.items()
                              if self.include_monitors.isChecked() and is_monitor_only(config)
+                             and (self.selected_monitor_ids is None or key in self.selected_monitor_ids)
                              and getattr(self.hardware.get(key), "is_connected", False))
             campaign = self.service.compile(self.assignments(), self.configs, monitors,
                                             imed_monitors=self.imed_monitor_assignments())
@@ -202,10 +205,14 @@ class DoeAssignmentDialog(QDialog):
         filename, _ = QFileDialog.getSaveFileName(self, "Save DoE assignments", "doe_assignments.json", "JSON (*.json)")
         if filename:
             try:
-                payload = {"version": 1, "assignments": [asdict(item) for item in self.assignments()]}
+                payload = {"version": 2, "assignments": [asdict(item) for item in self.assignments()],
+                           "include_monitors": self.include_monitors.isChecked(),
+                           "monitor_device_ids": self.selected_monitor_ids}
                 if self.imed_rows:
                     payload["imed_monitors"] = self.imed_monitor_assignments()
-                Path(filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                from experiment.recording import atomic_json
+
+                atomic_json(Path(filename), payload)
             except Exception as error:
                 QMessageBox.warning(self, "Save Failed", str(error))
 
@@ -215,7 +222,7 @@ class DoeAssignmentDialog(QDialog):
             return
         try:
             payload = json.loads(Path(filename).read_text(encoding="utf-8"))
-            if payload.get("version") != 1:
+            if payload.get("version") not in (1, 2):
                 raise ValueError("Unsupported assignment file version")
             loaded = tuple(ProfileAssignment(**item) for item in payload["assignments"])
             if len({item.role for item in loaded}) != len(loaded):
@@ -227,13 +234,22 @@ class DoeAssignmentDialog(QDialog):
             for role, device in monitored.items():
                 if role not in self.imed_rows or self.imed_rows[role].findData(device) < 0:
                     raise ValueError(f"Missing or incompatible IMED monitor for {role}: {device}")
+            saved_ids = payload.get("monitor_device_ids")
+            include = payload.get("include_monitors", True)
+            if type(include) is not bool or (saved_ids is not None and (
+                    not isinstance(saved_ids, list) or any(
+                        not isinstance(key, str) or not is_monitor_only(self.configs.get(key, {}))
+                        for key in saved_ids))):
+                raise ValueError("The assignment file contains invalid monitor settings.")
+            self.selected_monitor_ids = saved_ids
+            self.include_monitors.setChecked(include)
+            self.invalidate()
             for combo, _ in self.rows.values():
                 combo.setCurrentIndex(0)
             for item in loaded:
                 combo, _ = self.rows[item.role]
                 combo.setCurrentIndex(combo.findData(item.device_id))
-            if "imed_monitors" in payload:
-                for role, combo in self.imed_rows.items():
-                    combo.setCurrentIndex(max(0, combo.findData(monitored.get(role))))
+            for role, combo in self.imed_rows.items():
+                combo.setCurrentIndex(max(0, combo.findData(monitored.get(role))))
         except Exception as error:
             QMessageBox.warning(self, "Load Failed", str(error))

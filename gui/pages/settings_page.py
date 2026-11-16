@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import Qt, Signal
+from imed_python.size_data import SIZE_SAMPLE_OPTIONS
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -75,6 +76,10 @@ class SettingsPage(QWidget):
         self.exp_number_input.setPlaceholderText(
             "5"
         )
+        self.pbm_size_samples = QComboBox()
+        for label, value in SIZE_SAMPLE_OPTIONS:
+            self.pbm_size_samples.addItem(label, value)
+        self.pbm_size_samples.setToolTip("Choose which recorded size measurements the LOOP MODEL stage uses for PBM fitting.")
 
         self.define_button = QPushButton(
             "Define Variables"
@@ -226,6 +231,8 @@ class SettingsPage(QWidget):
         self.load_preset_button.clicked.connect(self.load_preset_requested.emit)
         config_layout.addWidget(self.save_preset_button, 10, 0, 1, 2)
         config_layout.addWidget(self.load_preset_button, 11, 0, 1, 2)
+        config_layout.addWidget(QLabel("PBM size samples in LOOP"), 12, 0)
+        config_layout.addWidget(self.pbm_size_samples, 12, 1)
 
         doe_controls.setLayout(form)
 

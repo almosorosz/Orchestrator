@@ -364,7 +364,8 @@ class ExperimentCoordinator(QObject):
         model_path.mkdir(exist_ok=True)
         (model_path / "campaign_input.json").write_text(json.dumps({"campaign_id": self.campaign_id,
             "campaign_folder": str(folder), "experiments": sorted(completed),
-            "skipped_experiments": sorted(skipped)}, indent=2), encoding="utf-8")
+            "skipped_experiments": sorted(skipped),
+            "pbm_fitting": {"size_term": self.controller.pbm_size_term}}, indent=2), encoding="utf-8")
         self.controller.current_model_folder = str(model_path)
         self.controller.omni_count += 1
         self.omni_run_count = self.controller.omni_count
@@ -439,6 +440,8 @@ class ExperimentCoordinator(QObject):
                 model_root,
             )
         )
+        (Path(model_path) / "pbm_fitting.json").write_text(
+            json.dumps({"size_term": self.controller.pbm_size_term}, indent=2), encoding="utf-8")
     
         self.controller.current_model_folder = (
             model_path

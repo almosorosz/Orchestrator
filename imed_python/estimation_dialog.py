@@ -1,18 +1,31 @@
 """Parameter Estimation dialog backed by the standalone fitting engine."""
 from datetime import datetime
+from functools import partial
+import json
+from pathlib import Path
 from math import isfinite
 from threading import Event
 
-from PySide6.QtCore import QThread, Signal
+import numpy as np
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from experiment.recording import atomic_json
+
 from .control_panel import fill_table, table
-from .estimation import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, FitObjective, fit_model
+from .estimation import FitObjective, fit_model
+from .native_case import NATIVE_FILTER, save_native_case
+from .pe_settings import (PE_PBM_KEY, PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, WEIGHT_DEFAULTS,
+                          effective_pe_pbm, pbm_for_pe, pe_file, pe_mesh, read_pe_file)
 from .parameter_labels import PARAMETERS
 from .solver import pbm_backend_label
+from .size_data import SIZE_SAMPLE_OPTIONS, TREND_SIZE_TERM
+from .session import display_name, history, latest_pe_step, pack_fit, pe_signatures, record_step, unpack_fit
 
 
 class AdvancedSettings(QDialog):
@@ -23,16 +36,16 @@ class AdvancedSettings(QDialog):
         self.pbm, self.optimizer = dict(pbm), dict(optimizer)
         mode = pbm.get("Numerics", "conservative")
         jax = mode == "jax"
-        rtol, atol = (1e-7, 1e-9) if jax else (1e-3, 1e-6)
+        defaults = pbm_for_pe({"Numerics": mode})
 
         self.mesh_fields = (
-            ("Lmin", "Minimum size, Lmin (µm)", 0., float),
-            ("Lmax", "Maximum size, Lmax (µm)", 250., float),
-            ("N", "Number of bins", 250, int),
-            ("RelTol", "Relative error tolerance", rtol, float),
-            ("AbsTol", "Absolute error tolerance", atol, float),
-            ("MaxSteps", "Maximum JAX steps", 100_000, int) if jax else
-            ("MaxIterationTime", "Max. time per simulation (s)", 30., float),
+            ("Lmin", "Minimum size, Lmin (µm)", defaults["Lmin"], float),
+            ("Lmax", "Maximum size, Lmax (µm)", defaults["Lmax"], float),
+            ("N", "Number of bins", defaults["N"], int),
+            ("RelTol", "Relative error tolerance", defaults["RelTol"], float),
+            ("AbsTol", "Absolute error tolerance", defaults["AbsTol"], float),
+            ("MaxSteps", "Maximum JAX steps", defaults["MaxSteps"], int) if jax else
+            ("MaxIterationTime", "Max. time per simulation (s)", defaults["MaxIterationTime"], float),
         )
         self.optimizer_fields = tuple(
             (key, label, PYFIT_DEFAULTS[key], type(PYFIT_DEFAULTS[key]))
@@ -47,6 +60,9 @@ class AdvancedSettings(QDialog):
             )
         )
         self.inputs = {}
+        self.comparison_button = QPushButton("Compare PBM with QMOM")
+        self.comparison_button.setEnabled(hasattr(parent, "case"))
+        self.comparison_button.clicked.connect(self.show_comparison)
         layout = QVBoxLayout(self)
         groups = QHBoxLayout()
         layout.addLayout(groups)
@@ -68,6 +84,8 @@ class AdvancedSettings(QDialog):
                 field.setObjectName(f"pe_{key}")
                 self.inputs[key] = field
                 form.addRow(label, field)
+            if fields is self.mesh_fields:
+                form.addRow(self.comparison_button)
             groups.addWidget(group, 1)
 
         note = QLabel("The global search uses differential evolution, followed by local "
@@ -85,15 +103,15 @@ class AdvancedSettings(QDialog):
         actions.rejected.connect(self.reject)
         layout.addWidget(actions)
 
-    def accept(self):
+    def read_inputs(self, fields):
         values = {}
-        for key, label, _, convert in self.mesh_fields + self.optimizer_fields:
+        for key, label, _, convert in fields:
+            minimum = {"N": 2, "population_size": 5, "local_evaluations": 1,
+                       "MaxSteps": 1, "global_iterations": 0, "Lmin": 0,
+                       "global_tolerance": 0, "mutation_min": 0, "mutation_max": 0,
+                       "recombination": 0}.get(key)
             try:
                 number = convert(self.inputs[key].text())
-                minimum = {"N": 2, "population_size": 5, "local_evaluations": 1,
-                           "MaxSteps": 1, "global_iterations": 0, "Lmin": 0,
-                           "global_tolerance": 0, "mutation_min": 0, "mutation_max": 0,
-                           "recombination": 0}.get(key)
                 valid = number > 0 if minimum is None else number >= minimum
                 if not isfinite(number) or not valid:
                     raise ValueError
@@ -105,6 +123,30 @@ class AdvancedSettings(QDialog):
                 self.inputs[key].setFocus()
                 return
             values[key] = number
+        return values
+
+    def show_comparison(self):
+        from .comparison_dialog import ComparisonDialog
+
+        values = self.read_inputs(self.mesh_fields)
+        if values is None:
+            return
+        if values["Lmax"] <= values["Lmin"]:
+            self.error.setText("Lmax must be greater than Lmin.")
+            return
+        parent = self.parent()
+        case = parent.analysis_case()
+        settings = {**self.pbm, **values}
+        case = {**case, "pbmsetting": settings}
+        index = parent.model.currentData()
+        dialog = ComparisonDialog(case, self, model_index=index)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def accept(self):
+        values = self.read_inputs(self.mesh_fields + self.optimizer_fields)
+        if values is None:
+            return
         if values["Lmax"] <= values["Lmin"]:
             self.error.setText("Lmax must be greater than Lmin.")
             self.inputs["Lmax"].setFocus()
@@ -127,6 +169,7 @@ class AdvancedSettings(QDialog):
 
 class EstimationJob(QThread):
     message = Signal(str)
+    generation = Signal(int, int, float, float)
     completed = Signal(object, object)
     failed = Signal(str)
 
@@ -140,8 +183,7 @@ class EstimationJob(QThread):
         case = self.case
         cancelled = self.cancel_requested.is_set
         try:
-            settings = case.get("pbmsetting")
-            settings = settings if isinstance(settings, dict) else {}
+            settings = effective_pe_pbm(case)
             self.message.emit(f"Solver · {pbm_backend_label(settings)}")
             objective = FitObjective(case["ExpData"], case["ProcInf"], case["Solubility"],
                                      settings, self.weights, self.terms, cancelled=cancelled)
@@ -151,12 +193,17 @@ class EstimationJob(QThread):
                 try:
                     results[index] = fit_model(case["ModelParameter"][index], objective,
                                                cancelled=cancelled, progress=self.message.emit,
+                                               generation_progress=partial(self.generation.emit, index),
                                                **self.limits)
                 except (ValueError, RuntimeError, TimeoutError, FloatingPointError) as error:
                     errors[index] = str(error)
                     self.message.emit(f"Model {index + 1} failed: {error}")
                 else:
                     self.message.emit(f"Model {index + 1} finished · WMSE {results[index].ssr:.5g}")
+                    fit = results[index]
+                    self.message.emit(
+                        f"Model {index + 1} · 95% parameter CIs ready" if fit.intervals is not None else
+                        f"Model {index + 1} · CIs unavailable · {fit.uncertainty_error}")
             if cancelled():
                 raise InterruptedError("Parameter estimation stopped.")
         except InterruptedError:
@@ -167,12 +214,67 @@ class EstimationJob(QThread):
             self.completed.emit(results, errors)
 
 
+class OptimizationProgress(QWidget):
+    def __init__(self, models):
+        super().__init__()
+        self.models = models
+        self.figure = Figure(layout="constrained")
+        self.view = FigureCanvasQTAgg(self.figure)
+        self.view.setMinimumHeight(180)
+        self.axes = self.figure.add_subplot()
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.view, 1)
+        layout.addWidget(self.note)
+        self.clear()
+
+    def clear(self):
+        self.series = {}
+        self.axes.clear()
+        self.axes.set(xlabel="Generation", ylabel="WMSE")
+        self.axes.xaxis.get_major_locator().set_params(integer=True)
+        self.axes.grid(alpha=.22)
+        self.view.draw_idle()
+        self.note.setText("Generation data appears during differential evolution.")
+
+    def append(self, model, generation, mean, best):
+        if model not in self.series:
+            label = display_name(self.models[model], f"Model {model + 1}")
+            mean_line, = self.axes.plot([], [], "o-", markersize=3, label=f"{label} · mean")
+            best_line, = self.axes.plot([], [], "o--", markersize=3, color=mean_line.get_color(),
+                                        label=f"{label} · best")
+            self.series[model] = mean_line, best_line, [], [], []
+            self.axes.legend(fontsize="small", ncols=2)
+            self.note.setText("Mean and best weighted mean squared error (WMSE) per model. "
+                              "The mean includes penalties for any rejected trials retained in the population.")
+        mean_line, best_line, generations, means, bests = self.series[model]
+        generations.append(generation)
+        means.append(mean)
+        bests.append(best)
+        mean_line.set_data(generations, means)
+        best_line.set_data(generations, bests)
+        self.axes.relim()
+        self.axes.autoscale_view()
+        self.view.draw_idle()
+
+    def restore(self, results):
+        self.clear()
+        for model, fit in results.items():
+            for generation, mean, best in fit.generation_history:
+                self.append(model, int(generation), mean, best)
+
+
 class ParameterEstimation(QDialog):
     def __init__(self, case, parent=None, *, workers=1):
         super().__init__(parent)
+        from .uncertainty_dialog import IntervalView
+
         self.setWindowTitle("IMED | Parameter Estimation")
-        self.resize(820, 650)
-        self.case = case
+        self.resize(1040, 760)
+        history(case)
+        self.case = dict(case)
         self.workers = workers
         self.job = None
         self.fitted_models = {}
@@ -185,34 +287,77 @@ class ParameterEstimation(QDialog):
 
         self.model = QComboBox()
         self.model.addItem("All models", None)
-        for index, _ in enumerate(case["ModelParameter"]):
-            self.model.addItem(f"Model {index + 1}", index)
-        saved = case.get("objweightfactor")
+        for index, model in enumerate(case["ModelParameter"]):
+            self.model.addItem(display_name(model, f"Model {index + 1}"), index)
+        saved = case.get(PE_WEIGHTS_KEY, case.get("objweightfactor"))
         saved = saved if isinstance(saved, dict) else {}
         self.weights = []
         self.terms = QComboBox()
         self.terms.addItems(["CSD", "D10 D50 D90"])
-        if saved.get("Terms", "CSD") != "CSD":
+        if saved.get("Terms") in {value for _, value in SIZE_SAMPLE_OPTIONS}:
             self.terms.setCurrentIndex(1)
+        self.size_samples = QComboBox()
+        for label, value in SIZE_SAMPLE_OPTIONS:
+            self.size_samples.addItem(label, value)
+        if saved.get("Terms") == TREND_SIZE_TERM:
+            self.size_samples.setCurrentIndex(1)
+        self.size_samples.setEnabled(self.terms.currentText() != "CSD")
         form = QFormLayout()
         form.addRow("Model", self.model)
         for index, label in enumerate(("Count weight", "Concentration weight", "Size weight"), 1):
             weight = QDoubleSpinBox()
             weight.setRange(0, 10000)
             weight.setDecimals(8)
-            weight.setValue(float(saved.get(f"W{index}", int(index == 2))))
+            value = saved.get(f"W{index}", WEIGHT_DEFAULTS[f"W{index}"])
+            try:
+                weight.setValue(float(value))
+            except (ValueError, TypeError):
+                weight.setValue(WEIGHT_DEFAULTS[f"W{index}"])
             self.weights.append(weight)
             form.addRow(label, weight)
         form.addRow("Size terms", self.terms)
+        form.addRow("Size samples", self.size_samples)
         self.advanced_button = QPushButton("Advanced Settings")
         self.advanced_button.clicked.connect(self.edit_settings)
         form.addRow(self.advanced_button)
+        self.save_case_button = QPushButton("Save PE case…")
+        self.save_case_button.setToolTip("Save experiments, model definitions, current PE settings, and completed fits.")
+        self.save_case_button.clicked.connect(self.save_pe_case)
+        self.save_settings_button = QPushButton("Save PE settings…")
+        self.load_settings_button = QPushButton("Load PE settings…")
+        self.save_settings_button.clicked.connect(self.save_pe_settings)
+        self.load_settings_button.clicked.connect(self.load_pe_settings)
+        settings_buttons = QHBoxLayout()
+        settings_buttons.addWidget(self.save_case_button)
+        settings_buttons.addWidget(self.save_settings_button)
+        settings_buttons.addWidget(self.load_settings_button)
+        form.addRow(settings_buttons)
+        self.uncertainty_button = QPushButton("Calculate parameter CIs")
+        self.uncertainty_button.clicked.connect(self.show_uncertainty)
+        form.addRow(self.uncertainty_button)
 
-        self.summary = table(("Model", "Parameters", "WMSE", "AIC", "Fit status"))
+        self.summary = table(("Model", "Parameters", "WMSE", "AIC", "Fit status", "95% CIs"))
+        self.summary.setMaximumHeight(120)
         self.progress_log = QPlainTextEdit()
         self.progress_log.setReadOnly(True)
         self.progress_log.setMaximumBlockCount(250)
         self.progress_log.setMinimumHeight(110)
+        self.interval_view = IntervalView()
+        self.optimization_progress = OptimizationProgress(case["ModelParameter"])
+        chart_group = QGroupBox("Generation progress")
+        QVBoxLayout(chart_group).addWidget(self.optimization_progress)
+        log_group = QGroupBox("Optimization log")
+        QVBoxLayout(log_group).addWidget(self.progress_log)
+        self.progress_panel = QSplitter(Qt.Orientation.Horizontal)
+        self.progress_panel.addWidget(chart_group)
+        self.progress_panel.addWidget(log_group)
+        self.progress_panel.setChildrenCollapsible(False)
+        self.progress_panel.setHandleWidth(8)
+        self.progress_panel.setSizes([580, 400])
+        self.output_tabs = QTabWidget()
+        self.output_tabs.addTab(self.interval_view, "Parameters and covariance")
+        self.output_tabs.addTab(self.progress_panel, "Optimization progress")
+        self.output_tabs.setCurrentWidget(self.progress_panel)
         self.status = QLabel(f"{len(case['ExpData'])} experiments loaded.")
         self.status.setWordWrap(True)
         self.run_button = QPushButton("Run")
@@ -234,21 +379,96 @@ class ParameterEstimation(QDialog):
             actions.addWidget(widget)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(self.summary, 1)
-        layout.addWidget(QLabel("Optimization log"))
-        layout.addWidget(self.progress_log, 1)
+        layout.addWidget(self.summary)
+        layout.addWidget(self.output_tabs, 1)
         layout.addWidget(self.status)
         layout.addLayout(actions)
         for control in self.weights:
             control.valueChanged.connect(self.objective_changed)
         self.terms.currentIndexChanged.connect(self.objective_changed)
+        self.size_samples.currentIndexChanged.connect(self.objective_changed)
+        self.summary.currentCellChanged.connect(self.update_interval_view)
+        restored = {}
+        for index in range(len(case["ModelParameter"])):
+            step = latest_pe_step(case, index)
+            if step is not None:
+                restored[index] = unpack_fit(step["result"])
+        if restored:
+            self.show_results(restored, {}, remember=False)
+            self.save_button.setEnabled(True)
+            self.details_button.setEnabled(True)
+
+    def save_pe_case(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save PE case", "imed_pe.imed.json", NATIVE_FILTER)
+        if not path:
+            return
+        try:
+            case = {**self.case, **self.current_pe_settings()}
+            # Results remain in the workflow history until applied to the model.
+            destination = save_native_case(path, case)
+        except (OSError, TypeError, ValueError) as error:
+            self.status.setText(str(error))
+        else:
+            self.status.setText(f"Saved PE case {destination.name}. Reopen it from IMED.")
+
+    def current_pe_settings(self):
+        return {PYFIT_SETTINGS_KEY: dict(self.optimizer),
+                PE_WEIGHTS_KEY: {**{f"W{i}": control.value()
+                                    for i, control in enumerate(self.weights, 1)},
+                                 "Terms": self.size_term()}}
+
+    def save_pe_settings(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save PE settings", "imed_pe.json", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            pbm = effective_pe_pbm(self.case)
+            for key in ("N", "MaxSteps"):
+                if key in pbm and float(pbm[key]).is_integer():
+                    pbm[key] = int(pbm[key])
+            if "UseArchivedTolerances" in pbm:
+                pbm["UseArchivedTolerances"] = bool(pbm["UseArchivedTolerances"])
+            settings = self.current_pe_settings()
+            optimizer = settings[PYFIT_SETTINGS_KEY]
+            for key, default in PYFIT_DEFAULTS.items():
+                if type(default) is int and float(optimizer[key]).is_integer():
+                    optimizer[key] = int(optimizer[key])
+            data = pe_file(pbm, optimizer, settings[PE_WEIGHTS_KEY])
+            read_pe_file(data)
+            atomic_json(Path(path), data)
+        except (OSError, TypeError, ValueError) as error:
+            self.status.setText(str(error))
+        else:
+            self.status.setText(f"Saved PE settings to {Path(path).name}.")
+
+    def load_pe_settings(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load PE settings", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            pbm, optimizer, weights = read_pe_file(json.loads(Path(path).read_text(encoding="utf-8")))
+        except (OSError, ValueError) as error:
+            self.status.setText(str(error))
+            return
+        backend = effective_pe_pbm(self.case).get("Numerics", "conservative")
+        settings = pe_mesh(pbm_for_pe({"Numerics": backend, **pbm}))
+        self.optimizer = optimizer
+        loaded = {PE_PBM_KEY: settings, PYFIT_SETTINGS_KEY: optimizer, PE_WEIGHTS_KEY: weights}
+        self.saved_settings.update(loaded)
+        self.case.update(loaded)
+        for index, control in enumerate(self.weights, 1):
+            control.setValue(weights[f"W{index}"])
+        term = weights["Terms"]
+        self.terms.setCurrentIndex(int(term != "CSD"))
+        self.size_samples.setCurrentIndex(self.size_samples.findData(term) if term != "CSD" else 0)
+        self.objective_changed()
+        self.status.setText(f"Loaded PE settings from {Path(path).name}.")
 
     def edit_settings(self):
-        settings = self.case.get("pbmsetting")
-        dialog = AdvancedSettings(settings if isinstance(settings, dict) else {}, self.optimizer, self)
+        dialog = AdvancedSettings(effective_pe_pbm(self.case), self.optimizer, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.optimizer = dialog.optimizer
-            self.saved_settings = {"pbmsetting": dialog.pbm, PYFIT_SETTINGS_KEY: dialog.optimizer}
+            self.saved_settings.update({PE_PBM_KEY: pe_mesh(dialog.pbm), PYFIT_SETTINGS_KEY: dialog.optimizer})
             self.case = {**self.case, **self.saved_settings}
             self.clear_results()
             self.status.setText("Advanced settings saved. Run parameter estimation to use them.")
@@ -257,29 +477,43 @@ class ParameterEstimation(QDialog):
     def clear_results(self):
         self.results = {}
         self.summary.setRowCount(0)
+        self.interval_view.clear_result()
+        self.optimization_progress.clear()
         self.save_button.setEnabled(False)
         self.details_button.setEnabled(False)
 
     def objective_changed(self):
+        self.size_samples.setEnabled(self.terms.currentText() != "CSD")
         self.clear_results()
         self.progress_log.clear()
+        self.output_tabs.setCurrentWidget(self.progress_panel)
         self.status.setText("Objective settings changed. Click Run to calculate a new objective value.")
+
+    def size_term(self):
+        if self.terms.currentText() == "CSD":
+            return "CSD"
+        return self.size_samples.currentData()
 
     def start_fit(self):
         weights = [control.value() for control in self.weights]
         if not any(weights):
             self.status.setText("Set at least one positive objective weight before running.")
             return
-        terms = self.terms.currentText()
+        terms = self.size_term()
         choice = self.model.currentData()
         models = range(len(self.case["ModelParameter"])) if choice is None else [choice]
         self.clear_results()
         self.progress_log.clear()
+        self.output_tabs.setCurrentWidget(self.progress_panel)
         self.run_button.setEnabled(False)
         self.advanced_button.setEnabled(False)
+        self.save_case_button.setEnabled(False)
+        self.save_settings_button.setEnabled(False)
+        self.load_settings_button.setEnabled(False)
+        self.uncertainty_button.setEnabled(False)
         self.close_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        for control in (self.model, self.terms, *self.weights):
+        for control in (self.model, self.terms, self.size_samples, *self.weights):
             control.setEnabled(False)
         self.log_progress("Preparing parameter estimation…")
         count, concentration, size = weights
@@ -288,6 +522,7 @@ class ParameterEstimation(QDialog):
         limits = {**self.optimizer, "workers": self.workers}
         self.job = EstimationJob(self.case, models, weights, terms, limits, self)
         self.job.message.connect(self.log_progress)
+        self.job.generation.connect(self.optimization_progress.append)
         self.job.completed.connect(self.show_results)
         self.job.failed.connect(self.log_progress)
         self.job.finished.connect(self.finish_fit)
@@ -314,28 +549,78 @@ class ParameterEstimation(QDialog):
         self.job = None
         self.run_button.setEnabled(True)
         self.advanced_button.setEnabled(True)
+        self.save_case_button.setEnabled(True)
+        self.save_settings_button.setEnabled(True)
+        self.load_settings_button.setEnabled(True)
+        self.uncertainty_button.setEnabled(True)
         self.close_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         for control in (self.model, self.terms, *self.weights):
             control.setEnabled(True)
+        self.size_samples.setEnabled(self.terms.currentText() != "CSD")
         if stopped:
             self.clear_results()
             self.log_progress("Parameter estimation stopped.")
         self.save_button.setEnabled(bool(self.results))
         self.details_button.setEnabled(bool(self.results))
 
-    def show_results(self, results, errors):
+    def show_results(self, results, errors, *, remember=True):
         self.results = results
+        if not remember:
+            self.optimization_progress.restore(results)
+        weights = {**{f"W{i}": control.value() for i, control in enumerate(self.weights, 1)},
+                   "Terms": self.size_term()}
+        if remember:
+            self.saved_settings[PE_WEIGHTS_KEY] = weights
+            self.case[PE_WEIGHTS_KEY] = weights
+        if remember and results:
+            for index, fit in results.items():
+                record_step(self.case, "parameter_estimation", pack_fit(fit), model_index=index,
+                            context=pe_signatures(self.case, index)[0])
         rows = [(index + 1, len(fit.parameters), fit.ssr, fit.aic,
-                 "Converged" if fit.converged else "Evaluation limit reached")
+                 "Converged" if fit.converged else "Evaluation limit reached",
+                 "Ready" if fit.intervals is not None else fit.uncertainty_error)
                 for index, fit in results.items()]
-        rows.extend((index + 1, "—", "—", "—", message) for index, message in errors.items())
+        rows.extend((index + 1, "—", "—", "—", message, "—") for index, message in errors.items())
         fill_table(self.summary, sorted(rows))
         if self.results:
             first_model = min(self.results) + 1
             first_row = sorted(row[0] for row in rows).index(first_model)
             self.summary.setCurrentCell(first_row, 0)
         self.log_progress(f"Fitted {len(results)} model(s). {len(errors)} model(s) failed.")
+        self.update_interval_view()
+
+    def update_interval_view(self):
+        self.interval_view.clear_result()
+        item = self.summary.item(self.summary.currentRow(), 0)
+        if item is not None:
+            fit = self.results.get(int(item.text()) - 1)
+            if fit is not None and fit.intervals is not None:
+                self.interval_view.show_result(fit.intervals)
+
+    def show_uncertainty(self):
+        from .uncertainty_dialog import ParameterUncertainty
+
+        index = self.model.currentData()
+        item = self.summary.item(self.summary.currentRow(), 0)
+        if index is None:
+            index = int(item.text()) - 1 if item is not None else 0
+        case = self.analysis_case()
+        fit = self.results.get(index)
+        dialog = ParameterUncertainty(case, self, model_index=index,
+                                       initial_result=fit.intervals if fit is not None else None)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def analysis_case(self):
+        models = list(self.case["ModelParameter"])
+        for number, fit in self.results.items():
+            models[number] = {**models[number], "para": fit.parameters.copy()}
+        case = {**self.case, "ModelParameter": models, "pbmsetting": effective_pe_pbm(self.case),
+                "objweightfactor": {**{f"W{i}": control.value()
+                                      for i, control in enumerate(self.weights, 1)},
+                                    "Terms": self.size_term()}}
+        return case
 
     def show_parameters(self):
         item = self.summary.item(self.summary.currentRow(), 0)
@@ -346,15 +631,30 @@ class ParameterEstimation(QDialog):
         if fit is None:
             self.status.setText("Select a model with a completed fit.")
             return
-        active = self.case["ModelParameter"][index]["paraset"][:, 0] == 1
+        active = np.asarray(self.case["ModelParameter"][index]["paraset"])[:, 0] == 1
         names = [name for (name, _), enabled in zip(PARAMETERS, active) if enabled]
         details = QDialog(self)
         details.setWindowTitle(f"Model {index + 1} | Parameter Details")
-        details.resize(470, 320)
+        details.resize(820, 620)
         layout = QVBoxLayout(details)
         values = table(("Estimated parameter", "Value"))
         fill_table(values, list(zip(names, fit.parameters)))
-        layout.addWidget(values)
+        if fit.intervals is not None:
+            from .uncertainty_dialog import IntervalView
+
+            view = IntervalView()
+            view.show_result(fit.intervals)
+            view.addTab(values, "All fitted values")
+            layout.addWidget(view)
+        else:
+            layout.addWidget(values)
+            note = QLabel(f"Confidence intervals unavailable. {fit.uncertainty_error}")
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        if not fit.converged:
+            note = QLabel("The fit reached its evaluation limit. Treat its local intervals as provisional.")
+            note.setWordWrap(True)
+            layout.addWidget(note)
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.rejected.connect(details.reject)
         layout.addWidget(close)
@@ -363,15 +663,12 @@ class ParameterEstimation(QDialog):
 
     def apply_fit(self):
         for index, fit in self.results.items():
-            model = {"paraset": self.case["ModelParameter"][index]["paraset"]}
+            model = {key: value for key, value in self.case["ModelParameter"][index].items()
+                     if key in ("Name", "paraset")}
             model.update(para=fit.parameters.reshape(1, -1), covmat=fit.covariance,
                          resnorm=float(fit.residuals @ fit.residuals),
                          resid=fit.residuals, jacobian=fit.jacobian, nvars=len(fit.parameters),
                          SSR=fit.ssr, AICVector=fit.aic)
             self.fitted_models[index] = model
-        self.saved_settings[PYFIT_SETTINGS_KEY] = dict(self.optimizer)
-        self.saved_settings["objweightfactor"] = {
-            **{f"W{index}": control.value() for index, control in enumerate(self.weights, 1)},
-            "Terms": self.terms.currentText(),
-        }
+        self.saved_settings.update(self.current_pe_settings())
         self.accept()

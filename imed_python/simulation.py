@@ -10,8 +10,12 @@ from PySide6.QtWidgets import (
 )
 
 from .distribution import percent_density, volume_distribution
+from .simulated_profile import editable_groups, prediction_inputs, remember_active_doe
+from .simulated_profile_dialog import SimulatedProfileDialog
+from .native_case import CASE_FILTER
 from .solver import load_case, model_parameters, pbm_backend_label, simulate
 from .solver_choice import SolverChoice
+from .session import display_name, history, record_step, signature
 
 
 class Simulation(QThread):
@@ -19,12 +23,13 @@ class Simulation(QThread):
     failed = Signal(str)
     message = Signal(str)
 
-    def __init__(self, case, model, experiment, parent, numerics=None):
+    def __init__(self, case, model, experiment, parent, numerics=None, *, simulated_profile=None):
         super().__init__(parent)
         self.case = case
         self.model = model
         self.experiment = experiment
         self.numerics = numerics
+        self.simulated_profile = simulated_profile
         self.backend = ""
 
     def run(self):
@@ -37,8 +42,8 @@ class Simulation(QThread):
             self.backend = pbm_backend_label(settings)
             self.message.emit(f"Simulating with {self.backend}…")
             parameters = model_parameters(case["ModelParameter"][self.model])
-            result = simulate(parameters, case["ExpData"][index], case["ProcInf"][index],
-                              case["Solubility"], settings)
+            experiment, process = prediction_inputs(case, index, self.simulated_profile)
+            result = simulate(parameters, experiment, process, case["Solubility"], settings)
         except Exception as error:
             self.failed.emit(str(error))
         else:
@@ -46,13 +51,16 @@ class Simulation(QThread):
 
 
 class Window(QMainWindow):
+    workflow_changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("IMED | PBM simulation")
         self.resize(950, 650)
         self.case = None
         self.worker = None
-        self.open_button = QPushButton("Import MATLAB (.mat)")
+        self.last_profile = None
+        self.open_button = QPushButton("Open IMED case")
         self.open_button.clicked.connect(self.choose_file)
         self.model = QComboBox()
         self.experiment = QComboBox()
@@ -60,6 +68,15 @@ class Window(QMainWindow):
         self.run_button = QPushButton("Simulate")
         self.run_button.clicked.connect(self.run_simulation)
         self.run_button.setEnabled(False)
+        self.profile_button = QPushButton("Simulate custom profile…")
+        self.profile_button.clicked.connect(self.run_custom_simulation)
+        self.profile_button.setEnabled(False)
+        self.comparison_button = QPushButton("Experiment comparison")
+        self.comparison_button.setEnabled(False)
+        self.comparison_button.clicked.connect(lambda: self.show_evaluation(False))
+        self.size_summary_button = QPushButton("Size summary")
+        self.size_summary_button.setEnabled(False)
+        self.size_summary_button.clicked.connect(lambda: self.show_evaluation(True))
         self.status = QLabel("Open a saved IMED case to get started.")
         self.status.setWordWrap(True)
         self.tabs = QTabWidget()
@@ -86,11 +103,19 @@ class Window(QMainWindow):
         layout = QVBoxLayout(body)
         layout.addLayout(controls)
         layout.addWidget(self.status)
+        evaluation_buttons = QHBoxLayout()
+        evaluation_buttons.addWidget(self.profile_button)
+        evaluation_buttons.addWidget(self.comparison_button)
+        evaluation_buttons.addWidget(self.size_summary_button)
+        layout.addLayout(evaluation_buttons)
         layout.addWidget(self.tabs)
         self.setCentralWidget(body)
+        self.model.currentIndexChanged.connect(self.restore_result)
+        self.experiment.currentIndexChanged.connect(self.restore_result)
+        self.numerics.currentIndexChanged.connect(self.restore_result)
 
     def choose_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import MATLAB IMED case", "", "MAT files (*.mat)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open IMED case", "", CASE_FILTER)
         if path:
             self.open_case(path)
 
@@ -104,22 +129,40 @@ class Window(QMainWindow):
 
     def set_case(self, case, message):
         self.case = case
+        history(case)
         for combo, key in ((self.model, "ModelParameter"), (self.experiment, "ExpData")):
             combo.clear()
-            combo.addItems(item.get("Name", str(index + 1)) for index, item in enumerate(case[key]))
+            combo.addItems(display_name(item, str(index + 1)) for index, item in enumerate(case[key]))
         self.numerics.load_settings(case.get("pbmsetting"))
+        selection = case.get("PythonWorkflow", {}).get("simulation_selection", {})
+        if selection:
+            self.model.setCurrentIndex(min(int(selection["model_index"]), self.model.count() - 1))
+            self.experiment.setCurrentIndex(min(int(selection["experiment_index"]), self.experiment.count() - 1))
+            self.numerics.load_settings(selection.get("pbmsetting"))
         self.run_button.setEnabled(self.model.count() > 0 and self.experiment.count() > 0)
+        self.comparison_button.setEnabled(self.run_button.isEnabled())
+        self.size_summary_button.setEnabled(self.run_button.isEnabled())
         self.status.setText(message)
+        self.restore_result()
 
-    def run_simulation(self):
+    def run_custom_simulation(self):
+        dialog = SimulatedProfileDialog(self.case, self.model.currentIndex(), self.experiment.currentIndex(),
+                                        self, previous=self.last_profile)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.run_simulation(simulated_profile=dialog.result_profile)
+        dialog.deleteLater()
+
+    def run_simulation(self, *, simulated_profile=None):
         settings = self.numerics.apply_settings(self.case.get("pbmsetting"))
         case = {**self.case, "pbmsetting": settings}
-        self.worker = Simulation(case, self.model.currentIndex(), self.experiment.currentIndex(), self)
+        self.worker = Simulation(case, self.model.currentIndex(), self.experiment.currentIndex(), self,
+                                 simulated_profile=simulated_profile)
         self.worker.result.connect(self.show_result)
         self.worker.failed.connect(self.status.setText)
         self.worker.message.connect(self.status.setText)
         self.worker.finished.connect(self.finish_simulation)
-        for widget in (self.open_button, self.run_button, self.experiment, self.model, self.numerics):
+        for widget in (self.open_button, self.run_button, self.experiment, self.model, self.numerics,
+                       self.comparison_button, self.size_summary_button, self.profile_button):
             widget.setEnabled(False)
         self.status.setText("Preparing the simulation…")
         self.worker.start()
@@ -127,8 +170,19 @@ class Window(QMainWindow):
     def finish_simulation(self):
         self.worker.deleteLater()
         self.worker = None
-        for widget in (self.open_button, self.run_button, self.experiment, self.model, self.numerics):
+        for widget in (self.open_button, self.run_button, self.experiment, self.model, self.numerics,
+                       self.comparison_button, self.size_summary_button):
             widget.setEnabled(True)
+        self.update_profile_button()
+
+    def show_evaluation(self, summary):
+        from .evaluation_dialog import EvaluationDialog
+
+        case = {**self.case, "pbmsetting": self.numerics.apply_settings(self.case.get("pbmsetting"))}
+        dialog = EvaluationDialog(case, self.model.currentIndex(), self, summary=summary)
+        dialog.exec()
+        dialog.deleteLater()
+        self.workflow_changed.emit()
 
     def closeEvent(self, event):
         if self.worker is not None:
@@ -136,13 +190,49 @@ class Window(QMainWindow):
         else:
             super().closeEvent(event)
 
-    def show_result(self, outputs):
+    def restore_result(self):
+        if (self.case is None or self.worker is not None or self.model.currentIndex() < 0
+                or self.experiment.currentIndex() < 0):
+            self.update_profile_button()
+            return
+        case = {**self.case, "pbmsetting": self.numerics.apply_settings(self.case.get("pbmsetting"))}
+        context = signature(case, self.model.currentIndex(), include_weights=False)
+        self.last_profile = None
+        for step in reversed(history(self.case)):
+            if (step["action"] == "simulation" and step["signature"] == context
+                    and int(step["model_index"]) == self.model.currentIndex()
+                    and int(step["result"]["experiment_index"]) == self.experiment.currentIndex()):
+                result = step["result"]
+                self.show_result(tuple(np.asarray(result[key]) for key in
+                                       ("count", "concentration", "csd")), remember=False,
+                                 simulated_profile=result.get("simulated_profile"))
+                label = self.last_profile["name"] if self.last_profile else "simulation"
+                self.status.setText(f"Restored {label} · completed {step['completed_at']}.")
+                self.update_profile_button()
+                return
+        for view in (*self.plots, self.percentile_plot):
+            view.setChart(QChart())
+        self.percentile_summary.setText("Run a simulation to calculate D10, D50, and D90.")
+        self.status.setText("Choose a model and experiment, then run the forward simulation.")
+        self.update_profile_button()
+
+    def update_profile_button(self):
+        valid = (self.case is not None and self.worker is None
+                 and self.model.currentIndex() >= 0 and self.experiment.currentIndex() >= 0)
+        groups = editable_groups(self.case, self.model.currentIndex(), self.last_profile) if valid else set()
+        self.profile_button.setEnabled(bool(groups))
+        self.profile_button.setToolTip("" if groups else "No editable DoE factors were found for this case and model.")
+
+    def show_result(self, outputs, *, remember=True, simulated_profile=None):
         index = self.experiment.currentIndex()
-        experiment = self.case["ExpData"][index]
+        if self.worker is not None:
+            simulated_profile = self.worker.simulated_profile
+        self.last_profile = simulated_profile
+        experiment, process = prediction_inputs(self.case, index, simulated_profile)
         settings = self.case.get("pbmsetting")
         count, concentration, csd = outputs
         volume, predicted = volume_distribution(
-            csd, self.case["ProcInf"][index], settings if isinstance(settings, dict) else {})
+            csd, process, settings if isinstance(settings, dict) else {})
         axes = (("Time (s)", "Simulated particles per liquid volume"),
                 ("Time (s)", "Solute mass fraction (g/g solution)"),
                 ("Size (µm)", "Volume-based density (%/µm)"))
@@ -181,7 +271,22 @@ class Window(QMainWindow):
                        ("Size (µm)", "Cumulative volume (%)"), percentiles=True)
         self.percentile_summary.setText("\n".join(summary))
         backend = self.worker.backend if self.worker is not None else self.numerics.currentText()
-        self.status.setText(f"Simulation complete with {backend}.")
+        label = simulated_profile["name"] if simulated_profile else "Simulation"
+        self.status.setText(f"{label} complete with {backend}.")
+        if remember:
+            case = self.worker.case if self.worker is not None else self.case
+            self.case["PythonWorkflow"]["simulation_selection"] = {
+                "model_index": self.model.currentIndex(), "experiment_index": index,
+                "pbmsetting": case.get("pbmsetting", {})}
+            result = {"experiment_index": index, "count": count, "concentration": concentration,
+                      "csd": csd, "backend": backend, "pbmsetting": case.get("pbmsetting", {})}
+            if simulated_profile:
+                result["simulated_profile"] = simulated_profile
+                remember_active_doe(self.case)
+            record_step(self.case, "simulation", result,
+                        model_index=self.model.currentIndex(),
+                        context=signature(case, self.model.currentIndex(), include_weights=False))
+            self.workflow_changed.emit()
 
     @staticmethod
     def measured_series(values):

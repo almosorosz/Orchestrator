@@ -45,6 +45,12 @@ Before correction, five of the nine 160-cell runs failed. Across the three full-
 - Prevented negative reconstructed density at the outflow face. The solver also honors supplied integration tolerances.
 - Added a check for signed feed profiles that empty the liquid inventory. Some bundled experiments contain return segments that trigger this diagnostic. Their feed records were left as supplied.
 
+## Imported cases and configurable QMOM
+
+The configurable QMOM comparison uses the same finite-volume seed conversion as SciPy and JAX. It places each seed bin's count at a volume-equivalent size to preserve both the initial particle count and the seed mass. This avoids integrating a measured volume distribution divided by length cubed all the way to zero, which can diverge for data with a positive near-zero slope. The independent analytical reference used for the nine synthetic benchmarks still uses its prescribed continuum seed.
+
+QMOM computes collision and growth terms using up to three quadrature nodes reconstructed from six moments. Its node-based percentiles should not be used as a reference for percentiles from the full PBM distribution. When an integration trial leaves the size domain or fails moment inversion, the solver retries with a smaller maximum time step. If it still cannot finish within its trial and time budgets, the comparison reports the reference as incomplete. Widening the mesh can check sensitivity to the domain but does not resolve all quadrature failures.
+
 ## Reproduce
 
 From the workspace root, run:

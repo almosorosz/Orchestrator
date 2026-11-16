@@ -105,6 +105,7 @@ class Campaign:
     experiments: tuple[ExperimentDefinition, ...]
     campaign_id: str = field(default_factory=lambda: uuid4().hex)
     monitor_device_ids: tuple[str, ...] = ()
+    doe_factors: tuple[str, ...] | None = None
 
 
 @dataclass

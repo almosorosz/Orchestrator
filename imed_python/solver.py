@@ -1,5 +1,6 @@
 """Headless IMED parameter-estimation forward model."""
 from pathlib import Path
+from typing import BinaryIO
 from time import monotonic
 
 import numpy as np
@@ -7,7 +8,7 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 from scipy.io import loadmat
 
-from .distribution import cell_volumes
+from .distribution import cell_volumes, seed_number_density
 
 
 PBM_MODES = {
@@ -34,19 +35,32 @@ def pbm_backend_label(settings):
     return PBM_MODES[mode]
 
 
-def read_model(path: str | Path):
+def read_model(path: str | Path | BinaryIO, *, allow_settings_only=False):
+    if isinstance(path, (str, Path)) and Path(path).suffix.lower() == ".json":
+        from .native_case import read_native_case
+
+        return read_native_case(path)
     keys = ("ExpData", "ProcInf", "Solubility", "ModelParameter", "pbmsetting",
             "MDIteration", "MDsimulation", "PPsimulation", "summaryTable",
-            "objweightfactor", "pyfitsettings")
+            "objweightfactor", "pyfitsettings", "pepbmsettings", "peweights", "PythonWorkflow")
     try:
         data = loadmat(path, variable_names=keys, simplify_cells=True)
     except NotImplementedError as error:
         raise ValueError("Export the IMED case from MATLAB with -v7 to import it here.") from error
-    if not any(key in data for key in keys[:4]):
+    if not allow_settings_only and not any(key in data for key in keys[:4]):
         raise ValueError("The MAT file does not contain an IMED model or experiment data")
     for key in ("ExpData", "ProcInf", "ModelParameter"):
-        if isinstance(data.get(key), dict):
-            data[key] = [data[key]]
+        value = data.get(key)
+        if isinstance(value, dict):
+            data[key] = [value]
+        elif isinstance(value, np.ndarray) and not value.size:
+            data[key] = []
+    if isinstance(data.get("Solubility"), np.ndarray) and not data["Solubility"].size:
+        data.pop("Solubility")
+    if "PythonWorkflow" in data:
+        from .session import history
+
+        history(data)
     return data
 
 
@@ -270,16 +284,7 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
     if end <= 0 or mass <= 0 or not 0 <= initial_conc < 1:
         raise ValueError("Expected positive duration and solvent mass and concentration in [0, 1)")
     check_liquid_inventory(flow_data, flow, end, mass)
-    seed = np.zeros(n)
-    if process["SeedMass"]:
-        frequency = profile(experiment["InitialCSDsData"])(bounds)
-        frequency = np.where(np.isfinite(frequency) & (frequency >= 0), frequency, 0)
-        number = np.r_[0, frequency[1:] / bounds[1:]**3]
-        seed = (number[:-1] + number[1:]) / 2
-        seed_mass = np.dot(volume * width, seed) * rho / 1e12
-        if seed_mass <= 0:
-            raise ValueError("Seed mass is positive but the initial CSD has no mass on the grid")
-        seed *= process["SeedMass"] / seed_mass
+    seed = seed_number_density(experiment, process, bounds)
 
     if agg[0] > 0:
         if matlab_pe:
@@ -414,8 +419,9 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
         state = integrate_matlab_ode45(rhs, time, initial, max_step=settings.get("MaxStep"),
                                       **tolerances)
     else:
+        atol = settings.get("AbsTol", 1e-6)
         solution = solve_ivp(rhs, (0, end), initial, t_eval=time,
-                             rtol=settings.get("RelTol", 1e-3), atol=settings.get("AbsTol", 1e-6),
+                             rtol=settings.get("RelTol", 1e-3), atol=atol,
                              max_step=settings.get("MaxStep", np.inf))
         if not solution.success:
             raise RuntimeError(f"IMED forward simulation failed. {solution.message}")
@@ -428,8 +434,14 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
     liquid_volume = mass * (solvent / rho_solvent + (1 - solvent) / rho_anti)
     density = state[:n]
     if not matlab_pe:
-        roundoff = 64 * np.finfo(density.dtype).eps * np.max(density, axis=0)
-        density = np.where((density < 0) & (density >= -roundoff), 0., density)
+        peak = np.maximum(np.max(density, axis=0), 0.)
+        roundoff = 64 * np.finfo(density.dtype).eps * peak
+        # Empty bins can accumulate a few absolute tolerances of error.
+        # Cap cleanup relative to the distribution so material negatives remain visible.
+        density_atol = np.broadcast_to(atol, (len(initial),))[:n, None]
+        tail_noise = np.minimum(8 * density_atol, 1e-8 * peak)
+        tolerance = np.maximum(roundoff, tail_noise)
+        density = np.where((density < 0) & (density >= -tolerance), 0., density)
     count = width @ density / liquid_volume
     outputs = (np.vstack((time, count)), np.vstack((time, ratio / (1 + ratio))),
                np.vstack((length, density[:, -1])))

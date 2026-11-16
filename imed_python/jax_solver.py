@@ -9,7 +9,7 @@ from diffrax import ClipStepSizeController, Event, ODETerm, PIDController, RESUL
 from jax.experimental import io_callback
 from scipy.interpolate import interp1d
 
-from .distribution import cell_volumes
+from .distribution import cell_volumes, seed_number_density
 from .solver import check_liquid_inventory
 
 # Match the precision used for the notebook comparisons.
@@ -310,17 +310,7 @@ def prepare_jax_case(parameters, experiment, process, solubility, settings):
     flow = interp1d(*feed, assume_sorted=True, fill_value="extrapolate")
     check_liquid_inventory(feed, flow, end, carrier)
 
-    seed = np.zeros(n)
-    if process["SeedMass"]:
-        seed_data = np.asarray(experiment["InitialCSDsData"], dtype=float)
-        frequency = interp1d(*seed_data, assume_sorted=True, fill_value="extrapolate")(edges)
-        frequency = np.where(np.isfinite(frequency) & (frequency >= 0), frequency, 0.)
-        number_at_edges = np.r_[0., frequency[1:] / edges[1:]**3]
-        seed = (number_at_edges[:-1] + number_at_edges[1:]) / 2
-        seed_mass = (volume * width) @ seed * properties[0] / 1e12
-        if seed_mass <= 0:
-            raise ValueError("The seed CSD has no volume on the mesh.")
-        seed *= process["SeedMass"] / seed_mass
+    seed = seed_number_density(experiment, process, edges)
     initial = np.r_[seed, initial_c / (1 - initial_c) * carrier, carrier,
                     process["SolvMass"] / carrier, 0., 0., 0.]
     relaxation_time = float(settings.get("EquilibriumRelaxationTime", 1.))

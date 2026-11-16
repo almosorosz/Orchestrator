@@ -1,12 +1,36 @@
 """Volume-weighted size distributions and percentiles used by IMED."""
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, interp1d
 
 
 def cell_volumes(edges, shape_factor):
     boundary_volumes = shape_factor * edges**3
     return (boundary_volumes[:-1] + boundary_volumes[1:]) / 2
+
+
+def seed_number_density(experiment, process, edges):
+    """Convert the measured volume CSD to the common finite-volume seed state."""
+    seed_mass = float(process["SeedMass"])
+    if seed_mass == 0:
+        return np.zeros(len(edges) - 1)
+    if not np.isfinite(seed_mass) or seed_mass < 0:
+        raise ValueError("The seed mass must be finite and nonnegative")
+    data = np.asarray(experiment["InitialCSDsData"], dtype=float)
+    if (data.ndim != 2 or data.shape[0] != 2 or data.shape[1] < 2
+            or not np.isfinite(data[0]).all() or np.any(np.diff(data[0]) <= 0)):
+        raise ValueError("The seed CSD requires at least two strictly increasing finite sizes")
+    frequency = interp1d(*data, fill_value="extrapolate", assume_sorted=True)(edges[1:])
+    frequency = np.where(np.isfinite(frequency) & (frequency >= 0), frequency, 0.)
+    # Preserve the PBM's lower-edge convention. Extending a measured volume
+    # CSD linearly to zero and integrating it over L**3 can give infinite count.
+    number_at_edges = np.r_[0., frequency / edges[1:]**3]
+    seed = (number_at_edges[:-1] + number_at_edges[1:]) / 2
+    volumes = cell_volumes(edges, process["ShapeFactor"])
+    represented_mass = np.dot(volumes * np.diff(edges), seed) * process["SolidDensity"] / 1e12
+    if not np.isfinite(represented_mass) or represented_mass <= 0:
+        raise ValueError("The seed CSD has no finite positive volume on the mesh")
+    return seed * (seed_mass / represented_mass)
 
 
 def volume_distribution(csd, process, settings):

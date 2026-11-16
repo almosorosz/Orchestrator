@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from .control_panel import fill_table, table
 from .design import discrimination_score, d_optimal_log_score, optimize_recipe, parameter_samples
 from .solver import pbm_backend_label
+from .session import latest_step, record_step, signature
 
 
 def fitted_models(case):
@@ -134,6 +135,37 @@ class DesignDialog(QDialog):
                                    self.close_button)))
         self.template.currentIndexChanged.connect(self.load_template)
         self.load_template(0)
+        action = "d_optimal_design" if optimal else "model_discrimination"
+        context = "|".join(signature(case, index) for index, _ in self.models)
+        step = latest_step(case, action, context=context)
+        if step is not None:
+            saved = step["result"]
+            request = saved.get("request", {})
+            self.template.setCurrentIndex(int(request.get("template_index", 0)))
+            self.model.setCurrentIndex(int(request.get("model_index", 0)))
+            self.iterations.setValue(int(request.get("iterations", 5)))
+            self.samples.setValue(int(request.get("samples", 8)))
+            position = self.terms.findText(str(request.get("terms", "CSD")))
+            if position >= 0:
+                self.terms.setCurrentIndex(position)
+            for control, weight in zip(self.weights, np.asarray(request.get("weights", [])).reshape(-1)):
+                if optimal:
+                    control.setChecked(bool(weight))
+                else:
+                    control.setValue(float(weight))
+            conditions = request.get("conditions", {})
+            for key, control in (("batch", self.batch), ("concentration", self.concentration),
+                                 ("final_anti", self.final_anti)):
+                if key in conditions:
+                    control.setValue(float(conditions[key]))
+            for key, controls in (("temperature", self.temperatures), ("temperature_rates", self.temp_rates),
+                                  ("liquid_masses", self.masses), ("antisolvent_rates", self.anti_rates),
+                                  ("seed_bounds", self.seed)):
+                for control, value in zip(controls, np.asarray(conditions.get(key, [])).reshape(-1)):
+                    control.setValue(float(value))
+            self.show_recipe((float(saved["score"]), saved["experiment"], saved["process"]),
+                             remember=False)
+            self.export_button.setEnabled(True)
 
     @staticmethod
     def number(lower, upper):
@@ -227,7 +259,7 @@ class DesignDialog(QDialog):
         self.job.finished.connect(self.finish_design)
         self.job.start()
 
-    def show_recipe(self, result):
+    def show_recipe(self, result, *, remember=True):
         score, experiment, process = result
         t, flow = experiment["TemperatureData"], experiment["FlowRateData"]
         time = np.union1d(t[0], flow[0])
@@ -236,6 +268,18 @@ class DesignDialog(QDialog):
         fill_table(self.result_table, self.recipe)
         label = "Log determinant" if self.optimal else "Model separation"
         self.status.setText(f"{label}: {score:.6g}   Seed mass: {self.seed_mass:.6g} g")
+        if remember:
+            action = "d_optimal_design" if self.optimal else "model_discrimination"
+            context = "|".join(signature(self.case, index) for index, _ in self.models)
+            request = {"template_index": self.template.currentIndex(), "model_index": self.model.currentIndex(),
+                       "iterations": self.iterations.value(), "samples": self.samples.value(),
+                       "terms": self.terms.currentText(),
+                       "weights": [int(control.isChecked()) if self.optimal else control.value()
+                                   for control in self.weights],
+                       "conditions": self.job.inputs[2] if self.job is not None else {}}
+            record_step(self.case, action,
+                        {"score": score, "experiment": experiment, "process": process, "request": request},
+                        context=context)
 
     def finish_design(self):
         self.job.deleteLater()
