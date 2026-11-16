@@ -72,6 +72,9 @@ class ExperimentWorker(QObject):
             ExperimentDefinition.from_frame(item, device_configs, name=f"Experiment {i + 1}")
             for i, item in enumerate(experiments)
         )
+        imed_simulation = any(item.imed_simulation for item in self.definitions)
+        if imed_simulation and not all(isinstance(dev, SimulatedDevice) for dev in devices.values()):
+            raise ValueError("IMED validation runs require every device to be simulated.")
         self.experiments = [definition.to_frame() for definition in self.definitions]
         # Validate typed definitions too, using the currently assigned devices.
         for frame in self.experiments:
@@ -93,7 +96,8 @@ class ExperimentWorker(QObject):
         self.sql_sync = None
         self._process_time = 0.0
         self._simulation_time = 0.0
-        self._event_simulation = speed > 1 and all(isinstance(dev, SimulatedDevice) for dev in devices.values())
+        self._event_simulation = ((speed > 1 or imed_simulation)
+                                  and all(isinstance(dev, SimulatedDevice) for dev in devices.values()))
         self._simulation_clocks = []
         self._plot_samples = []
 
@@ -394,7 +398,15 @@ class ExperimentWorker(QObject):
                 )
 
                 run = self.runs[exp_idx]
-                self._active_profiles = {p.device_id: p for p in self.definitions[exp_idx].profiles}
+                definition = self.definitions[exp_idx]
+                trace = None
+                if definition.imed_simulation:
+                    from imed_python.demo_campaign import SimulationTrace
+                    try:
+                        trace = SimulationTrace(definition.imed_simulation, profile, self._stop_event.is_set)
+                    except InterruptedError:
+                        break
+                self._active_profiles = {p.device_id: p for p in definition.profiles}
                 run.status = RunStatus.RUNNING
                 if self.recorder:
                     self.recorder.submit("run_start", run.run_id, {
@@ -493,6 +505,8 @@ class ExperimentWorker(QObject):
                                 elapsed
                             )
                         )
+                        if trace is not None:
+                            trace.apply(telemetry, elapsed)
 
                         telemetry[
                             "experiment_index"

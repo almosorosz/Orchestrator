@@ -53,9 +53,17 @@ class DoeCampaignService:
         self.frames = {key: frame.copy(deep=True) for key, frame in creator.exp_storage.data.items()}
         if not self.frames:
             raise ValueError("Generate a DoE first")
+        self.imed_simulations = {
+            name: options["imed_simulation"]
+            for name, options in getattr(creator, "parameter_snapshots", {}).items()
+            if name in self.frames and "imed_simulation" in options
+        }
+        if self.imed_simulations and len(self.imed_simulations) != len(self.frames):
+            raise ValueError("Keep IMED validation runs in a separate DoE preset.")
         # Match the generated DoE plots/export's existing return-pump segments,
         # but keep source flow units until the assigned driver is known.
-        self.return_ramps_applied = hasattr(creator.exp_storage, "add_backwards_ramp")
+        self.return_ramps_applied = (not self.imed_simulations
+                                     and hasattr(creator.exp_storage, "add_backwards_ramp"))
         if self.return_ramps_applied:
             self.frames = {key: creator.exp_storage.add_backwards_ramp(
                 frame, creator.exp_storage.COLUMNS_W_BACKPROFILE
@@ -89,7 +97,7 @@ class DoeCampaignService:
             raise ValueError(f"{role.label}: calibration produced invalid pump targets")
         return converted, "RPM", f"{assignment.role} pump calibration (g/h → RPM)"
 
-    def compile(self, assignments, configs, monitor_device_ids=()):
+    def compile(self, assignments, configs, monitor_device_ids=(), *, imed_monitors=None):
         assignments = tuple(assignments)
         roles = [item.role for item in assignments]
         device_ids = [item.device_id for item in assignments]
@@ -108,6 +116,7 @@ class DoeCampaignService:
         for device_id in monitor_device_ids:
             if device_id not in configs or not is_monitor_only(configs[device_id]):
                 raise ValueError(f"Monitor must be a read-only device: {device_id}")
+        role_devices = dict(zip(roles, device_ids))
         experiments = []
         for name, frame in self.frames.items():
             # Disabled zero-duration generator sections can repeat an identical
@@ -134,7 +143,13 @@ class DoeCampaignService:
                     tuple(ProfilePoint(float(t), float(v)) for t, v in zip(profile_times, converted)),
                     "step" if assignment.role == "valve_state" else "linear", unit,
                 ))
-            definition = ExperimentDefinition(name, tuple(profiles), source="doe")
+            simulation = self.imed_simulations.get(name)
+            if simulation is not None:
+                from imed_python.demo_campaign import compile_simulation
+                simulation = compile_simulation(simulation, role_devices, configs,
+                                                monitor_device_ids, imed_monitors, profiles)
+            definition = ExperimentDefinition(name, tuple(profiles), source="doe",
+                                              imed_simulation=simulation)
             # The shared validator applies the currently configured device limits.
             ExperimentDefinition.from_frame(definition.to_frame(), configs)
             experiments.append(definition)

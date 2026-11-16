@@ -1,5 +1,15 @@
 # CrystaLoop 0.4.0 — Campaign archive, recovery, presets and Windows release
 
+## IMED
+
+Open **IMED** in the sidebar to import a MATLAB model or a recorded CrystaLoop
+campaign. The page provides forward PBM simulation, parameter estimation, model
+discrimination, and D-optimal design. To use campaign data for modeling, load a
+MATLAB case with the relevant kinetics and solubility before importing the campaign.
+See the [IMED workflow guide](imed_python/README.md) for input and solver details.
+JAX/Diffrax is optional when running from source and is not bundled in the
+Windows release; use SciPy PBM in the packaged app.
+
 ## Recorded campaign plots
 
 ### Fast simulated profiles
