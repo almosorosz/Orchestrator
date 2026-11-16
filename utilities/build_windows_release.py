@@ -33,8 +33,7 @@ def build():
     verify(ROOT, workpath)
     payload = dist / "CrystaLoop"
     optional_modules = {name: find_spec(name) is not None for name in ("nidaqmx", "sqlalchemy", "psycopg")}
-    include_bo = all(find_spec(module) is not None for module in ("torch", "sklearn"))
-    optional_modules.update({"torch": include_bo, "scikit-learn": include_bo})
+    optional_modules["scikit-learn"] = find_spec("sklearn") is not None
     info = {"version": __version__, "python": sys.version, "architecture": "Windows x64",
             "optional_modules": optional_modules}
     (payload / "BUILD_INFO.json").write_text(json.dumps(info, indent=2), encoding="utf-8")

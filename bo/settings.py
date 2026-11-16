@@ -3,22 +3,24 @@ from copy import deepcopy
 import math
 
 from .profiles import CHANNELS, CONSTRAINTS, TARGETS, pairs
+from .physical_fit import read_spec
 
 FORMAT = "crystalloop-bo"
+VERSION = 4
 OUTPUTS = ("yield", "d10", "d50", "d90")
-CHECKPOINT_CHANNELS = ("temperature", "feed")
+STAGE_CHANNELS = ("temperature", "feed")
 
 
 def empty_settings():
     return {
-        "format": FORMAT, "version": 1, "source": "", "runs": [], "selected": [],
+        "format": FORMAT, "version": VERSION, "source": "", "runs": [], "selected": [],
         "constraints": {key: [None, None] for key in CONSTRAINTS},
-        "targets": {key: {"enabled": key == "duration", "mode": modes[0], "weight": 1.,
+        "targets": {key: {"enabled": False, "mode": modes[0], "weight": 1.,
                           "target": 0., "scale": 1.}
                     for key, (_, _, modes) in TARGETS.items()},
         "yield_basis": "theoretical", "overrides": {},
         "output_bounds": {key: [None, None] for key in OUTPUTS},
-        "exploration": 1., "output_margin": 1.96, "vae_checkpoints": {},
+        "exploration": 1., "output_margin": 1.96, "physical_profiles": {},
         "tolerances": {key: entry[2] for key, entry in CHANNELS.items()},
     }
 
@@ -28,13 +30,14 @@ def finite(value):
 
 
 def validate_settings(value):
-    if not isinstance(value, dict) or value.get("format") != FORMAT or value.get("version") != 1:
+    if not isinstance(value, dict) or value.get("format") != FORMAT or value.get("version") not in (1, 2, 3, VERSION):
         raise ValueError("Choose a CrystalLoop BO setup file.")
     # Existing component files and presets predate these optional fields.
     data = deepcopy(value)
     defaults = empty_settings()
-    for key in ("output_bounds", "exploration", "output_margin", "vae_checkpoints"):
+    for key in ("output_bounds", "exploration", "output_margin", "physical_profiles"):
         data.setdefault(key, defaults[key])
+    data.pop("vae_checkpoints", None)
     try:
         if data["yield_basis"] not in ("theoretical", "actual") or not isinstance(data["source"], str):
             raise ValueError("Unknown yield basis or source.")
@@ -51,11 +54,6 @@ def validate_settings(value):
                     raise ValueError(f"{label} minimum exceeds its maximum.")
         if any(not finite(data[key]) or data[key] < 0 for key in ("exploration", "output_margin")):
             raise ValueError("Exploration and the output margin must be finite and nonnegative.")
-        for key, checkpoint in data["vae_checkpoints"].items():
-            if key not in CHECKPOINT_CHANNELS or not isinstance(checkpoint["name"], str):
-                raise ValueError("Invalid trajectory VAE checkpoint.")
-            if not isinstance(checkpoint["model_state_dict"], dict):
-                raise ValueError("A trajectory VAE checkpoint is missing its weights.")
         for key, (_, _, modes) in TARGETS.items():
             target = data["targets"][key]
             if (type(target["enabled"]) is not bool or target["mode"] not in modes
@@ -91,6 +89,14 @@ def validate_settings(value):
         for key, enabled in data["overrides"].items():
             if not isinstance(key, str) or type(enabled) is not bool:
                 raise ValueError("Invalid decision-variable overrides.")
+        for channel, spec in data["physical_profiles"].items():
+            if channel not in STAGE_CHANNELS:
+                raise ValueError("Stage lists apply to temperature and antisolvent.")
+            read_spec(channel, spec)
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("The BO settings file is incomplete.") from error
+    data["overrides"] = {key: enabled for key, enabled in data["overrides"].items()
+                         if not key.startswith(("temperature:", "feed:")) and key != "duration"}
+    data["targets"]["duration"]["enabled"] = False
+    data["version"] = VERSION
     return data

@@ -1,8 +1,10 @@
 
-"""The trajectory VAE from BO_test_V2_single_profile, with notebook checkpoint support."""
+"""Inference for the pretrained temperature and antisolvent trajectory VAEs."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 import math
+from pathlib import Path
 from threading import Lock
 
 import numpy as np
@@ -10,12 +12,21 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .profiles import Profile
+from app.paths import ASSETS_DIR
+
+from .profiles import CHANNELS, Profile
+# Compatibility for the original standalone VAE tooling.
+CHECKPOINT_CHANNELS = {"temperature": "T", "feed": "AS"}
+LATENT_DIM = 4
+
+
+def checkpoint_filename(channel):
+    return f"trajectory_vae_{CHECKPOINT_CHANNELS[channel]}.pt"
+
 
 SEQ_LEN = 8
-LATENT_DIM = 7
-CHECKPOINT_KINDS = {"temperature": "T", "feed": "AS"}
-FIT_LOCK = Lock()
+SUPPORTED_SEQUENCE_LENGTHS = (8, 10)
+MODEL_LOAD_LOCK = Lock()
 
 
 class PositionalEncoding1D(nn.Module):
@@ -72,83 +83,24 @@ class ImprovedTrajectoryVAE(nn.Module):
         time = torch.cat((torch.zeros_like(intervals[:, :1]), intervals.cumsum(dim=-1)), dim=-1)
         return torch.stack((time, values), dim=1)
 
-    def forward(self, x):
-        mean, log_variance = self.encode(x)
-        latent = mean
-        if self.training:
-            std = (0.5 * log_variance.clamp(-12, 8)).exp()
-            latent = mean + torch.randn_like(std) * std
-        return self.decode(latent), mean, log_variance
-
-
-def trajectory_loss(reconstructed, target, mean, log_variance, beta, *, dosing=False):
-    """Use the notebook loss, including its switch, endpoint and free-bits terms."""
-    time, values = target.unbind(dim=1)
-    predicted_time, predicted_values = reconstructed.unbind(dim=1)
-    dp, predicted_dp = values.diff(), predicted_values.diff()
-    dt, predicted_dt = time.diff(), predicted_time.diff()
-    weights = 1 + 3 * dp.abs()
-
-    def weighted(error, weight):
-        return ((error * weight).sum(-1) / weight.sum(-1).clamp_min(1e-8)).mean()
-
-    loss = F.smooth_l1_loss(predicted_time, time, beta=.05)
-    amplitude_weight = 1. if dosing else 1.5
-    loss += amplitude_weight * F.smooth_l1_loss(predicted_values, values, beta=.05)
-    interval_error = weighted((predicted_dt - dt).abs(), weights)
-    interval_error += .1 * weighted(F.smooth_l1_loss(predicted_dt.clamp_min(1e-6).log(),
-                                                      dt.clamp_min(1e-6).log(), beta=.5,
-                                                      reduction="none"), weights)
-    loss += (.02 if dosing else .01) * interval_error
-    loss += (.5 if dosing else .1) * weighted((predicted_dp - dp).abs(), weights)
-    midpoint_error = .5 * (predicted_time[:, :-1] + predicted_time[:, 1:] - time[:, :-1] - time[:, 1:])
-    loss += (2. if dosing else 1.) * weighted(midpoint_error.abs(), dp.abs())
-    if not dosing:
-        loss += .1 * F.l1_loss(predicted_dp.diff(), dp.diff())
-    loss += 2 * amplitude_weight * F.mse_loss(predicted_values[:, [0, -1]], values[:, [0, -1]]) * 2
-    log_variance = log_variance.clamp(-12, 8)
-    kl = -.5 * (1 + log_variance - mean.square() - log_variance.exp()).mean(dim=0)
-    return loss + beta * kl.clamp_min(.05).sum()
-
-
-def fit_vae(trajectories, *, channel, seed, report):
-    """Fit the notebook architecture to the selected physical profiles."""
-    targets = torch.as_tensor(np.asarray(trajectories), dtype=torch.float32)
-    epochs = 300
-    with FIT_LOCK, torch.random.fork_rng(devices=[]):
-        previous_threads = torch.get_num_threads()
-        torch.set_num_threads(1)
-        try:
-            torch.manual_seed(seed)
-            model = ImprovedTrajectoryVAE()
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-            for epoch in range(epochs):
-                for indices in torch.randperm(len(targets)).split(64):
-                    batch = targets[indices]
-                    reconstructed, mean, log_variance = model(batch)
-                    loss = trajectory_loss(reconstructed, batch, mean, log_variance,
-                                           1e-3 * min(1., (epoch + 1) / 30), dosing=channel == "feed")
-                    optimizer.zero_grad()
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.)
-                    optimizer.step()
-                if epoch == 0 or (epoch + 1) % 100 == 0:
-                    report(f"Fitting the {channel} VAE · epoch {epoch + 1}/{epochs}")
-        finally:
-            torch.set_num_threads(previous_threads)
-    return model.eval()
-
 
 def _checkpoint_model(channel, saved):
-    if saved.get("profile_kind") != CHECKPOINT_KINDS[channel]:
-        raise ValueError(f"Select the notebook checkpoint for {CHECKPOINT_KINDS[channel]}.")
+    kind = CHECKPOINT_CHANNELS[channel]
+    if not isinstance(saved, dict) or not isinstance(saved.get("model_state_dict"), dict):
+        raise ValueError("Choose a trajectory VAE checkpoint exported by the notebook.")
+    if saved.get("profile_kind") != kind:
+        raise ValueError(f"Select the notebook checkpoint for {kind}.")
     latent_dim = saved.get("latent_dim")
-    if (saved.get("seq_len") != SEQ_LEN or type(latent_dim) is not int or not 1 <= latent_dim <= 32
-            or list(saved.get("hidden_dims", ())) != [64, 32] or saved.get("num_bands") != 2):
+    if type(latent_dim) is not int or latent_dim != LATENT_DIM:
+        raise ValueError(f"The {kind} checkpoint must have {LATENT_DIM} latent variables (found {latent_dim}).")
+    count = saved.get("seq_len")
+    if (type(count) is not int or count not in SUPPORTED_SEQUENCE_LENGTHS
+            or saved.get("hidden_dims") not in ([64, 32], (64, 32))
+            or saved.get("num_bands") != 2):
         raise ValueError("This checkpoint uses an unsupported trajectory VAE architecture.")
     # Instantiating a model consumes RNG state even when all weights are immediately replaced.
-    with FIT_LOCK, torch.random.fork_rng(devices=[]):
-        model = ImprovedTrajectoryVAE(latent_dim=latent_dim)
+    with MODEL_LOAD_LOCK, torch.random.fork_rng(devices=[]):
+        model = ImprovedTrajectoryVAE(seq_len=count)
     weights = saved["model_state_dict"]
     expected = model.state_dict()
     if weights.keys() != expected.keys():
@@ -158,42 +110,49 @@ def _checkpoint_model(channel, saved):
            for key, value in expected.items()):
         raise ValueError("The checkpoint contains invalid trajectory VAE weights.")
     model.load_state_dict(state)
-    return model.eval()
+    return model.eval().requires_grad_(False)
 
 
 def read_checkpoint(channel, path):
     """Import the notebook's weights-only .pt file as portable JSON data."""
-    from pathlib import Path
-
-    saved = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(saved, dict) or not isinstance(saved.get("model_state_dict"), dict):
-        raise ValueError("Choose a trajectory VAE checkpoint exported by the notebook.")
-    model = _checkpoint_model(channel, saved)
-    return {"name": Path(path).name, "profile_kind": CHECKPOINT_KINDS[channel], "seq_len": SEQ_LEN,
+    model = _checkpoint_model(channel, torch.load(path, map_location="cpu", weights_only=True))
+    return {"name": Path(path).name, "profile_kind": CHECKPOINT_CHANNELS[channel], "seq_len": model.seq_len,
             "latent_dim": model.latent_dim, "hidden_dims": [64, 32], "num_bands": 2,
             "model_state_dict": {key: value.tolist() for key, value in model.state_dict().items()}}
 
 
-def sample_knots(profile):
-    """Keep endpoints and select eight knots around the largest trace deviations."""
+@lru_cache(maxsize=len(CHECKPOINT_CHANNELS))
+def bundled_model(channel, path):
+    try:
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+    except FileNotFoundError as error:
+        raise ValueError(f"Pretrained weights are missing for {CHANNELS[channel][0]}. "
+                         f"Check the legacy model file {path.name}.") from error
+    return _checkpoint_model(channel, saved)
+
+
+def sample_knots(profile, count=SEQ_LEN):
+    """Keep endpoints and select knots around the largest trace deviations."""
     time, values = profile.time, profile.values
-    if len(time) > SEQ_LEN:
+    if len(time) > count:
         knots = {0, len(time) - 1}
-        while len(knots) < SEQ_LEN:
-            spans = zip(sorted(knots)[:-1], sorted(knots)[1:])
+        while len(knots) < count:
+            indices = sorted(knots)
             errors = []
-            for first, last in spans:
+            for first, last in zip(indices[:-1], indices[1:]):
                 if last - first < 2:
                     continue
-                segment = slice(first + 1, last)
-                predicted = np.interp(time[segment], time[[first, last]], values[[first, last]])
+                segment = np.arange(first + 1, last)
+                slope = values[last] - values[first]
+                duration = time[last] - time[first]
+                predicted = values[first] + slope * (time[segment] - time[first]) / duration
                 gap = np.abs(values[segment] - predicted)
-                index = int(np.argmax(gap)) if gap.max() > 0 else (last - first) // 2 - 1
-                errors.append((float(gap[index]), time[last] - time[first], first + 1 + index))
+                index = int(np.argmax(gap)) if gap.max() > 1e-12 else len(segment) // 2
+                errors.append((float(gap[index]), duration, int(segment[index])))
             knots.add(max(errors)[2])
         indices = sorted(knots)
         return np.stack((time[indices], values[indices]))
-    while len(time) < SEQ_LEN:
+    while len(time) < count:
         split = int(np.argmax(np.diff(time))) + 1
         midpoint = (time[split - 1] + time[split]) / 2
         time = np.insert(time, split, midpoint)
@@ -210,8 +169,11 @@ class TrajectoryCodec:
     description: str
 
     def normalize(self, profile):
-        time, values = sample_knots(profile)
-        return np.stack((time / time[-1], (values - self.offset) / self.scale))
+        duration = profile.time[-1]
+        scale = self.scale or 1.
+        normalized = Profile(profile.time / duration, (profile.values - self.offset) / scale,
+                             profile.source, profile.step)
+        return sample_knots(normalized, self.model.seq_len)
 
     def encode(self, profiles):
         inputs = torch.as_tensor(np.stack([self.normalize(profile) for profile in profiles]), dtype=torch.float32)
@@ -230,16 +192,15 @@ class TrajectoryCodec:
         return profiles
 
 
-def fit_codec(channel, profiles, checkpoint, report, seed):
-    lower = min(float(profile.values.min()) for profile in profiles)
-    upper = max(float(profile.values.max()) for profile in profiles)
-    codec = TrajectoryCodec(None, lower, upper - lower or 1.,
-                            all(profile.step for profile in profiles), "")
-    if checkpoint is not None:
-        codec.model = _checkpoint_model(channel, checkpoint)
-        codec.description = checkpoint["name"]
+def pretrained_codec(channel, profiles, checkpoint):
+    path = ASSETS_DIR / "bo" / checkpoint_filename(channel)
+    if checkpoint is None:
+        model, name = bundled_model(channel, path), path.name
     else:
-        codec.model = fit_vae([codec.normalize(profile) for profile in profiles],
-                              channel=channel, seed=seed, report=report)
-        codec.description = "Notebook architecture fitted to selected experiments"
-    return codec
+        model, name = _checkpoint_model(channel, checkpoint), checkpoint["name"]
+    # The notebooks operate in [0, 1]. Use one physical range across the selected
+    # recipes, with zero feed mapped to zero. The weights are shared across campaigns.
+    lower = 0. if channel == "feed" else min(float(profile.values.min()) for profile in profiles)
+    upper = max(float(profile.values.max()) for profile in profiles)
+    return TrajectoryCodec(model, lower, upper - lower, all(profile.step for profile in profiles),
+                           f"{name} · pretrained")

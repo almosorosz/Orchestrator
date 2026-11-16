@@ -1,1 +1,1 @@
-"""Bayesian optimization and trajectory VAE profile inspection."""
+"""Bayesian optimization of physical experiment recipes."""

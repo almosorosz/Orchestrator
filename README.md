@@ -111,16 +111,22 @@ IMED case. Select completed experiments, set input bounds, enable the targets,
 then configure optional output limits under **Output screening**. Give each
 target a scale in its own unit so that weights compare dimensionless losses.
 
-**Profile encoding** uses the trajectory VAE architecture from
-`BO_test_V2_single_profile`. It fits the selected traces and uses the encoder's
-posterior means. You can load `trajectory_vae_T.pt` and `trajectory_vae_AS.pt`
-exported by the notebook to use those weights. Compare the source trace, eight
-input knots and decoded profile before reviewing a proposal. This tab reports
-reconstruction error and integrated antisolvent dose. Seed and constant
-setpoints use scalar values. Missing channels must be consistent across the
-selected runs.
+**Physical profiles** starts with temperature and antisolvent stage lists inferred
+from the selected experiments. Add, delete, or reorder stages, then set durations
+and endpoints in seconds, °C, or g/s. Equal temperature endpoints define a hold.
+Antisolvent stages can turn the pump off, hold a positive rate, or ramp the rate.
+Select up to four decision controls per profile. Choices include individual
+stage settings and grouped controls such as start delay, final temperature,
+and total antisolvent dose.
 
-**Propose experiment** shows the decoded recipe, input history, and one-dimensional
+BO fits the selected physical controls to the recorded profiles and estimates
+the proposed recipe from those fits. Compare recorded and fitted traces before
+searching. BO uses the longest selected experiment as the fixed batch horizon.
+Temperature holds at the final setpoint after its last stage and antisolvent
+feed stops after its last stage. Duration bounds apply to the fixed horizon.
+Seeded proposals add seed at time zero, and unseeded proposals use zero seed mass.
+
+**Propose experiment** shows the physical recipe, input history, and one-dimensional
 GP projections through the proposal. **Observed inputs** shows standardized
 values together or any input in its own units. **GP projections** shows the
 predicted mean, a predictive band at ±1.96 standard deviations, the acquisition
@@ -129,10 +135,14 @@ output filter uses the selected margin and requires the full predicted interval
 to meet every enabled bound. With small datasets, use the plots and reconstruction
 errors to judge whether the proposed recipe is suitable for experimental review.
 
-**Save BO setup** includes the selected runs, settings and any imported VAE
-weights. **Save proposed recipe** exports decoded profiles and predictions as
-JSON for review. The Windows build includes BO when PyTorch and scikit-learn are
-both installed in the build environment.
+**Save BO setup** includes the selected runs, settings, stage templates, and
+chosen physical controls. Older setups migrate their data and settings to
+physical stages. **Save proposed recipe** exports the stages, plotted profiles,
+and predictions as JSON for review. Install scikit-learn in the Windows build
+environment to include the BO optimizer.
+
+In IMED Parameter Estimation, **Optimization progress** shows the live
+generation plot beside the optimization log. Drag the divider to resize them.
 
 ## Unit operations and MSI connectivity
 

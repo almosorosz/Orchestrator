@@ -1,4 +1,5 @@
 """Bayesian experiment design shared by the standalone window and CrystalLoop."""
+from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -18,9 +19,16 @@ from imed_python.campaign_import import campaign_runs
 from imed_python.demo_campaign import import_simulated_campaign
 from imed_python.solver import read_model
 
-from .profiles import CHANNELS, CONSTRAINTS, TARGETS, Profile, case_runs, constraint_values, make_profile, violations
+from .decoder import cooling_landmarks, fixed_horizon
+from .physical import physical_profile
+from .physical_fit import initial_spec, read_spec, trace_spec
+from .profiles import (
+    CHANNELS, CONSTRAINTS, TARGETS, case_runs, constraint_values, make_profile,
+    selected_horizon, violations,
+)
 from .proposal_view import BAND_SD, ProposalView, chart_view, profile_chart, replace_chart
-from .settings import CHECKPOINT_CHANNELS, OUTPUTS, empty_settings, validate_settings
+from .settings import OUTPUTS, STAGE_CHANNELS, empty_settings, validate_settings
+from .stage_editor import StageEditor
 
 
 def grid(headers):
@@ -156,18 +164,22 @@ class BOWindow(QWidget):
                                "D10 (µm)", "D50 (µm)", "D90 (µm)", "Constraints"))
         self.inventory.itemChanged.connect(self.select_run)
         layout.addWidget(self.inventory, 1)
+        self.batch_note = QLabel()
+        self.batch_note.setWordWrap(True)
+        layout.addWidget(self.batch_note)
 
     def build_settings_page(self):
         layout = self.page("Input bounds and targets")
         self.bound_fields = bounds_fields(layout, CONSTRAINTS)
-        note = QLabel("Blank bounds are off. Cooling and dosing minimums apply to active segments. "
-                      "Holds and zero feed are allowed.")
+        note = QLabel("The batch duration is fixed to the longest selected run. Blank bounds are off. "
+                      "Cooling and dosing minimums apply to active segments.")
         note.setWordWrap(True)
         layout.addWidget(note)
         self.target_table = grid(("Use", "Target", "Unit", "Direction", "Weight", "Match value", "Scale"))
-        self.target_table.setRowCount(len(TARGETS))
+        self.target_table.setRowCount(len(OUTPUTS))
         self.target_fields = {}
-        for row, (key, (label, unit, modes)) in enumerate(TARGETS.items()):
+        for row, key in enumerate(OUTPUTS):
+            label, unit, modes = TARGETS[key]
             enabled = QCheckBox()
             self.target_table.setCellWidget(row, 0, enabled)
             self.target_table.setItem(row, 1, item(label))
@@ -215,50 +227,51 @@ class BOWindow(QWidget):
         layout.addStretch()
 
     def build_profile_page(self):
-        layout = self.page("Profile encoding")
+        layout = self.page("Physical profiles")
+        self.horizon_label = QLabel()
+        self.horizon_label.setWordWrap(True)
+        layout.addWidget(self.horizon_label)
+        self.profile_tabs = QTabWidget()
+        layout.addWidget(self.profile_tabs, 1)
+        edit = QWidget()
+        edit_layout = QVBoxLayout(edit)
+        self.stage_editor = StageEditor()
+        self.stage_editor.changed.connect(self.stage_settings_changed)
+        edit_layout.addWidget(self.stage_editor, 1)
+        row = QHBoxLayout()
+        self.export_template_button = self.button("Save template recipe", self.save_template)
+        self.reset_stages_button = self.button("Reset templates from experiments", self.reset_stage_templates)
+        row.addWidget(self.export_template_button)
+        row.addWidget(self.reset_stages_button)
+        row.addStretch()
+        edit_layout.addLayout(row)
+        self.profile_tabs.addTab(edit, "Edit stages")
+
+        comparison = QWidget()
+        compare_layout = QVBoxLayout(comparison)
         row = QHBoxLayout()
         self.run_choice, self.channel_choice = QComboBox(), QComboBox()
         self.run_choice.currentIndexChanged.connect(self.refresh_channels)
-        self.channel_choice.currentIndexChanged.connect(self.refresh_tolerance)
-        self.tolerance = QLineEdit()
-        self.tolerance.setMaximumWidth(90)
-        self.tolerance.editingFinished.connect(self.store_tolerance)
+        self.channel_choice.currentIndexChanged.connect(self.refresh_preview)
         row.addWidget(QLabel("Experiment"))
         row.addWidget(self.run_choice, 1)
         row.addWidget(self.channel_choice)
-        row.addWidget(QLabel("Variation tolerance"))
-        row.addWidget(self.tolerance)
-        self.preview_button = self.button("Compare source and decoded", self.preview)
+        self.preview_button = self.button("Compare recorded and fitted", self.preview)
         row.addWidget(self.preview_button)
-        layout.addLayout(row)
-        codec = QHBoxLayout()
-        self.checkpoint_button = self.button("Load notebook checkpoint", self.choose_checkpoint)
-        self.reset_checkpoint_button = self.button("Fit from selected runs", self.reset_checkpoint)
-        self.codec_note = QLabel()
-        self.codec_note.setWordWrap(True)
-        codec.addWidget(self.checkpoint_button)
-        codec.addWidget(self.reset_checkpoint_button)
-        codec.addWidget(self.codec_note, 1)
-        layout.addLayout(codec)
+        self.use_trace_button = self.button("Use trace as template", self.use_trace_template)
+        row.addWidget(self.use_trace_button)
+        compare_layout.addLayout(row)
         self.chart = chart_view()
-        self.chart.setMinimumHeight(215)
-        layout.addWidget(self.chart, 2)
+        self.chart.setMinimumHeight(200)
+        compare_layout.addWidget(self.chart, 2)
         self.metrics = QLabel()
         self.metrics.setWordWrap(True)
-        layout.addWidget(self.metrics)
-        self.variables = grid(("Vary in BO", "Decoder input", "Value", "Unit", "Selected runs"))
-        self.variables.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked
-                                       | QAbstractItemView.EditTrigger.EditKeyPressed)
+        compare_layout.addWidget(self.metrics)
+        self.variables = grid(("Vary in BO", "Physical control", "Fitted value", "Unit"))
         self.variables.itemChanged.connect(self.update_override)
-        layout.addWidget(self.variables, 1)
-        self.decode_button = self.button("Decode edited values", self.plot_edit)
-        self.vary_duration = QCheckBox("Vary batch duration")
-        self.vary_duration.toggled.connect(self.change_duration)
-        row = QHBoxLayout()
-        row.addWidget(self.decode_button)
-        row.addWidget(self.vary_duration)
-        row.addStretch()
-        layout.addLayout(row)
+        compare_layout.addWidget(self.variables, 1)
+        compare_layout.addWidget(QLabel("Choose temperature and antisolvent controls under Edit stages."))
+        self.profile_tabs.addTab(comparison, "Compare profiles")
 
     def build_proposal_page(self):
         layout = self.page("Propose experiment")
@@ -289,7 +302,6 @@ class BOWindow(QWidget):
                 control.textEdited.connect(self.invalidate_proposal)
         for control in (self.exploration, self.output_margin):
             control.textEdited.connect(self.invalidate_proposal)
-        self.tolerance.textEdited.connect(self.tolerance_changed)
         self.yield_basis.currentIndexChanged.connect(self.invalidate_proposal)
 
     def restore(self, settings):
@@ -301,7 +313,6 @@ class BOWindow(QWidget):
                     field.setText("" if value is None else str(value))
         self.exploration.setText(str(self.state["exploration"]))
         self.output_margin.setText(str(self.state["output_margin"]))
-        self.vary_duration.setChecked(self.state["overrides"].get("duration", True))
         for key, (enabled, mode, weight, target, scale) in self.target_fields.items():
             saved = self.state["targets"][key]
             enabled.setChecked(saved["enabled"])
@@ -309,6 +320,7 @@ class BOWindow(QWidget):
             for field, value in ((weight, "weight"), (target, "target"), (scale, "scale")):
                 field.setText(str(saved[value]))
         self.yield_basis.setCurrentIndex(self.yield_basis.findData(self.state["yield_basis"]))
+        self.load_stage_templates()
         self.rendering = False
         self.invalidate_proposal()
         self.refresh_data()
@@ -321,14 +333,13 @@ class BOWindow(QWidget):
         data["output_bounds"] = read_bounds(self.output_fields)
         data["exploration"] = float(self.exploration.text())
         data["output_margin"] = float(self.output_margin.text())
-        data["targets"] = {key: {"enabled": enabled.isChecked(), "mode": mode.currentData(),
-                                 "weight": float(weight.text()), "target": float(target.text()) if target.isEnabled() else 0.,
-                                 "scale": float(scale.text())}
-                           for key, (enabled, mode, weight, target, scale) in self.target_fields.items()}
+        data["targets"] = dict(self.state["targets"])
+        for key, (enabled, mode, weight, target, scale) in self.target_fields.items():
+            data["targets"][key] = {"enabled": enabled.isChecked(), "mode": mode.currentData(),
+                                    "weight": float(weight.text()), "scale": float(scale.text()),
+                                    "target": float(target.text()) if target.isEnabled() else 0.}
         data["yield_basis"] = self.yield_basis.currentData()
-        if self.channel_choice.currentData() is not None:
-            data["tolerances"] = {**self.state["tolerances"],
-                                  self.channel_choice.currentData(): float(self.tolerance.text())}
+        data["physical_profiles"] = self.stage_editor.specs()
         return validate_settings(data)
 
     def save_file(self):
@@ -391,10 +402,9 @@ class BOWindow(QWidget):
 
     def set_case(self, case, source, *, folder=None):
         runs = case_runs(case, folder)
-        self.state.update(source=source, runs=runs, selected=list(range(len(runs))), overrides={})
-        self.vary_duration.blockSignals(True)
-        self.vary_duration.setChecked(True)
-        self.vary_duration.blockSignals(False)
+        self.state.update(source=source, runs=runs, selected=list(range(len(runs))), overrides={},
+                          physical_profiles={})
+        self.load_stage_templates()
         self.invalidate_proposal()
         self.refresh_data()
         skipped = len(case.get("ExpData", [])) - len(runs)
@@ -442,6 +452,11 @@ class BOWindow(QWidget):
             self.run_choice.addItem(self.state["runs"][index]["name"], index)
         self.run_choice.setCurrentIndex(max(0, self.run_choice.findData(active)))
         self.run_choice.blockSignals(False)
+        horizon = selected_horizon(self.state)
+        detail = f"Fixed batch horizon {horizon:g} s · Any seed is added at 0 s." if horizon else ""
+        self.stage_editor.set_horizon(horizon)
+        self.horizon_label.setText(detail)
+        self.batch_note.setText(detail)
         self.refresh_channels()
 
     def refresh_channels(self):
@@ -455,48 +470,31 @@ class BOWindow(QWidget):
                     self.channel_choice.addItem(CHANNELS[key][0], key)
         self.channel_choice.setCurrentIndex(max(0, self.channel_choice.findData(active)))
         self.channel_choice.blockSignals(False)
-        self.refresh_tolerance()
+        self.refresh_preview()
 
-    def refresh_tolerance(self):
-        channel = self.channel_choice.currentData()
-        self.tolerance.setText(str(self.state["tolerances"][channel]) if channel else "")
-        self.tolerance.setEnabled(channel is not None)
-        checkpoint = self.state["vae_checkpoints"].get(channel)
-        if channel is None:
-            note = ""
-        elif checkpoint is not None:
-            note = checkpoint["name"]
-        elif channel == "seed":
-            note = "Seed mass is a scalar in grams."
-        else:
-            note = "Uses the notebook VAE fitted to the selected runs when the profile shape varies."
-        self.codec_note.setText(note)
-        self.clear_preview()
-        self.update_buttons()
-
-    def clear_preview(self):
-        self.encoding = None
+    def refresh_preview(self):
         self.variables.setRowCount(0)
         replace_chart(self.chart, QChart())
-        self.metrics.setText("Select an experiment and compare its source profile with the decoder output.")
+        self.metrics.setText("Compare the measured trace with the stage template fitted to that run.")
         self.update_buttons()
 
-    def store_tolerance(self):
-        channel = self.channel_choice.currentData()
-        if channel is not None:
-            try:
-                value = float(self.tolerance.text())
-                if not np.isfinite(value) or value < 0:
-                    raise ValueError
-            except ValueError:
-                self.status.setText("Enter a finite, nonnegative variation tolerance.")
-            else:
-                self.state["tolerances"][channel] = value
+    def load_stage_templates(self):
+        runs = [self.state["runs"][index] for index in self.state["selected"]]
+        specs = self.state["physical_profiles"]
+        for channel in STAGE_CHANNELS:
+            if channel not in specs and (spec := initial_spec(channel, runs)) is not None:
+                specs[channel] = spec
+        self.stage_editor.load(specs, selected_horizon(self.state))
 
-    def tolerance_changed(self):
+    def reset_stage_templates(self):
+        self.state["physical_profiles"] = {}
+        self.load_stage_templates()
+        self.stage_settings_changed()
+        self.status.setText("Reset the stage templates from the selected experiments.")
+
+    def stage_settings_changed(self):
         self.invalidate_proposal()
-        if self.encoding is not None:
-            self.clear_preview()
+        self.refresh_preview()
 
     @staticmethod
     def profile(run, channel):
@@ -561,11 +559,6 @@ class BOWindow(QWidget):
             self.proposal_note.setText("Select experiments, set the targets and bounds, then propose a recipe.")
             self.update_buttons()
 
-    def change_duration(self, enabled):
-        if not self.rendering:
-            self.state["overrides"]["duration"] = enabled
-            self.invalidate_proposal()
-
     def update_buttons(self):
         if not hasattr(self, "propose_button"):
             return
@@ -573,9 +566,9 @@ class BOWindow(QWidget):
         channel = self.channel_choice.currentData()
         self.propose_button.setEnabled(available and len(self.state["selected"]) >= 2)
         self.preview_button.setEnabled(available and channel is not None)
-        self.checkpoint_button.setEnabled(available and channel in CHECKPOINT_CHANNELS)
-        self.reset_checkpoint_button.setEnabled(available and channel in self.state["vae_checkpoints"])
-        self.decode_button.setEnabled(available and self.encoding is not None and bool(self.encoding[0].variables))
+        self.use_trace_button.setEnabled(available and channel in STAGE_CHANNELS)
+        self.reset_stages_button.setEnabled(available and bool(self.state["selected"]))
+        self.export_template_button.setEnabled(available and bool(self.state["selected"]))
         self.export_button.setEnabled(self.proposal is not None)
 
     def run_job(self, task, callback, *, check_profile=False):
@@ -601,7 +594,7 @@ class BOWindow(QWidget):
             self.status.setText("The BO settings changed during the calculation. Run the calculation again.")
             return
         if self.active_profile is not None and self.active_profile != self.profile_selection():
-            self.status.setText("The selected profile changed. Compare the current profile to view its encoding.")
+            self.status.setText("The selected profile changed. Compare the current profile to view its fit.")
             return
         action(result)
 
@@ -615,138 +608,139 @@ class BOWindow(QWidget):
     def profile_selection(self):
         return self.run_choice.currentData(), self.channel_choice.currentData()
 
-    def choose_checkpoint(self):
-        key = self.channel_choice.currentData()
-        if key not in CHECKPOINT_CHANNELS:
+    def use_trace_template(self):
+        index, key = self.profile_selection()
+        if index is None or key not in STAGE_CHANNELS:
             return
-        path, _ = QFileDialog.getOpenFileName(self, f"Load {CHANNELS[key][0]} VAE checkpoint",
-                                              "", "PyTorch checkpoints (*.pt *.pth)")
-        if not path:
+        try:
+            replacement = trace_spec(key, self.profile(self.state["runs"][index], key))
+            # Read the other editor independently so an invalid template can be replaced.
+            specs = {other: spec for other, editor in self.stage_editor.editors.items() if other != key
+                     and (spec := editor.spec()) is not None}
+        except ValueError as error:
+            self.status.setText(str(error))
             return
-
-        def load(report):
-            from .vae import read_checkpoint
-
-            report("Loading the notebook trajectory VAE weights…")
-            return read_checkpoint(key, path)
-
-        def loaded(checkpoint):
-            self.state["vae_checkpoints"][key] = checkpoint
-            self.invalidate_proposal()
-            self.refresh_tolerance()
-            self.status.setText(f"Loaded {checkpoint['name']}.")
-
-        self.run_job(load, loaded, check_profile=True)
-
-    def reset_checkpoint(self):
-        key = self.channel_choice.currentData()
-        if self.state["vae_checkpoints"].pop(key, None) is not None:
-            self.invalidate_proposal()
-            self.refresh_tolerance()
-            self.status.setText(f"{CHANNELS[key][0]} will use a VAE fitted to the selected runs.")
+        specs[key] = replacement
+        self.stage_editor.load(specs, selected_horizon(self.state))
+        self.stage_editor.tabs.setCurrentWidget(self.stage_editor.editors[key])
+        self.profile_tabs.setCurrentIndex(0)
+        self.stage_settings_changed()
+        self.status.setText(f"Created {CHANNELS[key][0].lower()} stages from the selected trace.")
 
     def preview(self):
         index, key = self.profile_selection()
         if index is None or key is None:
-            self.status.setText("Select an experiment and a profile.")
             return
         try:
             state = self.settings()
         except ValueError as error:
             self.status.setText(str(error))
             return
-        self.clear_preview()
 
         def prepare(report):
-            from .optimizer import preview_channel
+            from .optimizer import preview_channel, run_profile, variable_activity
 
             channel, row = preview_channel(state, key, index, report)
-            data = state["runs"][index]
-            original = self.profile(data, key)
-            features = channel.features[row:row + 1]
-            decoded, = channel.decode(features, [data["metrics"]["duration"]])
-            representation = None
-            if channel.codec is not None:
-                time, values = channel.codec.normalize(original)
-                representation = Profile(time * original.time[-1], values * channel.codec.scale + channel.codec.offset,
-                                         "VAE input knots", original.step)
-            return channel, original, features[0], decoded, representation
+            original = run_profile(state["runs"][index], key)
+            horizon = selected_horizon(state)
+            features = channel.features[row]
+            decoded, = channel.decode(features[None, :], [horizon])
+            return channel, original, decoded, features, variable_activity(channel.features)
 
-        self.run_job(prepare, self.show_encoding, check_profile=True)
+        self.run_job(prepare, self.show_fit, check_profile=True)
 
-    def show_encoding(self, result):
-        from .optimizer import variable_activity
-
-        channel, original, features, decoded, representation = result
-        self.encoding = channel, original, representation
-        varied = variable_activity(channel.features)
+    def show_fit(self, result):
+        channel, original, decoded, features, varied = result
+        key = channel.key
+        traces = [("Recorded", original)]
+        if channel.stages is not None:
+            template = physical_profile(key, channel.stages, selected_horizon(self.state))
+            traces.append(("Template", template))
+        traces.append(("Fitted", decoded))
+        replace_chart(self.chart, profile_chart(key, traces))
         self.variables.blockSignals(True)
         self.variables.setRowCount(len(channel.variables))
         for row, (variable, value) in enumerate(zip(channel.variables, features)):
-            cell = item("")
-            cell.setData(Qt.ItemDataRole.UserRole, variable.key)
-            if varied[row]:
+            cell = item("✓" if channel.stages is not None and varied[row] else "—")
+            if channel.stages is None and varied[row]:
+                cell.setText("")
+                cell.setData(Qt.ItemDataRole.UserRole, variable.key)
                 cell.setFlags(cell.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 cell.setCheckState(Qt.CheckState.Checked if self.state["overrides"].get(variable.key, True)
                                    else Qt.CheckState.Unchecked)
             self.variables.setItem(row, 0, cell)
-            for column, content in enumerate((variable.label, f"{value:.12g}", variable.unit,
-                                                "Varies" if varied[row] else "Fixed"), 1):
-                self.variables.setItem(row, column, item(content, editable=column == 2))
+            for column, content in enumerate((variable.label, show_value(float(value)), variable.unit), 1):
+                self.variables.setItem(row, column, item(content))
         self.variables.blockSignals(False)
-        self.show_profiles(original, decoded, representation, channel)
-        self.update_buttons()
-        self.status.setText("Compared the selected profile with its decoded values.")
+        difference = original.values - decoded.sample(original.time)
+        _, unit, _ = CHANNELS[key]
+        detail = f"Recorded vs. fitted RMSE {np.sqrt(np.mean(difference**2)):.5g} {unit}"
+        if key == "feed":
+            detail += f" · total dose {original.total():.5g} → {decoded.total():.5g} g"
+        if key == "temperature":
+            _, rates = constraint_values(key, decoded)
+            detail += f" · peak fitted cooling {max(rates, default=0.):.5g} °C/min"
+            cooling = cooling_landmarks(decoded)
+            if cooling is not None:
+                detail += f" · 10–90% cooling {cooling[-1] - cooling[0]:.5g} s"
+        self.metrics.setText(detail)
+        self.status.setText("Review the fit before generating a recipe.")
 
     def update_override(self, cell):
         if cell.column() == 0 and cell.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             self.state["overrides"][cell.data(Qt.ItemDataRole.UserRole)] = cell.checkState() == Qt.CheckState.Checked
             self.invalidate_proposal()
 
-    def plot_edit(self):
-        channel, source, representation = self.encoding
-        index = self.run_choice.currentData()
+    def save_template(self):
         try:
-            settings = self.settings()
-            values = np.array([float(self.variables.item(row, 2).text()) for row in range(len(channel.variables))])
-            if not np.isfinite(values).all():
-                raise ValueError("Enter finite decoder inputs.")
-            duration = settings["runs"][index]["metrics"]["duration"]
-            decoded, = channel.decode(values[None, :], [duration])
-            key = channel.key
-            if not np.isfinite(decoded.values).all() or np.any(decoded.values <= -273.15 if key == "temperature"
-                                                               else decoded.values < 0):
-                raise ValueError("The edited values produce a profile outside the physical range.")
-        except (ValueError, RuntimeError, OverflowError) as error:
-            self.status.setText(str(error))
-            return
-        self.show_profiles(source, decoded, representation, channel)
-        key, checks = constraint_values(channel.key, decoded)
-        outside = (key and violations(checks, *settings["constraints"][key]))
-        self.status.setText("Previewed the edited values. This trace exceeds an input bound."
-                            if outside else "Previewed the edited decoder inputs.")
+            from .optimizer import input_checks, run_profile
 
-    def show_profiles(self, original, decoded, representation, channel):
-        key = channel.key
-        traces = [("Source", original)]
-        if representation is not None:
-            traces.append(("VAE input knots", representation))
-        traces.append(("Decoded", decoded))
-        replace_chart(self.chart, profile_chart(key, traces))
-        _, unit, _ = CHANNELS[key]
-        difference = original.values - decoded.sample(original.time)
-        detail = (f"{channel.description} · {len(original.time)} source points → {len(decoded.time)} decoded knots · "
-                  f"RMSE {np.sqrt(np.mean(difference**2)):.5g} {unit} · maximum error {np.max(np.abs(difference)):.5g} {unit}")
-        if key == "feed":
-            detail += f" · total dose {original.total():.5g} → {decoded.total():.5g} g"
-        if key == "temperature":
-            _, rates = constraint_values(key, decoded)
-            detail += f" · peak decoded cooling {max(rates, default=0):.5g} °C/min"
-        self.metrics.setText(detail)
+            state = self.settings()
+            horizon = selected_horizon(state)
+            stages, profiles = {}, {}
+            for key, spec in state["physical_profiles"].items():
+                rows, _ = read_spec(key, spec, horizon)
+                stages[key] = rows
+                profiles[key] = physical_profile(key, rows, horizon)
+            if "temperature" not in profiles:
+                raise ValueError("Add temperature stages before saving a recipe.")
+            reference = state["runs"][self.run_choice.currentData()]
+            for key in ("seed", "stirring"):
+                if key in reference["profiles"]:
+                    profile = run_profile(reference, key)
+                    profiles[key] = fixed_horizon(profile, horizon) if key == "stirring" else profile
+            failed = input_checks(profiles, horizon, state["constraints"])
+            if failed:
+                raise ValueError("The template exceeds input bounds for " + ", ".join(failed) + ".")
+            payload = self.recipe_data(profiles, stages, horizon)
+            payload.update(format="crystalloop-bo-template", version=1)
+            path, _ = QFileDialog.getSaveFileName(self, "Save template recipe", "bo_stage_recipe.json", "JSON (*.json)")
+            if path:
+                atomic_json(Path(path), payload)
+                self.status.setText(f"Saved the stage recipe to {Path(path).name}.")
+        except (ValueError, OSError) as error:
+            self.status.setText(str(error))
+
+    @staticmethod
+    def recipe_data(profiles, stages, horizon):
+        seed = profiles.get("seed")
+        return {
+            "duration_s": horizon,
+            "seeding": None if seed is None else {"seeded": bool(seed.values[0]),
+                                                  "mass_g": float(seed.values[0]),
+                                                  "time_s": 0. if seed.values[0] > 0 else None},
+            "profile_encoding": "physical-stages",
+            "stages": {key: [asdict(stage) for stage in rows] for key, rows in stages.items()},
+            "profiles": {key: {**profile.payload(), "unit": CHANNELS[key][1]} for key, profile in profiles.items()},
+        }
 
     def suggest(self):
         try:
             state = self.settings()
+            for channel in STAGE_CHANNELS:
+                if (channel not in state["physical_profiles"]
+                        and any(channel in state["runs"][index]["profiles"] for index in state["selected"])):
+                    raise ValueError(f"Add {CHANNELS[channel][0].lower()} stages or reset the templates.")
         except ValueError as error:
             self.status.setText(str(error))
             return
@@ -777,11 +771,17 @@ class BOWindow(QWidget):
             beta = result.state["exploration"]
             active = int(result.vary.sum())
             self.proposal_note.setText(
-                f"{active} varying inputs · {result.output_passed}/{result.input_passed} screened candidates passed. "
+                f"Fixed horizon {result.horizon:g} s · {active} varying inputs · "
+                f"{result.output_passed}/{result.input_passed} screened candidates passed. "
                 f"Predicted loss {result.mean_loss:.5g} ± {result.loss_sd:.4g} SD · "
                 f"exploration bonus {beta * result.loss_sd:.4g} · acquisition {result.acquisition:.5g}. "
                 "The prediction table shows mean ± 1.96 SD.")
-            self.status.setText("Proposal ready. Review the recipe and output predictions.")
+            errors = [
+                f"{CHANNELS[key][0]} {np.median(channel.fit_errors):.4g} {CHANNELS[key][1]}"
+                for key, channel in result.channels.items() if channel.fit_errors is not None
+            ]
+            self.status.setText("Proposal ready. Median stage fit RMSE · " + " · ".join(errors) if errors
+                                else "Proposal ready. Review the recipe and output predictions.")
         else:
             self.proposal_note.setText("Select experiments, set the targets and bounds, then propose a recipe.")
         self.update_buttons()
@@ -795,9 +795,9 @@ class BOWindow(QWidget):
             return
         file = Path(path)
         payload = {
-            "format": "crystalloop-bo-proposal", "version": 1,
-            "yield_basis": result.state["yield_basis"], "duration_s": float(result.point[0]),
-            "profiles": {key: {**profile.payload(), "unit": CHANNELS[key][1]} for key, profile in result.profiles.items()},
+            **self.recipe_data(result.profiles, result.stages, result.horizon),
+            "format": "crystalloop-bo-proposal", "version": 2,
+            "yield_basis": result.state["yield_basis"],
             "predictions": {key: {"mean": mean, "sd": sd, "unit": TARGETS[key][1]}
                             for key, (mean, sd) in result.predictions.items()},
             "decision_variables": {variable.key: {"decoder_input": float(control),

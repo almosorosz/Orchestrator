@@ -1,15 +1,19 @@
 
 """Inspect the proposal, selected inputs and Gaussian-process projections."""
 
+from math import fsum
+
 import numpy as np
 from PySide6.QtCharts import QAreaSeries, QChart, QChartView, QLineSeries, QScatterSeries, QValueAxis
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .profiles import CHANNELS, TARGETS
+from .decoder import cooling_landmarks, dose_landmarks
 
 MEAN = "#1e40af"
 PROPOSAL = "#047857"
@@ -89,9 +93,9 @@ def profile_chart(channel, traces):
         time, values = profile.time, profile.values
         if profile.step:
             time, values = np.repeat(time, 2)[1:], np.repeat(values, 2)[:-1]
-        chart.addSeries(line(name, time, values, (OBSERVED, "#626b89", MEAN)[index % 3],
-                             dashed=index == 0 and len(traces) > 1,
-                             markers=index > 0 or len(time) < 10))
+        chart.addSeries(line(name, time, values, (OBSERVED, "#626b89", MEAN, "#047857")[index % 4],
+                             dashed=(index == 0 and len(traces) > 1),
+                             markers=len(time) <= 12))
     label, unit, _ = CHANNELS[channel]
     finish_chart(chart, "Time (s)", f"{label} ({unit})")
     return chart
@@ -108,7 +112,14 @@ class ProposalView(QTabWidget):
         self.recipe = chart_view()
         self.samples = chart_view()
         self.projection = chart_view()
-        self.recipe_note = self.page("Decoded recipe", self.recipe, (("Profile", self.channels),))
+        self.recipe_note = self.page("Proposed recipe", self.recipe, (("Profile", self.channels),))
+        recipe_page = self.widget(0)
+        self.recipe_stages = QTableWidget(0, 6, recipe_page)
+        self.recipe_stages.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.recipe_stages.verticalHeader().hide()
+        self.recipe_stages.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.recipe_stages.setMaximumHeight(145)
+        recipe_page.layout().addWidget(self.recipe_stages)
         self.sample_note = self.page("Observed inputs", self.samples, (("Variable", self.sample_variables),))
         self.sample_legend = QLabel(self.widget(1))
         self.sample_legend.setWordWrap(True)
@@ -164,6 +175,8 @@ class ProposalView(QTabWidget):
 
     def draw_recipe(self):
         channel = self.channels.currentData()
+        stages = self.result.stages.get(channel, ()) if channel is not None else ()
+        self.recipe_stages.setVisible(bool(stages))
         if channel is None:
             replace_chart(self.recipe, QChart())
             self.recipe_note.setText("")
@@ -174,10 +187,42 @@ class ProposalView(QTabWidget):
         detail = f"{len(profile.time)} knots · {profile.values.min():.5g} to {profile.values.max():.5g} {unit}"
         if channel == "feed":
             detail += f" · total antisolvent {profile.total():.5g} g"
+            dosing = dose_landmarks(profile)
+            if dosing is not None:
+                detail += f" · 5–95% dose from {dosing[0]:.5g} to {dosing[-1]:.5g} s"
         if channel == "temperature" and not profile.step:
             cooling = np.max(np.r_[0., -60 * np.diff(profile.values) / np.diff(profile.time)])
             detail += f" · peak cooling {cooling:.5g} °C/min"
+            timing = cooling_landmarks(profile)
+            if timing is not None:
+                detail += f" · 10–90% cooling from {timing[0]:.5g} to {timing[-1]:.5g} s"
+        if channel == "seed":
+            detail += " · seeded at 0 s" if profile.values[0] > 0 else " · unseeded"
         self.recipe_note.setText(detail)
+        if stages:
+            self.draw_stage_rows(channel, unit, stages)
+
+    def draw_stage_rows(self, channel, unit, stages):
+        horizon = self.result.horizon
+        boundaries = np.r_[0., np.cumsum([stage.duration_s for stage in stages])]
+        boundaries[-1] = min(fsum(stage.duration_s for stage in stages), horizon)
+        rows = []
+        for index, (stage, start, end) in enumerate(zip(stages, boundaries, boundaries[1:]), 1):
+            if stage.start != stage.end:
+                kind = "Ramp"
+            else:
+                kind = "Off" if channel == "feed" and stage.start == 0. else "Hold"
+            rows.append((str(index), kind, start, end, stage.start, stage.end))
+        if boundaries[-1] < horizon:
+            value = 0. if channel == "feed" else stages[-1].end
+            rows.append(("To batch end", "Off" if channel == "feed" else "Hold",
+                         boundaries[-1], horizon, value, value))
+        table = self.recipe_stages
+        table.setHorizontalHeaderLabels(("Stage", "Type", "Start (s)", "End (s)", f"Start ({unit})", f"End ({unit})"))
+        table.setRowCount(len(rows))
+        for row, values in enumerate(rows):
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value if isinstance(value, str) else f"{value:.8g}"))
 
     def draw_samples(self):
         chart = QChart()

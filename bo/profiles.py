@@ -155,7 +155,8 @@ def case_runs(case, folder=None):
                 profiles[key] = profile.window(0, end)
         seed = scalar(process.get("SeedMass"))
         if seed is not None and seed >= 0:
-            profiles["seed"] = Profile(np.array([0.]), np.array([seed]), "Process setting")
+            profiles["seed"] = Profile(np.array([0.]), np.array([seed]),
+                                       "Seed at batch start" if seed else "Unseeded")
         if "stirring" not in profiles:
             rpm = next((value for key in STIRRING_FIELDS
                         if (value := scalar(process.get(key))) is not None and value >= 0), None)
@@ -228,3 +229,7 @@ def constraint_values(channel, profile):
 def violations(values, lower, upper):
     return any((lower is not None and value < lower) or (upper is not None and value > upper)
                for value in values)
+
+
+def selected_horizon(state):
+    return max((state["runs"][index]["metrics"]["duration"] for index in state["selected"]), default=None)

@@ -11,16 +11,13 @@ datas = [(str(root / "assets"), "assets"),
 datas += collect_data_files("pyDOE3")
 datas += collect_data_files("pyvis")
 hiddenimports = ["MAIN_WINDOW", "matplotlib.backends.backend_qtagg", "matplotlib.backends.backend_agg", "pyDOE3"]
-for optional in ("nidaqmx", "sqlalchemy", "psycopg"):
+for optional in ("nidaqmx", "sqlalchemy", "psycopg", "sklearn"):
     if find_spec(optional):
         hiddenimports.append(optional)
-# Include the BO runtime together when both optional dependencies are installed.
-bo_imports = ("torch", "sklearn")
-include_bo = all(find_spec(module) is not None for module in bo_imports)
 exclusions = ["PyQt5", "PyQt6", "PySide2", "tkinter", "pytest", "tensorflow", "keras",
-              "torchvision", "jax", "jaxlib", "numba", "dask", "notebook"]
-if not include_bo:
-    exclusions.extend([*bo_imports, "sympy"])
+              "torch", "torchvision", "sympy", "jax", "jaxlib", "numba", "dask", "notebook"]
+if "sklearn" not in hiddenimports:
+    exclusions.append("sklearn")
 a = Analysis([str(root / "launcher.py")], pathex=[str(root)], binaries=[], datas=datas,
              hiddenimports=hiddenimports, hookspath=[], hooksconfig={}, runtime_hooks=[],
              excludes=exclusions, noarchive=False)
@@ -31,8 +28,15 @@ def is_qml_linker_object(entry):
     path = entry[0].replace("\\", "/").lower()
     return path.startswith("pyside6/qml/") and path.endswith(".obj")
 
+
+def is_legacy_bo_checkpoint(entry):
+    path = entry[0].replace("\\", "/").lower()
+    return path.startswith("assets/bo/") and path.endswith((".pt", ".pth"))
+
+
 a.binaries = [entry for entry in a.binaries if not is_qml_linker_object(entry)]
-a.datas = [entry for entry in a.datas if not is_qml_linker_object(entry)]
+a.datas = [entry for entry in a.datas
+           if not (is_qml_linker_object(entry) or is_legacy_bo_checkpoint(entry))]
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="CrystaLoop", debug=False,
           bootloader_ignore_signals=False, strip=False, upx=False, console=os.environ.get("CRYSTALOOP_BUILD_CONSOLE") == "1",
