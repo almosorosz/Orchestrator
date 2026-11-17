@@ -60,9 +60,14 @@ class AdvancedSettings(QDialog):
             )
         )
         self.inputs = {}
-        self.comparison_button = QPushButton("Compare PBM with QMOM")
-        self.comparison_button.setEnabled(hasattr(parent, "case"))
-        self.comparison_button.clicked.connect(self.show_comparison)
+        self.comparison_button = QPushButton("Compare HR-FVM to QMOM")
+        self.mesh_validation_button = QPushButton("Mesh validation")
+        comparison_actions = QHBoxLayout()
+        for button, callback in ((self.comparison_button, self.show_comparison),
+                                 (self.mesh_validation_button, self.show_mesh_validation)):
+            button.setEnabled(hasattr(parent, "case"))
+            button.clicked.connect(callback)
+            comparison_actions.addWidget(button)
         layout = QVBoxLayout(self)
         groups = QHBoxLayout()
         layout.addLayout(groups)
@@ -85,7 +90,7 @@ class AdvancedSettings(QDialog):
                 self.inputs[key] = field
                 form.addRow(label, field)
             if fields is self.mesh_fields:
-                form.addRow(self.comparison_button)
+                form.addRow(comparison_actions)
             groups.addWidget(group, 1)
 
         note = QLabel("The global search uses differential evolution, followed by local "
@@ -127,7 +132,13 @@ class AdvancedSettings(QDialog):
 
     def show_comparison(self):
         from .comparison_dialog import ComparisonDialog
+        self.show_mesh_dialog(ComparisonDialog)
 
+    def show_mesh_validation(self):
+        from .mesh_validation_dialog import MeshValidationDialog
+        self.show_mesh_dialog(MeshValidationDialog)
+
+    def show_mesh_dialog(self, dialog_type):
         values = self.read_inputs(self.mesh_fields)
         if values is None:
             return
@@ -139,7 +150,7 @@ class AdvancedSettings(QDialog):
         settings = {**self.pbm, **values}
         case = {**case, "pbmsetting": settings}
         index = parent.model.currentData()
-        dialog = ComparisonDialog(case, self, model_index=index)
+        dialog = dialog_type(case, self, model_index=index)
         dialog.exec()
         dialog.deleteLater()
 

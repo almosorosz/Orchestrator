@@ -3,7 +3,7 @@ from time import monotonic
 
 import numpy as np
 
-from .distribution import cell_volumes, d_values
+from .distribution import cell_volumes, d_values, finite_volume_density
 from .solver import model_parameters, simulate
 from .validation.kinetics_sweep import pbm_values
 from .validation.qmom import quadrature, solve_ccas_qmom
@@ -27,6 +27,13 @@ def percentile_history(csd, state, process, settings, *, cancelled=None):
     return np.asarray(percentiles).T
 
 
+def initial_api_mass(experiment, process):
+    concentration = (experiment["InitialConcentration"] if "InitialConcentration" in experiment
+                     else np.asarray(experiment["ConcentrationData"]).reshape(2, -1)[1, 0])
+    return (process["SeedMass"] + concentration / (1 - concentration)
+            * (process["SolvMass"] + process["AntiSolvMass"]))
+
+
 def compare_model(model, experiment, process, solubility, settings, *, cancelled=None, progress=None):
     started = monotonic()
     parameters = model_parameters(model)
@@ -43,15 +50,9 @@ def compare_model(model, experiment, process, solubility, settings, *, cancelled
     settings = {**settings, "N": cells, "Lmin": bounds[0], "Lmax": bounds[-1]}
     values, _ = pbm_values(count, concentration, csd, state, process, settings)
     moments = np.stack([values[f"M{i}"] for i in range(6)])
-    volumes = cell_volumes(bounds, process["ShapeFactor"])
     percentiles = percentile_history(csd, state, process, settings, cancelled=cancelled)
-    final_volume = np.maximum(csd[1], 0) * volumes * np.diff(bounds)
-    final_density = (100*final_volume/final_volume.sum()/np.diff(bounds)
-                     if final_volume.sum() > 0 else np.zeros(cells))
-    initial_c = (experiment["InitialConcentration"] if "InitialConcentration" in experiment
-                 else np.asarray(experiment["ConcentrationData"]).reshape(2, -1)[1, 0])
-    initial_api = (process["SeedMass"] + initial_c/(1-initial_c)
-                   * (process["SolvMass"] + process["AntiSolvMass"]))
+    final_density = finite_volume_density(csd[1], bounds, process["ShapeFactor"])
+    initial_api = initial_api_mass(experiment, process)
     temperature = np.interp(time, *np.asarray(experiment["TemperatureData"]).reshape(2, -1))
     anti = 1 - state[cells + 2]
     kelvin = temperature + 273.15

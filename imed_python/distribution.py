@@ -9,6 +9,14 @@ def cell_volumes(edges, shape_factor):
     return (boundary_volumes[:-1] + boundary_volumes[1:]) / 2
 
 
+def finite_volume_density(number_density, edges, shape_factor):
+    """Return percentage volume per unit size on the finite-volume cells."""
+    widths = np.diff(edges)
+    volume = np.maximum(number_density, 0) * cell_volumes(edges, shape_factor) * widths
+    total = volume.sum()
+    return 100 * volume / total / widths if total > 0 else np.zeros_like(volume)
+
+
 def seed_number_density(experiment, process, edges):
     """Convert the measured volume CSD to the common finite-volume seed state."""
     seed_mass = float(process["SeedMass"])
