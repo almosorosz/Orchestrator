@@ -76,6 +76,7 @@ def bo_inputs(target, state):
     directory.mkdir(exist_ok=True)
     selected = set(state["selected"])
     rows = [{"experiment": i + 1, "name": run["name"], "selected": i in selected,
+             "recording": run.get("recording", ""),
              "recipe_stage": run.get("recipe_stage", ""), **run["metrics"]}
             for i, run in enumerate(state["runs"])]
     pd.DataFrame(rows).to_csv(directory / "observations.csv", index=False)

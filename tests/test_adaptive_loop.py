@@ -251,6 +251,12 @@ class AdaptiveLoopTests(unittest.TestCase):
         self.assertTrue(all(json.loads(path.read_text())["status"] == "completed"
                             for path in summaries.glob("*/summary.json")))
         self.assertEqual(len(list((output / "models").glob("*/recommendation.json"))), 1)
+        self.assertTrue(self.wait_for(lambda: len(window.bo_page.state["runs"]) == 7), logs)
+        self.assertIn(6, window.bo_page.state["selected"])
+        self.assertIsNone(window.bo_page.proposal)
+        self.assertTrue(Path(window.bo_page.state["runs"][-1]["recording"]).is_file())
+        imported, = (output / "models").glob("_recipe_bo_*/recipe_inputs.bo.json")
+        self.assertEqual(len(json.loads(imported.read_text())["runs"]), 7)
 
     def test_load_and_start_bo_five_run_preset(self):
         self.check_five_run_preset("bo")
@@ -303,6 +309,14 @@ class AdaptiveLoopTests(unittest.TestCase):
                 self.assertEqual(result["status"], "completed")
                 self.assertEqual(len(result["runs"]), 1)
                 self.assertFalse(window.execution.timer.isActive())
+                self.assertTrue(self.wait_for(lambda: len(panel.case["ExpData"]) == 2))
+                added = panel.case["ExpData"][-1]
+                self.assertEqual(added["RecipeSource"], "D-optimal design")
+                self.assertTrue(Path(added["RecordingFile"]).is_file())
+                self.assertEqual(panel.case["ProcInf"][-1]["No"], 2)
+                models = output.parent / "models"
+                imported, = models.glob("_recipe_imed_*/recipe_inputs.imed.json")
+                self.assertEqual(len(read_native_case(imported)["ExpData"]), 2)
             finally:
                 self.close_window(window)
 

@@ -193,8 +193,11 @@ def case_runs(case, folder=None, *, controls=None):
         feed = measured_feed.window(0, end) if measured_feed and measured_feed.time[0] == 0 and (
             len(measured_feed.time) == 1 or measured_feed.time[-1] >= end) else profiles.get("feed")
         metrics.update(yields(case.get("Solubility"), process, initial, final, temperature.values[-1], feed))
-        runs.append({"name": display_name(exp, f"Experiment {index + 1}"), "metrics": metrics,
-                     "profiles": {channel: profile.payload() for channel, profile in profiles.items()}})
+        run = {"name": display_name(exp, f"Experiment {index + 1}"), "metrics": metrics,
+               "profiles": {channel: profile.payload() for channel, profile in profiles.items()}}
+        if isinstance(exp.get("RecordingFile"), str):
+            run["recording"] = exp["RecordingFile"]
+        runs.append(run)
     if not runs:
         raise ValueError("No experiments with a usable temperature timeline were found.")
     return runs

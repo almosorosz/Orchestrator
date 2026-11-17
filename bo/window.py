@@ -415,7 +415,7 @@ class BOWindow(QWidget):
 
         def execute_recipe():
             try:
-                if self.recipe_launcher(profiles):
+                if self.recipe_launcher(profiles, source=stages[steps.currentRow()]["name"]):
                     dialog.accept()
             except ValueError as error:
                 note.setText(str(error))

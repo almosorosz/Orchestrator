@@ -39,3 +39,17 @@ class CampaignImportTests(unittest.TestCase):
         self.assertAlmostEqual(np.trapezoid(feed[1], feed[0]), 4)
         with self.assertRaisesRegex(ValueError, "opposite"):
             scale_to_feed(scale, direction=-1, smoothing=1)
+
+    def test_bo_can_import_size_measurements_without_concentration(self):
+        file = Mock()
+        samples = "elapsed_s,T1.temp_external,D101.value,D501.value,D901.value\n0,50,11,20,30\n10,45,12,25,35\n"
+        file.open.side_effect = lambda **kwargs: io.StringIO(samples)
+        mapping = {"Temperature": "T1.temp_external", "D10": "D101.value",
+                   "D50": "D501.value", "D90": "D901.value"}
+        options = {"start": 0, "end": 10, "concentration_multiplier": 1, "scale_direction": -1,
+                   "smoothing": 1, "initial_concentration": None, "seed_percentiles": None, "no_feed": True}
+        experiment = import_run(file, mapping, **options, require_initial_concentration=False)
+        self.assertNotIn("InitialConcentration", experiment)
+        np.testing.assert_array_equal(experiment["FinalD10D50D90"], [12, 25, 35])
+        with self.assertRaisesRegex(ValueError, "initial concentration"):
+            import_run(file, mapping, **options)

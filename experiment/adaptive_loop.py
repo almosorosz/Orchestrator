@@ -187,6 +187,47 @@ def _column_exists(column, configs):
     return field in DEVICE_RECORDING_COLUMNS.get(kind, ())
 
 
+def recording_mapping(setup, roles, configs):
+    mapping = {key: next((column for column in ALIASES[key] if _column_exists(column, configs)), "")
+               for key in CHANNELS}
+    mapping["Temperature"] = f"{roles['T']}.temp_external"
+    mapping.update(setup["channels"])
+    invalid = [column for column in mapping.values() if column and not _column_exists(column, configs)]
+    if invalid:
+        raise ValueError("Map channels to assigned devices and monitors: " + ", ".join(invalid))
+    columns = [column for column in mapping.values() if column]
+    if len(set(columns)) != len(columns):
+        raise ValueError("Map each recorded measurement to a distinct column.")
+    return mapping
+
+
+def read_completed_recordings(folder, expected, recording, mapping, processes_by_id, windows, *,
+                              require_initial_concentration=True):
+    runs = campaign_runs(folder)
+    run_ids = [read_json(file.with_name("run.json"))["experiment_id"] for _, _, file in runs]
+    if set(run_ids) != set(expected) or len(set(run_ids)) != len(runs):
+        raise ValueError("Recorded experiment identities differ from the completed campaign manifest.")
+    demo = import_simulated_campaign(folder)
+    if demo is not None:
+        return demo["ExpData"], demo["ProcInf"], runs
+    experiments, processes = [], []
+    for (number, name, file), experiment_id in zip(runs, run_ids):
+        process = processes_by_id[experiment_id]
+        start, end = windows.get(experiment_id, (recording["start_s"], recording["end_s"]))
+        initial = process.get("InitialConcentration", recording["initial_concentration"])
+        experiment = import_run(
+            file, mapping, start=start, end=end, initial_concentration=initial,
+            concentration_multiplier=recording["concentration_multiplier"],
+            scale_direction=recording["scale_direction"], smoothing=recording["smoothing"],
+            seed_percentiles=recording["seed_percentiles"] if process["SeedMass"] else None,
+            no_feed=recording["no_feed"], require_initial_concentration=require_initial_concentration,
+        )
+        experiment.update(Name=name, RecordingFile=str(file))
+        experiments.append(experiment)
+        processes.append({**process, "No": number or len(processes) + 1})
+    return experiments, processes, runs
+
+
 class RecipeCompiler:
     """Resolve process profiles to the assigned devices for LOOP and one-off execution."""
 
@@ -451,16 +492,7 @@ class AdaptiveLoop:
             if process["SeedMass"] and not self.setup["recording"]["seed_percentiles"]:
                 raise ValueError("Enter the seed D10/D50/D90 for seeded measurements.")
             self.process_by_id[experiment.experiment_id] = process
-        self.mapping = {key: next((column for column in ALIASES[key] if _column_exists(column, self.configs)), "")
-                        for key in CHANNELS}
-        self.mapping["Temperature"] = f"{self.roles['T']}.temp_external"
-        self.mapping.update(self.setup["channels"])
-        invalid = [column for column in self.mapping.values() if column and not _column_exists(column, self.configs)]
-        if invalid:
-            raise ValueError("Map channels to assigned devices and monitors: " + ", ".join(invalid))
-        columns = [column for column in self.mapping.values() if column]
-        if len(set(columns)) != len(columns):
-            raise ValueError("Map each recorded measurement to a distinct column.")
+        self.mapping = recording_mapping(self.setup, self.roles, self.configs)
         self._require_channels("Temperature")
         recording = self.setup["recording"]
         if recording["initial_concentration"] is None:
@@ -567,32 +599,10 @@ class AdaptiveLoop:
                 raise ValueError("Fix simulated IMED seed mass to a dose available in the validation DoE.")
 
     def _read_batch(self, manifest, target, report):
-        folder = Path(manifest["campaign_folder"])
-        runs = campaign_runs(folder)
-        identities = {read_json(file.with_name("run.json"))["experiment_id"] for _, _, file in runs}
-        if identities != set(manifest["experiments"]) or len(identities) != len(runs):
-            raise ValueError("Recorded experiment identities differ from the completed campaign manifest.")
+        experiments, processes, runs = read_completed_recordings(
+            Path(manifest["campaign_folder"]), manifest["experiments"], self.setup["recording"],
+            self.mapping, self.process_by_id, self.windows)
         loop_outputs.saved_recordings(target, runs, report)
-        demo = import_simulated_campaign(folder)
-        if demo is not None:
-            return demo["ExpData"], demo["ProcInf"]
-        recording = self.setup["recording"]
-        experiments, processes = [], []
-        for number, name, file in runs:
-            experiment_id = read_json(file.with_name("run.json"))["experiment_id"]
-            process = self.process_by_id[experiment_id]
-            start, end = self.windows.get(experiment_id, (recording["start_s"], recording["end_s"]))
-            initial = process.get("InitialConcentration", recording["initial_concentration"])
-            experiment = import_run(
-                file, self.mapping, start=start, end=end, initial_concentration=initial,
-                concentration_multiplier=recording["concentration_multiplier"],
-                scale_direction=recording["scale_direction"], smoothing=recording["smoothing"],
-                seed_percentiles=recording["seed_percentiles"] if process["SeedMass"] else None,
-                no_feed=recording["no_feed"],
-            )
-            experiment.update(Name=name, RecordingFile=str(file))
-            experiments.append(experiment)
-            processes.append({**process, "No": number or len(processes) + 1})
         return experiments, processes
 
     def recommend(self, manifest, cancelled, report, *, publish=None, collect_only=False):

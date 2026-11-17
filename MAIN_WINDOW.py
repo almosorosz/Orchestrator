@@ -77,8 +77,10 @@ from hardware_devices.capabilities import is_monitor_only
 from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
 from experiment.adaptive_loop import (
-    AdaptiveLoop, RecipeCompiler, check_loop_folders, device_configuration_changed, validate_setup,
+    AdaptiveLoop, RecipeCompiler, check_loop_folders, device_configuration_changed, recording_mapping, validate_setup,
 )
+from experiment.recipe_feedback import RecipeFeedback
+from imed_python.campaign_import import read_json as read_campaign_json
 from gui.loop_model_job import LoopModelJob
 from gui.loop_model_views import LoopModelViews
 import logging
@@ -331,6 +333,10 @@ class MainWindow(QMainWindow):
         self._assigned_doe_campaign = None
         self._assigned_doe_configs = {}
         self._recipe_sources = {}
+        self._pending_recipe_feedback = None
+        self._recipe_feedback_timer = QTimer(self)
+        self._recipe_feedback_timer.setInterval(1000)
+        self._recipe_feedback_timer.timeout.connect(self._collect_recipe_feedback)
         self._adaptive_loop = None
         self._loop_model_job = None
         self._loop_recommendation = None
@@ -1649,50 +1655,140 @@ class MainWindow(QMainWindow):
         return RecipeCompiler(setup, template, configs, self.experiment_service.exp_storage,
                               assignments, monitor_ids, mode)
 
-    def execute_modeled_recipe(self, mode, profiles, process=None):
+    def execute_modeled_recipe(self, mode, profiles, process=None, *, source=None, seed_template=None):
         panel = self.control_panel
         try:
             if (self._adaptive_loop is not None or self._loop_model_job is not None
                     or self.execution.timer.isActive() or panel.hardware_manager.is_busy):
                 raise ValueError("Wait for the active experiment or loop to finish before executing a recipe.")
+            if self._pending_recipe_feedback is not None:
+                raise ValueError("Wait for the previous recipe's recordings to finish saving and importing.")
             setup = validate_setup(self.settings_page.loop_setup)
             configs, _ = panel.collect_current_configuration()
             connected = self._connected_loop_devices()
             compiler = self._recipe_compiler(mode, setup, configs, connected)
             compiler.check_support(compiler.template)
-            defaults = compiler.process_defaults(self.imed_page.panel.checkpoint_case())
+            imed = self.imed_page.panel
+            imed_case = imed.checkpoint_case()
+            defaults = compiler.process_defaults(imed_case)
             recipe_process = {**defaults, **(process or {})}
             if mode == "bo" and (seed := profiles.get("seed")) is not None:
                 recipe_process["SeedMass"] = float(seed.values[0])
-            campaign, _ = compiler.build(profiles, recipe_process, name=f"{mode.upper()} recipe",
-                                         source=mode, default_seed=defaults["SeedMass"])
+            campaign, window = compiler.build(profiles, recipe_process, name=f"{mode.upper()} recipe",
+                                              source=mode, default_seed=defaults["SeedMass"])
             compiler.check_devices(campaign, configs, connected)
+            mapping = {} if compiler.demo else recording_mapping(setup, compiler.roles, compiler.configs)
+            feed = profiles.get("feed")
+            recording = {**setup["recording"], "no_feed": feed is None or not (feed.values > 0).any()}
+            solubility = imed_case.get("Solubility", {})
+            if compiler.demo and not solubility:
+                from imed_python.demo_campaign import model_inputs
+
+                solubility = model_inputs(compiler.demo["seeded"])[3]
+            feedback = RecipeFeedback(
+                mode, campaign.campaign_id, campaign.experiments[0].experiment_id, recording, mapping, compiler.roles,
+                recipe_process, window, solubility, source or f"{mode.upper()} recipe", seed_template or {},
+                self.settings_page.MODEL_path_input.text().strip())
+            dataset = imed.case if mode == "imed" else self.bo_page.state["runs"]
+            snapshot = deepcopy(imed_case if mode == "imed" else self.bo_page.state)
             if self.experiment_page.dashboard is not None:
                 self.end_experiment_session()
                 if self.experiment_page.dashboard is not None:
                     raise ValueError("Finish saving and close the previous experiment session first.")
             self.log_message(f"{mode.upper()} recipe validated. Launching one recommended experiment.")
             folder = self.settings_page.exp_path_input.text().strip()
-            override = {"enabled": True, "output_folder": folder} if folder else None
+            override = {"enabled": True}
+            if folder:
+                override["output_folder"] = folder
             dashboard = panel.start_campaign(campaign, override)
             if dashboard is None:
                 raise ValueError("The experiment runner could not start the recipe. Check the Control Panel.")
             dashboard.single_run = True
             dashboard.btn_start.setEnabled(False)
+            dashboard.campaign_finished.connect(lambda result: self._recipe_finished(result, feedback, dataset, snapshot))
             self._loop_dashboard = dashboard
             return True
         except (ValueError, TypeError, RuntimeError, OSError, KeyError) as error:
             self.log_message(f"Could not execute the {mode.upper()} recipe. {error}", "WARNING")
             raise ValueError(str(error)) from error
 
-    def _execute_imed_recipe(self, experiment, process):
+    def _execute_imed_recipe(self, experiment, process, *, source=None):
         from bo.profiles import make_profile
 
         profiles = {key: make_profile(experiment.get(field), "IMED design")
                     for key, field in (("temperature", "TemperatureData"), ("feed", "FlowRateData"))}
         if not all(profiles.values()):
             raise ValueError("The IMED recipe needs finite temperature and antisolvent profiles.")
-        return self.execute_modeled_recipe("imed", profiles, process)
+        initial = experiment.get("InitialConcentration")
+        if initial is not None:
+            process = {**process, "InitialConcentration": float(initial)}
+        seed_template = {key: experiment[key] for key in ("InitialCSDsData", "InitialD10D50D90") if key in experiment}
+        return self.execute_modeled_recipe("imed", profiles, process, source=source, seed_template=seed_template)
+
+    def _recipe_finished(self, result, feedback, dataset, snapshot):
+        if result.get("campaign_id") != feedback.campaign_id:
+            return
+        if result["status"] != "completed" or not result.get("recording_folder"):
+            self.log_message(f"{feedback.mode.upper()} recipe ended without a completed recording. "
+                             f"{result.get('error', '')}", "WARNING")
+            return
+        folder = Path(result["recording_folder"])
+        self._pending_recipe_feedback = (feedback, dataset, snapshot, folder)
+        if result.get("recording_pending"):
+            self.log_message(f"Waiting for the {feedback.mode.upper()} recipe recording to finish saving.")
+        self._recipe_feedback_timer.start()
+        self._collect_recipe_feedback()
+
+    @Slot()
+    def _collect_recipe_feedback(self):
+        if self._pending_recipe_feedback is None:
+            self._recipe_feedback_timer.stop()
+            return
+        feedback, dataset, snapshot, folder = self._pending_recipe_feedback
+        mode = feedback.mode.upper()
+        try:
+            summary = folder / "summary.json"
+            if not summary.is_file() or not read_campaign_json(summary).get("recording_complete"):
+                if (folder / ".writer.lock").exists():
+                    return
+                raise ValueError("The experiment recorder did not finish writing the run files.")
+            measured, runs = feedback.read(folder)
+            imed = self.imed_page.panel
+            bo = self.bo_page
+            current = dataset is (imed.case if feedback.mode == "imed" else bo.state["runs"])
+            if current:
+                base = imed.checkpoint_case() if feedback.mode == "imed" else bo.state
+            else:
+                base = snapshot
+            updated = feedback.merge(base, measured, folder)
+        except PermissionError:
+            return
+        except (ValueError, OSError, TypeError, KeyError) as error:
+            self._recipe_feedback_timer.stop()
+            self._pending_recipe_feedback = None
+            self.log_message(f"Could not add the recipe recording to {mode}. {error} Recording folder {folder}", "ERROR")
+            return
+
+        self._recipe_feedback_timer.stop()
+        self._pending_recipe_feedback = None
+        if current and feedback.mode == "imed":
+            imed.case.update({key: updated[key] for key in ("ExpData", "ProcInf", "Solubility")})
+            imed.campaign_path = folder
+            imed.refresh_status()
+            imed.show_message(f"Added the completed recipe to Experimental Input ({len(updated['ExpData'])} experiments).")
+        elif current:
+            bo.state.update({key: updated[key] for key in ("runs", "selected", "source")})
+            bo.load_stage_templates()
+            bo.invalidate_proposal()
+            bo.refresh_data()
+            bo.status.setText(f"Added the completed recipe to BO ({len(updated['runs'])} experiments).")
+        try:
+            destination = feedback.save(folder, updated, runs, self.log_message)
+        except (ValueError, OSError, TypeError) as error:
+            self.log_message(f"Could not save the {mode} dataset snapshot. {error} Recording folder {folder}", "ERROR")
+        else:
+            target = "the open dataset" if current else "the recipe's original dataset"
+            self.log_message(f"Added the recipe recording to {mode} in {target}. Saved {destination}.", "SUCCESS")
 
     def _prepare_adaptive_loop(self, mode, campaign):
         from experiment.doe_campaign import ProfileAssignment
@@ -1701,6 +1797,8 @@ class MainWindow(QMainWindow):
         experiments, models, _ = settings.get_environment_inputs()
         problems = check_loop_folders(experiments, models)
         try:
+            if self._pending_recipe_feedback is not None:
+                raise ValueError("Wait for the previous recipe's recordings to finish saving and importing.")
             setup = validate_setup(settings.loop_setup)
             if campaign is self._assigned_doe_campaign:
                 assignments = self._doe_assignments
@@ -2362,7 +2460,7 @@ class MainWindow(QMainWindow):
         self.imed_page = IMEDPage(parent=self)
         self.imed_page.panel.recipe_launcher = self._execute_imed_recipe
         self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case,
-                                execute_recipe=lambda profiles: self.execute_modeled_recipe("bo", profiles))
+                                execute_recipe=lambda profiles, **options: self.execute_modeled_recipe("bo", profiles, **options))
         self.modeling_workflow = "imed"
         self.imed_page.bo_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.bo_page)))
         self.bo_page.imed_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.imed_page)))

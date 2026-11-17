@@ -323,7 +323,8 @@ class DesignDialog(QDialog):
             return
         _, experiment, process = self.recipe_result
         try:
-            if self.recipe_launcher(experiment, process):
+            method = "D-optimal design" if self.optimal else "Model discrimination"
+            if self.recipe_launcher(experiment, process, source=method):
                 self.accept()
         except ValueError as error:
             self.status.setText(str(error))

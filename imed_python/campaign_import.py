@@ -101,7 +101,7 @@ def seed_distribution(percentiles):
 
 def import_run(file, mapping, *, start, end, concentration_multiplier, scale_direction,
                smoothing, initial_concentration, seed_percentiles, no_feed,
-               feed_channel=None, feed_multiplier=1.):
+               feed_channel=None, feed_multiplier=1., require_initial_concentration=True):
     if feed_channel:
         mapping = {**mapping, "AS flow": feed_channel}
     selected = {role: {} for role in (*CHANNELS, "AS flow")}
@@ -147,9 +147,10 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
     if np.any((concentration[1] < 0) | (concentration[1] >= 1)):
         raise ValueError("Converted concentration must be in [0, 1) g/g solution. Check its units.")
     if initial_concentration is None:
-        if not concentration.size or concentration[0, 0] != 0:
+        if concentration.size and concentration[0, 0] == 0:
+            initial_concentration = float(concentration[1, 0])
+        elif require_initial_concentration:
             raise ValueError("Enter an initial concentration when the channel has no sample at the run start.")
-        initial_concentration = float(concentration[1, 0])
     scale = within_window("AS scale")
     if no_feed:
         added = feed = np.array([[0., duration], [0., 0.]])
@@ -182,7 +183,8 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
     return {
         "TemperatureData": temperature, "ConcentrationData": concentration,
         "RecordingStart_s": origin,
-        "InitialConcentration": initial_concentration, "CountsData": within_window("FBRM"),
+        **({"InitialConcentration": initial_concentration} if initial_concentration is not None else {}),
+        "CountsData": within_window("FBRM"),
         "FlowRateData": feed, "AntisolventScaleData": scale, "AddedAntisolventData": added,
         "InitialCSDsData": seed_distribution(seed_percentiles) if seed_percentiles else EMPTY.copy(),
         "InitialD10D50D90": np.asarray(seed_percentiles or []), "FinalCSDsData": EMPTY.copy(),

@@ -575,7 +575,10 @@ last follow-up.
 For one-off execution, use **Execute recipe** beside the BO proposal or an IMED
 design result. CrystaLoop reuses the applied DoE assignments or the Control Panel
 assignments in **Automatic loop setup → Devices**. It checks connections and
-target limits, then records one experiment through the Control Panel runner.
+limits, then runs one experiment. Once the recording is complete, CrystaLoop adds
+the measurements to the BO training set or IMED Experimental Input and saves an
+updated dataset in the MODEL folder. If no MODEL folder is configured, the snapshot
+is saved in `model_inputs` under the campaign recording folder.
 Previous IMED designs remain available in their design window and are labeled
 when they were generated from earlier inputs.
 
