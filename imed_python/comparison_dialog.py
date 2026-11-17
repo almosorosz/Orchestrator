@@ -20,10 +20,10 @@ class ComparisonJob(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, case, model_index, experiment_index, parent):
+    def __init__(self, case, model_index, experiment_index, parent, *, cancelled):
         super().__init__(parent)
         self.case, self.model_index, self.experiment_index = case, model_index, experiment_index
-        self.cancel_requested = Event()
+        self.cancelled = cancelled
 
     def run(self):
         try:
@@ -31,7 +31,7 @@ class ComparisonJob(QThread):
                 self.case["ModelParameter"][self.model_index],
                 self.case["ExpData"][self.experiment_index], self.case["ProcInf"][self.experiment_index],
                 self.case["Solubility"], self.case["pbmsetting"],
-                cancelled=self.cancel_requested.is_set, progress=self.message.emit)
+                cancelled=self.cancelled, progress=self.message.emit)
         except InterruptedError:
             self.failed.emit("PBM–QMOM comparison stopped.")
         except Exception as error:
@@ -48,6 +48,9 @@ class ComparisonDialog(QDialog):
         self.case = case
         self.result = None
         self.job = None
+        self.cancel_requested = Event()
+        # Diffrax specializes the event condition on the callback identity.
+        self.cancelled = self.cancel_requested.is_set
         settings = case.get("pbmsetting")
         settings = settings if isinstance(settings, dict) else {}
         self.model = QComboBox()
@@ -141,12 +144,15 @@ class ComparisonDialog(QDialog):
             canvas.draw_idle()
 
     def start(self):
+        if self.job is not None:
+            return
+        self.cancel_requested.clear()
         self.clear_result()
         settings = {"Lmin": 0., **self.case.get("pbmsetting", {}),
                     "Lmax": self.lmax.value(), "N": self.cells.value()}
         self.request_case = {**self.case, "pbmsetting": settings}
         self.job = ComparisonJob(self.request_case, self.model.currentIndex(),
-                                 self.experiment.currentIndex(), self)
+                                 self.experiment.currentIndex(), self, cancelled=self.cancelled)
         for control in (*self.controls, self.run_button, self.close_button):
             control.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -158,7 +164,7 @@ class ComparisonDialog(QDialog):
 
     def stop(self):
         if self.job is not None:
-            self.job.cancel_requested.set()
+            self.cancel_requested.set()
             self.stop_button.setEnabled(False)
             self.status.setText("Stopping comparison…")
 
