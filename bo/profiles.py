@@ -1,5 +1,5 @@
 """Load, encode and assess profiles in BO's canonical units."""
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -80,6 +80,18 @@ class Profile:
 def make_profile(points, source, *, step=False):
     trace = pairs(points)
     return Profile(*trace, source, step) if trace is not None else None
+
+
+def recipe_data(profiles, stages, horizon):
+    seed = profiles.get("seed")
+    return {
+        "duration_s": horizon,
+        "seeding": None if seed is None else {"seeded": bool(seed.values[0]), "mass_g": float(seed.values[0]),
+                                              "time_s": 0. if seed.values[0] > 0 else None},
+        "profile_encoding": "physical-stages",
+        "stages": {key: [asdict(stage) for stage in rows] for key, rows in stages.items()},
+        "profiles": {key: {**profile.payload(), "unit": CHANNELS[key][1]} for key, profile in profiles.items()},
+    }
 
 
 def campaign_profiles(experiment, process, definition, controls=None):

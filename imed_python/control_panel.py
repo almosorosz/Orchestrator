@@ -1,4 +1,5 @@
 """PySide6 port of the MATLAB ControlPanel workflow and loaded-case inspection."""
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -7,19 +8,19 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QLabel, QMainWindow,
+    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .candidate_workers import max_cpu_workers
 from .model_file import save_checkpoint
-from .native_case import CASE_FILTER, MATLAB_FILTER, NATIVE_FILTER, save_native_case
+from .native_case import CASE_FILTER, MATLAB_FILTER, NATIVE_FILTER, read_native_case, save_native_case
 from .kernel_choice import add_kernel_choice, kernel_values
 from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
 from .solver import read_model
 from .solver_choice import SolverChoice
-from .session import clear_matlab_fit_summaries, delete_models, display_name, history, record_step
+from .session import clear_matlab_fit_summaries, delete_models, display_name, history, loop_stages, record_step
 
 
 def table(headers):
@@ -48,6 +49,12 @@ def item_count(value):
     return int(value is not None)
 
 
+def experiment_label(experiment, index):
+    name = display_name(experiment, f"Experiment {index + 1}")
+    source = experiment.get("RecipeSource")
+    return f"{name} ({source})" if isinstance(source, str) and source else name
+
+
 class ControlPanel(QMainWindow):
     WIDTH = 687
     HEIGHT = 538
@@ -70,6 +77,7 @@ class ControlPanel(QMainWindow):
         self.setCentralWidget(self.body)
         self.status = QPlainTextEdit(self.body)
         self.status.setReadOnly(True)
+        self.followup_summary = None
         self.checklist = QFrame(self.body)
         self.checks = {}
         for key, label in (
@@ -98,6 +106,7 @@ class ControlPanel(QMainWindow):
         self.reliability = self.button("Model reliability", lambda: self.show_probabilistic(False))
         self.sensitivity = self.button("Probabilistic sensitivity", lambda: self.show_probabilistic(True))
         self.history_button = self.button("Executed steps", self.show_history)
+        self.stages_button = self.button("IMED Loop stages", self.show_loop_stages)
         self.design.setToolTip("Open forward simulation. Sensitivity analysis is pending.")
         self.numerics = SolverChoice(self.body)
         self.workers = QSpinBox(self.body)
@@ -142,15 +151,19 @@ class ControlPanel(QMainWindow):
         for button in (*self.input_buttons, self.review_inputs, self.candidate_button,
                        self.configurations, *self.estimation_buttons,
                        self.uncertainty_button, self.md_button, self.dopt_button, self.design,
-                       self.reliability, self.sensitivity, self.history_button):
+                       self.reliability, self.sensitivity, self.history_button, self.stages_button):
             button.setMinimumHeight(42)
             workflow_layout.addWidget(button)
         layout.addWidget(workflow)
 
         status = QGroupBox("Case status")
         status_layout = QVBoxLayout(status)
-        self.status.setFixedHeight(105)
+        self.status.setFixedHeight(130)
         status_layout.addWidget(self.status)
+        self.followup_summary = QLabel()
+        self.followup_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.followup_summary.setWordWrap(True)
+        status_layout.addWidget(self.followup_summary)
         checklist = QGridLayout(self.checklist)
         checklist.setContentsMargins(0, 0, 0, 0)
         for index, check in enumerate(self.checks.values()):
@@ -211,6 +224,7 @@ class ControlPanel(QMainWindow):
         self.place(QLabel("CPU workers", self.body), 495, 90, 162, 20)
         self.place(self.workers, 495, 62, 162, 26)
         self.place(self.history_button, 495, 24, 162, 26)
+        self.place(self.stages_button, 495, 495, 162, 26)
         self.place(self.candidate_button, 302, 24, 157, 26)
         self.place(self.review_inputs, 105, 24, 157, 26)
 
@@ -325,20 +339,32 @@ class ControlPanel(QMainWindow):
                   (*self.checks, "MDsimulation", "PPsimulation", "summaryTable")}
         for key, check in self.checks.items():
             check.setChecked(counts[key] > 0)
+        steps = history(self.case)
+        runs = Counter(step["action"] for step in steps)
         self.status.setPlainText("\n".join((
             f"Experiments: {counts['ExpData']}",
             f"Models: {counts['ModelParameter']}",
-            f"Discrimination runs: {counts['MDsimulation']}",
-            f"D-optimal runs: {counts['PPsimulation']}",
-            f"Estimation runs: {counts['MDIteration'] + bool(counts['summaryTable'])}",
-            f"Executed Python steps: {len(history(self.case))}",
+            f"Discrimination runs: {counts['MDsimulation'] + runs['model_discrimination']}",
+            f"D-optimal runs: {counts['PPsimulation'] + runs['d_optimal_design']}",
+            f"Estimation runs: {counts['MDIteration'] + bool(counts['summaryTable']) + runs['parameter_estimation']}",
+            f"Executed Python steps: {len(steps)}",
         )))
+        if self.followup_summary is not None:
+            followups = [(index, item) for index, item in enumerate(self.case.get("ExpData", []), 1)
+                         if isinstance(item.get("RecipeSource"), str) and item["RecipeSource"]]
+            if followups:
+                index, item = followups[-1]
+                stage = f" ({item['RecipeStage']})" if item.get("RecipeStage") else ""
+                self.followup_summary.setText(
+                    f"Experiment {index} · {item['RecipeSource']}{stage}. {item.get('RecipeReason', '')}")
+            self.followup_summary.setVisible(bool(followups))
         self.review_inputs.setEnabled(any(counts[key] for key in ("Solubility", "ProcInf", "ExpData")))
         self.configurations.setEnabled(counts["ModelParameter"] > 0)
-        self.save_button.setEnabled(bool(self.source or history(self.case))
+        self.save_button.setEnabled(bool(self.source or steps)
                                     or any(counts[key] for key in ("ModelParameter", "ExpData", "Solubility")))
         self.save_button.setToolTip("Save current IMED inputs, results, confidence intervals and executed steps.")
-        self.history_button.setEnabled(bool(history(self.case)))
+        self.history_button.setEnabled(bool(steps))
+        self.stages_button.setEnabled(bool(loop_stages(self.case)))
         self.design.setEnabled(
             counts["ExpData"] > 0 and counts["ProcInf"] >= counts["ExpData"]
             and counts["Solubility"] > 0 and counts["ModelParameter"] > 0)
@@ -457,8 +483,7 @@ class ControlPanel(QMainWindow):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             choices = QComboBox()
-            choices.addItems(display_name(entry, f"Experiment {index + 1}")
-                             for index, entry in enumerate(entries))
+            choices.addItems(experiment_label(entry, index) for index, entry in enumerate(entries))
             values = table(("Field", "Value" if is_process else "Stored data"))
 
             def update(index, entries=entries, values=values, is_process=is_process):
@@ -484,8 +509,7 @@ class ControlPanel(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         runs = QComboBox()
-        runs.addItems(str(experiment.get("Name", f"Experiment {i + 1}"))
-                      for i, experiment in enumerate(experiments))
+        runs.addItems(experiment_label(experiment, index) for index, experiment in enumerate(experiments))
         signals = QComboBox()
         for field, label in (
             ("TemperatureData", "Temperature (°C)"), ("ConcentrationData", "Concentration (g/g solution)"),
@@ -666,7 +690,8 @@ class ControlPanel(QMainWindow):
     def show_design(self, optimal):
         from .design_dialog import DesignDialog
 
-        dialog = DesignDialog(self.simulation_case(), optimal, self, workers=self.cpu_workers())
+        dialog = DesignDialog(self.simulation_case(), optimal, self, workers=self.cpu_workers(),
+                              execute_recipe=getattr(self, "recipe_launcher", None))
         dialog.exec()
         dialog.deleteLater()
         self.refresh_status()
@@ -681,11 +706,80 @@ class ControlPanel(QMainWindow):
 
     def show_history(self):
         dialog, layout = self.dialog("IMED | Executed steps")
-        steps = table(("Completed (UTC)", "Step", "Model"))
+        steps = table(("Completed (UTC)", "Step", "Model", "Details"))
         fill_table(steps, [(step["completed_at"], step["action"].replace("_", " "),
-                            int(step["model_index"]) + 1 if int(step["model_index"]) >= 0 else "—")
+                            int(step["model_index"]) + 1 if int(step["model_index"]) >= 0 else "—",
+                            step["result"].get("reason", "") if isinstance(step["result"], dict) else "")
                            for step in history(self.case)])
         layout.addWidget(steps)
+        self.show_dialog(dialog, layout)
+
+    def show_loop_stages(self):
+        from .estimation_dialog import ParameterEstimation
+
+        stages = loop_stages(self.case)
+        if not stages:
+            return
+        dialog, layout = self.dialog("IMED | Loop stages")
+        dialog.resize(920, 600)
+        stage_list = QListWidget()
+        stage_list.setMaximumHeight(150)
+        layout.addWidget(stage_list)
+        candidates = table(("Model", "AIC rank", "ΔAIC", "F-test", "t-tests", "Decision", "Reason"))
+        candidates.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(candidates, 1)
+        path_label = QLabel()
+        path_label.setTextFormat(Qt.TextFormat.PlainText)
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+
+        def stage_path(index):
+            path = Path(stages[index]["case_file"])
+            if not path.is_file() and self.source is not None:
+                return self.source.with_name(path.name)
+            return path
+
+        def open_case():
+            path = stage_path(stage_list.currentRow())
+            try:
+                case = read_native_case(path)
+            except (OSError, ValueError) as error:
+                path_label.setText(str(error))
+                return
+            readout = ParameterEstimation(case, dialog, workers=self.cpu_workers())
+            readout.setWindowTitle(f"IMED | {stages[stage_list.currentRow()]['name']} | Parameter Estimation")
+            readout.run_button.setEnabled(False)
+            readout.save_button.setEnabled(False)
+            readout.exec()
+            readout.deleteLater()
+
+        open_button = self.button("Open stage PE case", open_case)
+        layout.addWidget(open_button)
+
+        def update(index):
+            if index < 0:
+                open_button.setEnabled(False)
+                return
+            stage = stages[index]
+            rows = stage["candidates"]
+            rows = [rows] if isinstance(rows, dict) else rows
+            fill_table(candidates, [
+                (f"{row['model']} · {row['name']}", int(row["rank"]) if np.isfinite(row["rank"]) else "—",
+                 row["delta_aic"] if np.isfinite(row["delta_aic"]) else "—",
+                 "Pass" if row["f_pass"] else "Fail", "Pass" if row["t_pass"] else "Fail",
+                 "Retained" if row["retained"] else "Excluded", row["reason"] if not row["retained"] else "")
+                for row in rows
+            ])
+            path = stage_path(index)
+            path_label.setText(str(path))
+            open_button.setEnabled(path.is_file())
+
+        titles = {"PE": "Parameter Estimation", "MD": "Model Discrimination", "DO": "D-Optimal Design"}
+        for stage in stages:
+            stage_list.addItem(f"{stage['name']} · {titles[stage['kind']]} · {stage['experiments']} experiments")
+        stage_list.currentRowChanged.connect(update)
+        stage_list.setCurrentRow(len(stages) - 1)
         self.show_dialog(dialog, layout)
 
     def show_probabilistic(self, sensitivity):

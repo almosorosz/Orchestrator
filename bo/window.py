@@ -1,5 +1,4 @@
 """Bayesian experiment design shared by the standalone window and CrystalLoop."""
-from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -9,7 +8,7 @@ from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtCharts import QChart
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QPushButton, QTabWidget, QTableWidget,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QPushButton, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -23,7 +22,7 @@ from .decoder import cooling_landmarks, fixed_horizon
 from .physical import physical_profile
 from .physical_fit import initial_spec, read_spec, trace_spec
 from .profiles import (
-    CHANNELS, CONSTRAINTS, TARGETS, case_runs, constraint_values, make_profile,
+    CHANNELS, CONSTRAINTS, TARGETS, case_runs, constraint_values, make_profile, recipe_data,
     selected_horizon, violations,
 )
 from .proposal_view import BAND_SD, ProposalView, chart_view, profile_chart, replace_chart
@@ -100,11 +99,12 @@ def read_bounds(fields):
 class BOWindow(QWidget):
     imed_requested = Signal()
 
-    def __init__(self, parent=None, *, imed_case=None):
+    def __init__(self, parent=None, *, imed_case=None, execute_recipe=None):
         super().__init__(parent)
         self.setWindowTitle("CrystalLoop | Bayesian optimization")
         self.resize(1050, 710)
         self.imed_case = imed_case
+        self.recipe_launcher = execute_recipe
         self.state = empty_settings()
         self.job = None
         self.loop_busy = False
@@ -128,6 +128,8 @@ class BOWindow(QWidget):
             toolbar.addWidget(self.button("IMED", self.imed_requested.emit))
         toolbar.addWidget(self.button("Load BO setup", self.load_file))
         toolbar.addWidget(self.button("Save BO setup", self.save_file))
+        self.stages_button = self.button("BO Loop stages", self.show_loop_stages)
+        toolbar.addWidget(self.stages_button)
         layout.addLayout(toolbar)
         layout.addWidget(self.tabs, 1)
         layout.addWidget(self.status)
@@ -278,8 +280,11 @@ class BOWindow(QWidget):
         layout = self.page("Propose experiment")
         row = QHBoxLayout()
         self.propose_button = self.button("Propose next experiment", self.suggest)
+        self.execute_button = self.button("Execute recipe", self.execute_proposal)
+        self.execute_button.setVisible(self.recipe_launcher is not None)
         self.export_button = self.button("Save proposed recipe", self.save_proposal)
         row.addWidget(self.propose_button)
+        row.addWidget(self.execute_button)
         row.addWidget(self.export_button)
         row.addStretch()
         layout.addLayout(row)
@@ -307,6 +312,7 @@ class BOWindow(QWidget):
 
     def restore(self, settings):
         self.state = validate_settings(settings)
+        self.state.pop("loop_proposal", None)
         self.rendering = True
         for group, fields in (("constraints", self.bound_fields), ("output_bounds", self.output_fields)):
             for key, bounds in self.state[group].items():
@@ -362,6 +368,117 @@ class BOWindow(QWidget):
                 self.status.setText(f"Loaded BO setup from {Path(path).name}.")
             except (OSError, ValueError) as error:
                 self.status.setText(str(error))
+
+    def show_loop_stages(self):
+        stages = self.state["loop_stages"]
+        if not stages:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Bayesian optimization | Loop stages")
+        dialog.resize(875, 620)
+        layout = QVBoxLayout(dialog)
+        steps = QListWidget()
+        steps.setMaximumHeight(138)
+        layout.addWidget(steps)
+        tabs = QTabWidget()
+        observations = grid(("Experiment", "Source stage", "Duration (s)", "Yield (%)", "D10", "D50", "D90"))
+        predictions = grid(("Output", "Unit", "Mean", "Standard deviation"))
+        recipe_page = QWidget()
+        recipe_layout = QVBoxLayout(recipe_page)
+        channels = QComboBox()
+        recipe_chart = chart_view()
+        recipe_layout.addWidget(channels)
+        recipe_layout.addWidget(recipe_chart, 1)
+        tabs.addTab(observations, "Training observations")
+        tabs.addTab(predictions, "Predictions")
+        tabs.addTab(recipe_page, "Proposed recipe")
+        layout.addWidget(tabs, 1)
+        note = QLabel()
+        note.setTextFormat(Qt.TextFormat.PlainText)
+        note.setWordWrap(True)
+        note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(note)
+        snapshot, profiles = {}, {}
+
+        def draw_profile():
+            key = channels.currentData()
+            chart = profile_chart(key, (("Proposed recipe", profiles[key]),)) if key in profiles else QChart()
+            replace_chart(recipe_chart, chart)
+
+        channels.currentIndexChanged.connect(draw_profile)
+
+        def load_settings():
+            self.restore({**snapshot, "loop_stages": stages})
+            self.tabs.setCurrentIndex(0)
+            self.status.setText(f"Loaded {stages[steps.currentRow()]['name']} training data and settings.")
+            dialog.accept()
+
+        def execute_recipe():
+            try:
+                if self.recipe_launcher(profiles):
+                    dialog.accept()
+            except ValueError as error:
+                note.setText(str(error))
+
+        row = QHBoxLayout()
+        load = self.button("Load stage data and settings", load_settings)
+        execute = self.button("Execute recipe", execute_recipe)
+        execute.setVisible(self.recipe_launcher is not None)
+        for button in (load, execute, self.button("Close", dialog.reject)):
+            row.addWidget(button)
+        layout.addLayout(row)
+
+        def update(index):
+            nonlocal snapshot, profiles
+            snapshot, profiles = {}, {}
+            observations.setRowCount(0)
+            predictions.setRowCount(0)
+            channels.clear()
+            load.setEnabled(False)
+            execute.setEnabled(False)
+            if index < 0:
+                return
+            path = Path(stages[index]["path"])
+            try:
+                snapshot = validate_settings(json.loads(path.read_text(encoding="utf-8")))
+                proposal = snapshot.get("loop_proposal", {})
+                profiles = {key: make_profile(trace["points"], trace["source"], step=trace["step"])
+                            for key, trace in proposal.get("profiles", {}).items()}
+                if not all(profiles.values()):
+                    raise ValueError("The saved BO recipe contains invalid profiles.")
+                for key in profiles:
+                    channels.addItem(CHANNELS[key][0], key)
+                for number in snapshot["selected"]:
+                    run = snapshot["runs"][number]
+                    values = run["metrics"]
+                    cells = (run["name"], run.get("recipe_stage", "—"),
+                             *(show_value(values[key]) for key in
+                               ("duration", f"yield_{snapshot['yield_basis']}", "d10", "d50", "d90")))
+                    target_row = observations.rowCount()
+                    observations.insertRow(target_row)
+                    for column, value in enumerate(cells):
+                        observations.setItem(target_row, column, item(value))
+                for target, (mean, sd) in proposal.get("predictions", {}).items():
+                    target_row = predictions.rowCount()
+                    predictions.insertRow(target_row)
+                    values = (*TARGETS[target][:2], show_value(mean), show_value(sd))
+                    for column, value in enumerate(values):
+                        predictions.setItem(target_row, column, item(value))
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                note.setText(str(error))
+                return
+            detail = f"Acquisition {proposal['acquisition']:.5g}" if proposal else "Final observations"
+            note.setText(f"{detail}\n{path}")
+            load.setEnabled(not self.loop_busy and self.job is None)
+            execute.setEnabled(bool(profiles) and self.recipe_launcher is not None and not self.loop_busy and self.job is None)
+
+        for stage in stages:
+            role = "Proposal" if stage["proposed"] else "Final observations"
+            steps.addItem(f"{stage['name']} · {role} · {stage['observations']} observations")
+        steps.currentRowChanged.connect(update)
+        steps.setCurrentRow(len(stages) - 1)
+        dialog.exec()
+        dialog.deleteLater()
 
     def choose_matlab(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -571,6 +688,8 @@ class BOWindow(QWidget):
         self.reset_stages_button.setEnabled(available and bool(self.state["selected"]))
         self.export_template_button.setEnabled(available and bool(self.state["selected"]))
         self.export_button.setEnabled(self.proposal is not None)
+        self.execute_button.setEnabled(available and self.proposal is not None and self.recipe_launcher is not None)
+        self.stages_button.setEnabled(bool(self.state["loop_stages"]))
 
     def run_job(self, task, callback, *, check_profile=False):
         if self.job is not None or self.loop_busy:
@@ -713,7 +832,7 @@ class BOWindow(QWidget):
             failed = input_checks(profiles, horizon, state["constraints"])
             if failed:
                 raise ValueError("The template exceeds input bounds for " + ", ".join(failed) + ".")
-            payload = self.recipe_data(profiles, stages, horizon)
+            payload = recipe_data(profiles, stages, horizon)
             payload.update(format="crystalloop-bo-template", version=1)
             path, _ = QFileDialog.getSaveFileName(self, "Save template recipe", "bo_stage_recipe.json", "JSON (*.json)")
             if path:
@@ -721,19 +840,6 @@ class BOWindow(QWidget):
                 self.status.setText(f"Saved the stage recipe to {Path(path).name}.")
         except (ValueError, OSError) as error:
             self.status.setText(str(error))
-
-    @staticmethod
-    def recipe_data(profiles, stages, horizon):
-        seed = profiles.get("seed")
-        return {
-            "duration_s": horizon,
-            "seeding": None if seed is None else {"seeded": bool(seed.values[0]),
-                                                  "mass_g": float(seed.values[0]),
-                                                  "time_s": 0. if seed.values[0] > 0 else None},
-            "profile_encoding": "physical-stages",
-            "stages": {key: [asdict(stage) for stage in rows] for key, rows in stages.items()},
-            "profiles": {key: {**profile.payload(), "unit": CHANNELS[key][1]} for key, profile in profiles.items()},
-        }
 
     def suggest(self):
         try:
@@ -787,6 +893,15 @@ class BOWindow(QWidget):
             self.proposal_note.setText("Select experiments, set the targets and bounds, then propose a recipe.")
         self.update_buttons()
 
+    def execute_proposal(self):
+        if self.proposal is None or self.recipe_launcher is None or self.loop_busy or self.job is not None:
+            return
+        try:
+            if self.recipe_launcher(self.proposal.profiles):
+                self.status.setText("BO recipe sent to the experiment runner.")
+        except ValueError as error:
+            self.status.setText(str(error))
+
     def save_proposal(self):
         result = self.proposal
         if result is None:
@@ -796,7 +911,7 @@ class BOWindow(QWidget):
             return
         file = Path(path)
         payload = {
-            **self.recipe_data(result.profiles, result.stages, result.horizon),
+            **recipe_data(result.profiles, result.stages, result.horizon),
             "format": "crystalloop-bo-proposal", "version": 2,
             "yield_basis": result.state["yield_basis"],
             "predictions": {key: {"mean": mean, "sd": sd, "unit": TARGETS[key][1]}

@@ -76,7 +76,9 @@ from experiment.models import Campaign, ExperimentDefinition
 from hardware_devices.capabilities import is_monitor_only
 from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
-from experiment.adaptive_loop import AdaptiveLoop, check_loop_folders, validate_setup
+from experiment.adaptive_loop import (
+    AdaptiveLoop, RecipeCompiler, check_loop_folders, device_configuration_changed, validate_setup,
+)
 from gui.loop_model_job import LoopModelJob
 from gui.loop_model_views import LoopModelViews
 import logging
@@ -328,6 +330,7 @@ class MainWindow(QMainWindow):
         self._saved_doe_monitors = None
         self._assigned_doe_campaign = None
         self._assigned_doe_configs = {}
+        self._recipe_sources = {}
         self._adaptive_loop = None
         self._loop_model_job = None
         self._loop_recommendation = None
@@ -1557,6 +1560,10 @@ class MainWindow(QMainWindow):
     def start_independent_doe(self):
         return self._start_assigned_doe(for_loop=False)
 
+    def _doe_devices_changed(self, configs):
+        return any(device_configuration_changed(original, configs.get(key))
+                   for key, original in self._assigned_doe_configs.items())
+
     def _start_assigned_doe(self, for_loop=False):
         campaign = self._assigned_doe_campaign
         if campaign is None:
@@ -1568,14 +1575,11 @@ class MainWindow(QMainWindow):
             self.log_message("End the active experiment/monitoring session before starting the DoE.", "WARNING")
             return
         configs, _ = panel.collect_current_configuration()
-        fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity")
-        for key, previous in self._assigned_doe_configs.items():
-            current = configs.get(key)
-            if current is None or any(current.get(field) != previous.get(field) for field in fields):
-                self._assigned_doe_campaign = None
-                self.settings_page.set_assignment_available(False)
-                self.log_message("Device configuration changed. Apply DoE assignments again before starting.", "WARNING")
-                return
+        if self._doe_devices_changed(configs):
+            self._assigned_doe_campaign = None
+            self.settings_page.set_assignment_available(False)
+            self.log_message("Device configuration changed. Apply DoE assignments again before starting.", "WARNING")
+            return
         if for_loop:
             if (self.settings_page.loop_backend.currentData() == "external"
                     and any(experiment.imed_simulation for experiment in campaign.experiments)):
@@ -1613,6 +1617,83 @@ class MainWindow(QMainWindow):
     def _connected_loop_devices(self):
         return {key for key, widget in self.control_panel.device_widgets.items() if widget.is_connected()}
 
+    def _recipe_compiler(self, mode, setup, configs, connected):
+        from experiment.doe_campaign import ProfileAssignment
+
+        doe = self._assigned_doe_campaign
+        manual = setup["manual_assignments"]
+        source, previous_monitors = self._recipe_sources.get(mode, (None, ()))
+        if source is None and manual and doe:
+            if manual != {item.role: item.device_id for item in self._doe_assignments}:
+                raise ValueError("Both assignment sets are available. Apply one set or start a loop to select the source for this backend.")
+        if source == "doe" or (source is None and doe):
+            if doe is None or self._doe_devices_changed(configs):
+                raise ValueError("Apply the current DoE device assignments before executing the recipe.")
+            return RecipeCompiler(setup, doe, configs, self.create_experiments.exp_storage,
+                                  self._doe_assignments, doe.monitor_device_ids, mode)
+        if not manual:
+            raise ValueError("Assign recipe devices in Automatic loop setup → Devices or apply DoE assignments.")
+        monitors = {key for key in connected if is_monitor_only(configs.get(key, {}))} | set(previous_monitors)
+        for column in setup["channels"].values():
+            device, _, _ = column.rpartition(".")
+            if is_monitor_only(configs.get(device, {})):
+                monitors.add(device)
+        if simulation := setup["manual_simulation"]:
+            monitors.update(simulation["monitors"].values())
+            if not self.control_panel.experiments:
+                raise ValueError("Load the simulated Control Panel profiles before executing this recipe.")
+        monitor_ids = tuple(sorted(monitors))
+        template = (self._manual_loop_campaign(configs, monitor_ids, simulation=setup["manual_simulation"])
+                    if self.control_panel.experiments else None)
+        assignments = tuple(ProfileAssignment(role, device) for role, device in manual.items())
+        return RecipeCompiler(setup, template, configs, self.experiment_service.exp_storage,
+                              assignments, monitor_ids, mode)
+
+    def execute_modeled_recipe(self, mode, profiles, process=None):
+        panel = self.control_panel
+        try:
+            if (self._adaptive_loop is not None or self._loop_model_job is not None
+                    or self.execution.timer.isActive() or panel.hardware_manager.is_busy):
+                raise ValueError("Wait for the active experiment or loop to finish before executing a recipe.")
+            setup = validate_setup(self.settings_page.loop_setup)
+            configs, _ = panel.collect_current_configuration()
+            connected = self._connected_loop_devices()
+            compiler = self._recipe_compiler(mode, setup, configs, connected)
+            compiler.check_support(compiler.template)
+            defaults = compiler.process_defaults(self.imed_page.panel.checkpoint_case())
+            recipe_process = {**defaults, **(process or {})}
+            if mode == "bo" and (seed := profiles.get("seed")) is not None:
+                recipe_process["SeedMass"] = float(seed.values[0])
+            campaign, _ = compiler.build(profiles, recipe_process, name=f"{mode.upper()} recipe",
+                                         source=mode, default_seed=defaults["SeedMass"])
+            compiler.check_devices(campaign, configs, connected)
+            if self.experiment_page.dashboard is not None:
+                self.end_experiment_session()
+                if self.experiment_page.dashboard is not None:
+                    raise ValueError("Finish saving and close the previous experiment session first.")
+            self.log_message(f"{mode.upper()} recipe validated. Launching one recommended experiment.")
+            folder = self.settings_page.exp_path_input.text().strip()
+            override = {"enabled": True, "output_folder": folder} if folder else None
+            dashboard = panel.start_campaign(campaign, override)
+            if dashboard is None:
+                raise ValueError("The experiment runner could not start the recipe. Check the Control Panel.")
+            dashboard.single_run = True
+            dashboard.btn_start.setEnabled(False)
+            self._loop_dashboard = dashboard
+            return True
+        except (ValueError, TypeError, RuntimeError, OSError, KeyError) as error:
+            self.log_message(f"Could not execute the {mode.upper()} recipe. {error}", "WARNING")
+            raise ValueError(str(error)) from error
+
+    def _execute_imed_recipe(self, experiment, process):
+        from bo.profiles import make_profile
+
+        profiles = {key: make_profile(experiment.get(field), "IMED design")
+                    for key, field in (("temperature", "TemperatureData"), ("feed", "FlowRateData"))}
+        if not all(profiles.values()):
+            raise ValueError("The IMED recipe needs finite temperature and antisolvent profiles.")
+        return self.execute_modeled_recipe("imed", profiles, process)
+
     def _prepare_adaptive_loop(self, mode, campaign):
         from experiment.doe_campaign import ProfileAssignment
 
@@ -1648,6 +1729,8 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_omni_count(0)
         self.dashboard_page.set_model_count(0)
         self._adaptive_loop = session
+        self._recipe_sources[mode] = ("doe" if campaign is self._assigned_doe_campaign else "manual",
+                                      campaign.monitor_device_ids)
         return True
 
     @Slot(dict)
@@ -1658,7 +1741,9 @@ class MainWindow(QMainWindow):
         job.stage.connect(self._show_loop_model_stage)
         job.progress.connect(self._log_loop_model_progress)
         job.finished.connect(self._on_loop_model_finished)
-        operation = "collecting final observations" if job.collect_only else "starting automated modeling"
+        operation = "starting automated modeling"
+        if job.collect_only:
+            operation = "fitting the final observations" if job.session.mode == "imed" else "collecting final observations"
         self.log_message(f"{self._adaptive_loop.mode.upper()} is {operation}. MODEL folder {manifest['model_path']}", "INFO")
         job.start()
 
@@ -1672,7 +1757,7 @@ class MainWindow(QMainWindow):
                 self._fail_adaptive_loop(f"Could not display the modeling stage: {error}")
 
     def _complete_adaptive_loop(self):
-        self._cancel_adaptive_loop()
+        self._cancel_adaptive_loop(keep_readout=self._adaptive_loop.mode == "imed")
         self.execution.stop_execution()
         self.set_buttons_enabled(True)
         self.dashboard_page.set_monitoring_state(False)
@@ -1736,10 +1821,10 @@ class MainWindow(QMainWindow):
             session.followups += 1
             self.log_message(f"Launched automatic follow-up {session.followups} ({campaign.name}).", "SUCCESS")
 
-    def _cancel_adaptive_loop(self):
+    def _cancel_adaptive_loop(self, *, keep_readout=False):
         self._adaptive_loop = self._loop_recommendation = None
         self._loop_launch_timer.stop()
-        self._loop_views.close()
+        self._loop_views.close(keep_readout=keep_readout)
         if self._loop_model_job is not None:
             self._loop_model_job.requestInterruption()
 
@@ -1875,6 +1960,7 @@ class MainWindow(QMainWindow):
             self.CONTROLLER = self.create_experiments = None
             self._assigned_doe_campaign = None
             self._assigned_doe_configs = {}
+            self._recipe_sources.clear()
             self._doe_assignments = assignments
             self._saved_doe_monitors = data.get("monitor_device_ids")
             self.experiment_service.exp_par = parameters
@@ -1938,7 +2024,7 @@ class MainWindow(QMainWindow):
         configs, _ = panel.collect_current_configuration()
         monitors = tuple(self._saved_doe_monitors or ())
         if self.create_experiments is None:
-            campaign = self._manual_loop_campaign(configs, monitors)
+            campaign = self._manual_loop_campaign(configs, monitors, simulation=self.settings_page.loop_setup["manual_simulation"])
         else:
             doe = DoeCampaignService(self.create_experiments)
             if not doe.imed_simulations:
@@ -2150,18 +2236,20 @@ class MainWindow(QMainWindow):
         monitors = tuple(key for key, config in configs.items()
                          if is_monitor_only(config) and panel.device_widgets[key].is_connected())
         try:
-            campaign = self._manual_loop_campaign(configs, monitors)
+            settings = self.settings_page
+            simulation = (settings.loop_setup.get("manual_simulation")
+                          if settings.loop_backend.currentData() != "external" else None)
+            campaign = self._manual_loop_campaign(configs, monitors, simulation=simulation)
         except (ValueError, TypeError, KeyError, StopIteration) as error:
             self.log_message(f"Cannot start Control Panel experiments: {error}", "ERROR")
             return
         return self._start_loop_campaign(campaign)
 
-    def _manual_loop_campaign(self, configs, monitors):
+    def _manual_loop_campaign(self, configs, monitors, *, simulation=None):
         experiments = tuple(ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
                             for number, frame in enumerate(self.control_panel.experiments, 1))
         settings = self.settings_page
-        simulation = settings.loop_setup.get("manual_simulation")
-        if simulation is not None and settings.loop_backend.currentData() != "external":
+        if simulation is not None:
             from imed_python.demo_campaign import CONTROL_TYPES, VERSION, compile_simulation
 
             setup = validate_setup(settings.loop_setup)
@@ -2228,6 +2316,7 @@ class MainWindow(QMainWindow):
         self.CONTROLLER = None
         self._assigned_doe_campaign = None
         self._assigned_doe_configs = {}
+        self._recipe_sources.clear()
 
 
         # ----------------------------------------------------------
@@ -2271,7 +2360,9 @@ class MainWindow(QMainWindow):
             key: widget.config for key, widget in self.control_panel.device_widgets.items()
         })
         self.imed_page = IMEDPage(parent=self)
-        self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case)
+        self.imed_page.panel.recipe_launcher = self._execute_imed_recipe
+        self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case,
+                                execute_recipe=lambda profiles: self.execute_modeled_recipe("bo", profiles))
         self.modeling_workflow = "imed"
         self.imed_page.bo_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.bo_page)))
         self.bo_page.imed_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.imed_page)))

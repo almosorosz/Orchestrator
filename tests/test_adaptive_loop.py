@@ -11,15 +11,18 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QListWidget, QTabWidget, QTableWidget
 import numpy as np
 import pandas as pd
 
 from app.presets import read_preset
-from experiment.adaptive_loop import AdaptiveLoop, surviving_models
+from experiment.adaptive_loop import AdaptiveLoop, optimize_recipe
 from experiment.doe_campaign import DoeCampaignService
 from experiment.doe_snapshot import restore_doe
 from imed_python.demo_campaign import model_inputs
+from imed_python.model_screening import screen_models
+from imed_python.native_case import read_native_case
+from imed_python.session import history, latest_pe_step, loop_stages
 from gui.loop_setup_dialog import LoopSetupDialog
 from MAIN_WINDOW import MainWindow
 
@@ -158,21 +161,96 @@ class AdaptiveLoopTests(unittest.TestCase):
                 self.assertTrue(recommendation.with_name("device_targets.csv").is_file())
                 self.assertEqual(len(list((output / "models").glob("*/inputs/*/execution.csv"))), 6)
                 if backend == "bo":
-                    self.assertEqual(stages, ["bo_inputs", "bo_result", "bo_inputs"])
+                    self.assertEqual(stages, ["bo_inputs", "bo_result", "bo_stage", "bo_inputs", "bo_stage"])
                     self.assertEqual(len(window.bo_page.state["runs"]), 6)
                     self.assertIsNotNone(window.bo_page.proposal)
                     self.assertTrue((recommendation.parent / "bo" / "predictions.csv").is_file())
+                    first, last = window.bo_page.state["loop_stages"]
+                    self.assertEqual([first["name"], last["name"]], ["BO 1", "BO 2"])
+                    self.assertEqual([first["observations"], last["observations"]], [5, 6])
+                    first_case = json.loads(Path(first["path"]).read_text())
+                    last_case = json.loads(Path(last["path"]).read_text())
+                    self.assertTrue(first_case["loop_proposal"]["profiles"])
+                    self.assertTrue(first_case["loop_proposal"]["predictions"])
+                    self.assertNotIn("loop_proposal", last_case)
+                    self.assertEqual(last_case["runs"][-1]["recipe_stage"], "BO 1")
+
+                    def check_bo_stages(dialog):
+                        choices = dialog.findChild(QListWidget)
+                        self.assertEqual(choices.count(), 2)
+                        tabs = dialog.findChild(QTabWidget)
+                        measurements, predictions = tabs.widget(0), tabs.widget(1)
+                        self.assertEqual(measurements.rowCount(), 6)
+                        choices.setCurrentRow(0)
+                        self.assertEqual(measurements.rowCount(), 5)
+                        self.assertGreater(predictions.rowCount(), 0)
+                        return QDialog.DialogCode.Rejected
+
+                    with patch.object(QDialog, "exec", check_bo_stages):
+                        window.bo_page.stages_button.click()
                 else:
                     self.assertEqual([stage for stage in stages if stage != "imed_generation"],
-                                     ["imed_inputs", "imed_pe", "imed_fits", "imed_design", "imed_result", "imed_inputs"])
-                    self.assertEqual(len(window.imed_page.panel.case["ExpData"]), 6)
+                                     ["imed_inputs", "imed_pe", "imed_fits", "imed_design", "imed_result",
+                                      "imed_inputs", "imed_pe", "imed_fits"])
+                    panel = window.imed_page.panel
+                    self.assertEqual(len(panel.case["ExpData"]), 6)
+                    survivors = recipe["surviving_models"]
+                    self.assertIn(f"Estimation runs: {2 + len(survivors)}", panel.status.toPlainText())
+                    self.assertIn("Experiment 6 · " + recipe["method"], panel.followup_summary.text())
+                    readout = window._loop_views.readout
+                    self.assertTrue(readout.isVisible())
+                    self.assertEqual(len(readout.case["ExpData"]), 6)
+                    self.assertTrue(readout.details_button.isEnabled())
+                    stage_names = ["PE 1", recipe["stage_name"], "PE 2"]
+                    stages = loop_stages(panel.case)
+                    self.assertEqual([stage["name"] for stage in stages], stage_names)
+                    self.assertEqual([row["model"] for row in stages[-1]["candidates"]], survivors)
+                    for stage in stages:
+                        path = Path(stage["case_file"])
+                        snapshot = read_native_case(path)
+                        self.assertEqual(len(snapshot["ExpData"]), stage["experiments"])
+                        self.assertEqual(loop_stages(snapshot)[-1]["name"], stage["name"])
+
+                    def check_stages(dialog, layout):
+                        stage_list = dialog.findChild(QListWidget)
+                        self.assertEqual(stage_list.count(), 3)
+                        self.assertEqual(stage_list.currentRow(), 2)
+                        self.assertEqual(dialog.findChild(QTableWidget).rowCount(), len(survivors))
+                        stage_list.setCurrentRow(0)
+                        self.assertEqual(dialog.findChild(QTableWidget).rowCount(), 2)
+
+                    with patch.object(panel, "show_dialog", side_effect=check_stages):
+                        panel.show_loop_stages()
                     self.assertEqual(len(pd.read_csv(recommendation.parent / "imed" / "pe_models.csv")), 2)
                 messages = "\n".join(message for _, message in logs)
                 self.assertIn("Saved the", messages)
                 self.assertIn("Launched automatic follow-up", messages)
                 self.assertIn("Control Panel profiles" if source != "doe" else "Settings DoE", messages)
+                if backend == "bo":
+                    self.check_execute_bo_proposal(window, output, logs)
             finally:
                 self.close_window(window)
+
+    def check_execute_bo_proposal(self, window, output, logs):
+        previous = window.experiment_page.dashboard
+        self.assertTrue(self.wait_for(lambda: not previous.is_execution_active()), logs)
+        controller = window.control_panel.device_widgets["T1"]
+        controller.device.disconnect()
+        controller._update_connection_state()
+        window.bo_page.execute_button.click()
+        self.assertIs(window.experiment_page.dashboard, previous)
+        self.assertIn("Connect assigned devices and monitors: T1", window.bo_page.status.text())
+        self.assertTrue(controller.connect_device())
+        window.bo_page.execute_button.click()
+        current = window.experiment_page.dashboard
+        self.assertIsNot(current, previous)
+        self.assertIsNotNone(current)
+        summaries = output / "experiments"
+        self.assertTrue(self.wait_for(lambda: len(list(summaries.glob("*/summary.json"))) == 3
+                                     and not current.is_execution_active()), logs)
+        self.assertTrue(all(json.loads(path.read_text())["status"] == "completed"
+                            for path in summaries.glob("*/summary.json")))
+        self.assertEqual(len(list((output / "models").glob("*/recommendation.json"))), 1)
 
     def test_load_and_start_bo_five_run_preset(self):
         self.check_five_run_preset("bo")
@@ -185,6 +263,48 @@ class AdaptiveLoopTests(unittest.TestCase):
 
     def test_load_and_start_imed_control_panel_preset(self):
         self.check_five_run_preset("imed", "control-panel")
+
+    def test_execute_previous_imed_design_as_a_single_run(self):
+        from imed_python.design_dialog import DesignDialog
+        from imed_python.session import record_step
+
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            window = MainWindow()
+            try:
+                preset = PRESET.with_name("imed_five_run_control_panel.json")
+                with patch("app.paths.DATA_DIR", Path(directory)), patch("MAIN_WINDOW.QMessageBox.warning") as warning:
+                    window.load_setup_preset(str(preset))
+                warning.assert_not_called()
+                panel = window.imed_page.panel
+                _, experiment, process, _, _ = model_inputs(True)
+                experiment = {**experiment, "TemperatureData": np.array([[0., 40.], [18., 18.]]),
+                              "FlowRateData": np.array([[0., 40.], [0., 0.]])}
+                panel.case.update(ExpData=[experiment], ProcInf=[process])
+                model = panel.case["ModelParameter"][0]
+                model.update(para=model["paraset"][model["paraset"][:, 0] == 1, 1], covmat=np.eye(2))
+                record_step(panel.case, "d_optimal_design", {"score": 1., "experiment": experiment,
+                            "process": process, "request": {}}, context="earlier inputs")
+
+                def execute(dialog):
+                    self.assertIn("Previous design", dialog.status.text())
+                    self.assertTrue(dialog.execute_button.isEnabled())
+                    dialog.execute_button.click()
+                    return dialog.result()
+
+                with patch.object(DesignDialog, "exec", execute):
+                    panel.show_design(True)
+                dashboard = window.experiment_page.dashboard
+                self.assertIsNotNone(dashboard)
+                output = Path(directory) / "runs" / "simulated_loops" / "imed" / "experiments"
+                self.assertTrue(self.wait_for(lambda: bool(list(output.glob("*/summary.json")))
+                                             and not dashboard.is_execution_active()))
+                summary, = output.glob("*/summary.json")
+                result = json.loads(summary.read_text())
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(len(result["runs"]), 1)
+                self.assertFalse(window.execution.timer.isActive())
+            finally:
+                self.close_window(window)
 
     def test_automatic_preset_preparation_rejects_real_device_configs(self):
         with TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -267,13 +387,43 @@ class AdaptiveLoopTests(unittest.TestCase):
                     self.assertAlmostEqual(settings.loop_setup["imed"]["conditions"]["seed_bounds"][0], seed)
                     window.start_command()
                     self.assertIsNotNone(window._adaptive_loop, logs)
-                    self.assertTrue(self.wait_for(lambda: window._adaptive_loop is None, timeout=120), logs)
+                    def check_fit_saved_before_design(*args, **kwargs):
+                        path, = models.glob("*/fit.imed.json")
+                        saved = read_native_case(path)
+                        self.assertEqual(len(saved["ExpData"]), 3)
+                        self.assertTrue(all(latest_pe_step(saved, index) for index in range(count)))
+                        return optimize_recipe(*args, **kwargs)
+
+                    with patch("experiment.adaptive_loop.optimize_recipe", side_effect=check_fit_saved_before_design):
+                        self.assertTrue(self.wait_for(lambda: window._adaptive_loop is None, timeout=180), logs)
                     self.assertFalse(any(level == "ERROR" for level, _ in logs), logs)
                     recommendation, = models.glob("*/recommendation.json")
                     result = json.loads(recommendation.read_text())
                     self.assertEqual(result["method"], method)
                     self.assertEqual(len(result["surviving_models"]), count)
-                    self.assertTrue(recommendation.with_name("fit.imed.json").exists())
+                    fit_path = recommendation.with_name("fit.imed.json")
+                    saved_fit = read_native_case(fit_path)
+                    self.assertEqual(len(saved_fit["ExpData"]), 3)
+                    final_path, = (path for path in models.glob("*/fit.imed.json") if path != fit_path)
+                    final = read_native_case(final_path)
+                    self.assertEqual(len(final["ExpData"]), 4)
+                    for index in range(count):
+                        self.assertIsNotNone(latest_pe_step(saved_fit, index))
+                        self.assertIsNotNone(latest_pe_step(final, index))
+                    self.assertEqual(final["ExpData"][-1]["RecipeSource"], method)
+                    self.assertEqual(final["ExpData"][-1]["RecipeStage"], "MD 1" if count > 1 else "DO 1")
+                    self.assertEqual(final["ExpData"][-1]["RecipeModelFolder"], str(recommendation.parent))
+                    diagnostics = pd.read_csv(fit_path.parent / "imed" / "pe_models.csv")
+                    self.assertTrue(diagnostics["f_pass"].all() and diagnostics["t_pass"].all())
+                    self.assertEqual(set(diagnostics["aic_rank"]), set(range(1, count + 1)))
+                    inputs = pd.read_csv(final_path.parent / "imed" / "process_inputs.csv")
+                    self.assertEqual(inputs.iloc[-1]["recipe_source"], method)
+                    action = "model_discrimination" if count > 1 else "d_optimal_design"
+                    designs = [step for step in history(final) if step["action"] in ("model_discrimination", "d_optimal_design")]
+                    self.assertEqual([step["action"] for step in designs], [action])
+                    self.assertEqual(designs[0]["result"]["reason"], result["design_reason"])
+                    if count == 1:
+                        self.assertTrue(any("skipped model discrimination" in message for _, message in logs))
                     followup = next(experiments.glob(f"campaign_{result['campaign']['campaign_id']}_*/summary.json"))
                     self.assertTrue(json.loads(followup.read_text())["recording_complete"])
                 finally:
@@ -333,9 +483,26 @@ class AdaptiveLoopTests(unittest.TestCase):
                 self.doCleanups()
 
     def test_model_survival_uses_total_aic_units(self):
-        fits = {0: SimpleNamespace(aic=3.), 1: SimpleNamespace(aic=3.01), 2: SimpleNamespace(aic=3.07)}
-        self.assertEqual(surviving_models(fits, 100, 2.)[0], (0, 1))
-        self.assertEqual(surviving_models(fits, 500, 2.)[0], (0,))
+        fits = {index: SimpleNamespace(aic=aic, ssr=1., converged=True,
+                                      parameters=np.array([3.]), covariance=np.eye(1))
+                for index, aic in enumerate((3., 3.01, 3.07))}
+        for samples, expected in ((100, (0, 1)), (500, (0,))):
+            results = screen_models(fits, sample_count=samples, delta_aic=2.)
+            self.assertEqual(tuple(index for index, result in results.items() if not result["reasons"]), expected)
         fits[2].aic = float("nan")
-        with self.assertRaisesRegex(ValueError, "finite IMED AIC"):
-            surviving_models(fits, 100, 2.)
+        self.assertIn("AIC unavailable", screen_models(fits, sample_count=100, delta_aic=2.)[2]["reasons"])
+
+    def test_matlab_f_and_t_checks_identify_rejected_models(self):
+        fits = {index: SimpleNamespace(aic=aic, ssr=ssr, converged=True,
+                                       parameters=np.array([parameter]), covariance=np.eye(1))
+                for index, (aic, ssr, parameter) in enumerate(((1., 1., -3.), (.8, 1.1, .5), (1.01, 4., 3.)))}
+        results = screen_models(fits, sample_count=100, delta_aic=2.)
+        self.assertAlmostEqual(results[0]["f_limit"], 2.6049093010837265)
+        self.assertAlmostEqual(results[0]["t_limit"], 1.959963984540054)
+        self.assertEqual(results[0]["reasons"], [])
+        self.assertEqual(results[0]["rank"], 2)
+        self.assertEqual(results[0]["delta_aic"], 0.)
+        self.assertEqual(results[1]["reasons"], ["parameter t-test failed"])
+        self.assertEqual(results[2]["reasons"], ["F-test failed"])
+        fits[0].covariance[0, 0] = np.nan
+        self.assertIn("parameter t-tests unavailable", screen_models(fits)[0]["reasons"])

@@ -9,15 +9,17 @@ class LoopModelViews:
         self.input_dialog = None
         self.readout = None
 
-    def close_dialogs(self):
-        for dialog in (self.input_dialog, self.readout):
+    def close_dialogs(self, *, keep_readout=False):
+        for dialog in (self.input_dialog, None if keep_readout else self.readout):
             if dialog is not None:
                 dialog.close()
                 dialog.deleteLater()
-        self.input_dialog = self.readout = None
+        self.input_dialog = None
+        if not keep_readout:
+            self.readout = None
 
-    def close(self):
-        self.close_dialogs()
+    def close(self, *, keep_readout=False):
+        self.close_dialogs(keep_readout=keep_readout)
         self.window.bo_page.loop_busy = False
         self.window.bo_page.update_buttons()
 
@@ -50,6 +52,11 @@ class LoopModelViews:
             view.tabs.setCurrentIndex(view.tabs.count() - 1)
             self.window.log_message("BO predictions and proposed recipe are displayed.")
             return
+        if stage == "bo_stage":
+            view = self.window.bo_page
+            view.state["loop_stages"].append(value)
+            view.update_buttons()
+            return
 
         page = self.window.imed_page
         panel = page.panel
@@ -68,12 +75,18 @@ class LoopModelViews:
                            dialog.model, dialog.terms, dialog.size_samples, *dialog.weights):
                 widget.setEnabled(False)
             dialog.stop_button.clicked.disconnect(dialog.stop_fit)
-            self._show_readout(dialog, "Automatic parameter estimation is running.")
+            self._show_readout(dialog, f"Automatic parameter estimation is fitting {len(value['ExpData'])} experiments.")
             self.window.log_message("Opened IMED Parameter Estimation with the saved fit settings.")
         elif stage == "imed_generation" and isinstance(self.readout, ParameterEstimation):
             self.readout.optimization_progress.append(*value)
         elif stage == "imed_fits" and isinstance(self.readout, ParameterEstimation):
-            self.readout.show_results(value, {}, remember=False)
+            panel.display_loop_case(value["case"], job.manifest["campaign_folder"])
+            self.readout.case = value["case"]
+            self.readout.show_results(value["fits"], {}, remember=False, screening=value["screening"])
+            self.readout.stop_button.setEnabled(False)
+            self.readout.details_button.setEnabled(True)
+            self.readout.save_case_button.setEnabled(True)
+            panel.show_message("Automatic parameter estimation completed. Fitted models saved to the MODEL folder.")
         elif stage == "imed_design":
             self.close_dialogs()
             panel.display_loop_case(value["case"], job.manifest["campaign_folder"])
@@ -91,6 +104,8 @@ class LoopModelViews:
                 self.readout.show_recipe(value["result"], remember=False)
                 self.readout.export_button.setEnabled(True)
                 self.readout.stop_button.setEnabled(False)
+                self.readout.execute_button.setVisible(True)
+                self.readout.execute_button.setToolTip("The automatic loop will execute this recipe.")
                 self.window.log_message("IMED recommended profiles are displayed.")
 
     def _show_readout(self, dialog, message):

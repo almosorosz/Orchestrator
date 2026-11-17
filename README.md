@@ -539,10 +539,11 @@ to try the workflow without instruments.
 **Dashboard Start** first checks the setup. Once the initial batch is saved, BO
 adds the new observations to the selected prior runs, fits its surrogates, and
 proposes a recipe within the configured bounds. IMED refits the candidate models
-on the accumulated recordings. Models within `imed.delta_aic` of the lowest total
-AIC score survive. Multiple survivors trigger model discrimination. One survivor
-with usable covariance triggers D-optimal design. A fit failure or unavailable
-comparison pauses the loop and reports the reason in the dashboard log.
+on the accumulated recordings. IMED applies the original MATLAB F-test and
+parameter t-tests, then retains models within `imed.delta_aic` of the lowest total
+AIC among candidates that passed those checks. Multiple survivors trigger model discrimination. One survivor
+with usable covariance triggers D-optimal design. If no candidate passes, the
+loop saves the fit diagnostics and reports why it stopped in the dashboard log.
 
 The loop opens the selected modeling page and fills it from the saved recordings.
 IMED displays Experimental Input and automatically opens Parameter Estimation,
@@ -551,15 +552,32 @@ predictions and proposed recipe. The dashboard log follows the source selection,
 data import, calculations, files written and follow-up launch.
 
 Each MODEL folder contains `inputs/` with the completed run CSVs, a `model.log`,
-and BO or IMED input CSVs. A round that produces a recipe also saves model result
-CSVs and `recommendation.json` with the validated device profiles, units, process
-inputs and campaign ID. IMED also saves `fit.imed.json`. The final round archives
-its recordings and refreshes the modeling inputs. CrystaLoop launches each
+and BO or IMED input CSVs. A round that produces a recipe saves
+`recommendation.json` with the validated device profiles, units, process inputs
+and campaign ID. IMED saves `fit.imed.json` after parameter estimation and exports
+the fitted parameters and covariances as CSVs. After the last follow-up, IMED
+refits the retained candidates on the full dataset and saves a final `fit.imed.json`.
+**IMED Loop stages** lists the evaluated and retained candidates in each named stage.
+Open a stage's PE results there or load its `pe_01.imed.json`, `md_01.imed.json` or
+`do_01.imed.json` from the corresponding MODEL folder. The IMED Case status and input
+CSVs record the stage that produced each automatic follow-up. CrystaLoop launches each
 follow-up after recording and hardware cleanup, rechecks
 device connectivity and limits, then repeats until `max_followups` is reached.
 **Stop** discards any pending launch and requests cancellation from the model
 worker. An active solver call may take time to finish. End the final session to
 leave the hardware available for another campaign.
+
+**BO Loop stages** shows the training runs, their source stages and the predictions
+behind each proposal. Load a saved `bo_01.json` (or a later stage) with **Load BO setup**
+to revisit its data and settings. BO also saves a final observations stage after the
+last follow-up.
+
+For one-off execution, use **Execute recipe** beside the BO proposal or an IMED
+design result. CrystaLoop reuses the applied DoE assignments or the Control Panel
+assignments in **Automatic loop setup → Devices**. It checks connections and
+target limits, then records one experiment through the Control Panel runner.
+Previous IMED designs remain available in their design window and are labeled
+when they were generated from earlier inputs.
 
 For physical runs, use **Recording** to select measured CSV columns and set the
 crystallization window, concentration multiplier and scale direction. Use

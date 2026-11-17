@@ -21,6 +21,7 @@ def empty_settings():
         "yield_basis": "theoretical", "overrides": {},
         "output_bounds": {key: [None, None] for key in OUTPUTS},
         "exploration": 1., "output_margin": 1.96, "physical_profiles": {},
+        "loop_stages": [],
         "tolerances": {key: entry[2] for key, entry in CHANNELS.items()},
     }
 
@@ -35,12 +36,18 @@ def validate_settings(value):
     # Existing component files and presets predate these optional fields.
     data = deepcopy(value)
     defaults = empty_settings()
-    for key in ("output_bounds", "exploration", "output_margin", "physical_profiles"):
+    for key in ("output_bounds", "exploration", "output_margin", "physical_profiles", "loop_stages"):
         data.setdefault(key, defaults[key])
     data.pop("vae_checkpoints", None)
     try:
         if data["yield_basis"] not in ("theoretical", "actual") or not isinstance(data["source"], str):
             raise ValueError("Unknown yield basis or source.")
+        if not isinstance(data["loop_stages"], list) or any(
+            not isinstance(stage["name"], str) or not isinstance(stage["path"], str)
+            or type(stage["observations"]) is not int or type(stage["proposed"]) is not bool
+            for stage in data["loop_stages"]
+        ):
+            raise ValueError("Invalid BO loop stage history.")
         for field, definitions in (("constraints", CONSTRAINTS), ("output_bounds", OUTPUTS)):
             if set(data[field]) != set(definitions):
                 raise ValueError("Unknown constraint fields.")

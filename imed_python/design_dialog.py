@@ -51,17 +51,19 @@ class DesignJob(QThread):
 
 
 class DesignDialog(QDialog):
-    def __init__(self, case, optimal, parent=None, *, workers=1, model_indices=None):
+    def __init__(self, case, optimal, parent=None, *, workers=1, model_indices=None, execute_recipe=None):
         super().__init__(parent)
         name = "D-Optimal Design" if optimal else "Model Discrimination"
         self.setWindowTitle(f"IMED | {name}")
         self.resize(800, 650)
         self.case, self.optimal = case, optimal
         self.workers = workers
+        self.recipe_launcher = execute_recipe
         self.models = [(index, model) for index, model in fitted_models(case)
                        if model_indices is None or index in model_indices]
         self.job = None
         self.recipe = None
+        self.recipe_result = None
         self.template = QComboBox()
         self.template.addItems(f"Experiment {i + 1}" for i in range(len(case["ExpData"])))
         self.model = QComboBox()
@@ -126,25 +128,34 @@ class DesignDialog(QDialog):
         self.export_button = QPushButton("Export recipe")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_recipe)
+        self.execute_button = QPushButton("Execute recipe")
+        self.execute_button.setVisible(self.recipe_launcher is not None)
+        self.execute_button.setEnabled(False)
+        self.execute_button.clicked.connect(self.execute_current_recipe)
         self.close_button = QPushButton("Close")
         self.close_button.clicked.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(self.result_table)
         layout.addWidget(self.status)
-        layout.addWidget(self.row((self.run_button, self.stop_button, self.export_button,
+        layout.addWidget(self.row((self.run_button, self.stop_button, self.execute_button, self.export_button,
                                    self.close_button)))
         self.template.currentIndexChanged.connect(self.load_template)
         self.load_template(0)
         action = "d_optimal_design" if optimal else "model_discrimination"
         context = "|".join(signature(case, index) for index, _ in self.models)
         step = latest_step(case, action, context=context)
+        previous_inputs = step is None and self.recipe_launcher is not None
+        if previous_inputs:
+            step = latest_step(case, action)
         if step is not None:
             saved = step["result"]
             self.load_request(saved.get("request", {}))
             self.show_recipe((float(saved["score"]), saved["experiment"], saved["process"]),
                              remember=False)
             self.export_button.setEnabled(True)
+            if previous_inputs:
+                self.status.setText("Previous design from earlier inputs. " + self.status.text())
 
     def load_request(self, request):
         self.template.setCurrentIndex(int(request.get("template_index", 0)))
@@ -248,8 +259,10 @@ class DesignDialog(QDialog):
                             ("seed_bounds", self.seed)):
             conditions[key] = tuple(field.value() for field in fields)
         self.recipe = None
+        self.recipe_result = None
         self.result_table.setRowCount(0)
         self.export_button.setEnabled(False)
+        self.execute_button.setEnabled(False)
         self.run_button.setEnabled(False)
         self.close_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -263,6 +276,7 @@ class DesignDialog(QDialog):
         self.job.start()
 
     def show_recipe(self, result, *, remember=True):
+        self.recipe_result = result
         score, experiment, process = result
         t, flow = experiment["TemperatureData"], experiment["FlowRateData"]
         time = np.union1d(t[0], flow[0])
@@ -271,6 +285,7 @@ class DesignDialog(QDialog):
         fill_table(self.result_table, self.recipe)
         label = "Log determinant" if self.optimal else "Model separation"
         self.status.setText(f"{label}: {score:.6g}   Seed mass: {self.seed_mass:.6g} g")
+        self.execute_button.setEnabled(self.recipe_launcher is not None and self.job is None)
         if remember:
             action = "d_optimal_design" if self.optimal else "model_discrimination"
             context = "|".join(signature(self.case, index) for index, _ in self.models)
@@ -291,6 +306,7 @@ class DesignDialog(QDialog):
         self.close_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.export_button.setEnabled(self.recipe is not None)
+        self.execute_button.setEnabled(self.recipe_launcher is not None and self.recipe_result is not None)
 
     def stop_design(self):
         if self.job is not None:
@@ -301,6 +317,16 @@ class DesignDialog(QDialog):
     def reject(self):
         if self.job is None:
             super().reject()
+
+    def execute_current_recipe(self):
+        if self.recipe_result is None or self.recipe_launcher is None or self.job is not None:
+            return
+        _, experiment, process = self.recipe_result
+        try:
+            if self.recipe_launcher(experiment, process):
+                self.accept()
+        except ValueError as error:
+            self.status.setText(str(error))
 
     def export_recipe(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export recipe", "imed_design.csv", "CSV (*.csv)")

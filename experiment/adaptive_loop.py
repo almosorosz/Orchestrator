@@ -1,4 +1,5 @@
 """Prepare, model and compile the next campaign for a dashboard-driven loop."""
+from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict
 from functools import partial
@@ -8,7 +9,7 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from bo.profiles import Profile, case_runs, make_profile
+from bo.profiles import Profile, case_runs, make_profile, recipe_data
 from experiment.doe_campaign import ROLES, convert_profile
 from experiment import loop_outputs
 from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
@@ -19,7 +20,10 @@ from imed_python.campaign_import import ALIASES, CHANNELS, campaign_runs, import
 from imed_python.demo_campaign import compile_simulation, import_simulated_campaign, model_inputs, validation_model
 from imed_python.design import discrimination_score, d_optimal_log_score, optimize_recipe, parameter_samples, recipe_space
 from imed_python.estimation import FitObjective, fit_model
+from imed_python.model_screening import matlab_screening_fields, pack_screening, screen_models
+from imed_python.native_case import save_native_case
 from imed_python.pe_settings import PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, effective_pe_pbm
+from imed_python.session import display_name, loop_stages, pack_fit, pe_signatures, record_step, signature
 from imed_python.solver import pbm_backend_label
 
 
@@ -166,8 +170,15 @@ def _process(values):
 
 
 def _role_active(campaign, device_id):
-    return any(point.target != 0 for exp in campaign.experiments for profile in exp.profiles
-               if profile.device_id == device_id for point in profile.points)
+    return campaign is not None and any(
+        point.target != 0 for exp in campaign.experiments for profile in exp.profiles
+        if profile.device_id == device_id for point in profile.points
+    )
+
+
+def device_configuration_changed(previous, current):
+    fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity")
+    return previous is None or current is None or any(current.get(field) != previous.get(field) for field in fields)
 
 
 def _column_exists(column, configs):
@@ -176,17 +187,209 @@ def _column_exists(column, configs):
     return field in DEVICE_RECORDING_COLUMNS.get(kind, ())
 
 
-def surviving_models(fits, sample_count, delta_aic):
-    """Compare the IMED fit scores on the same observations in total AIC units."""
-    scores = {index: float(fit.aic * sample_count) for index, fit in fits.items() if np.isfinite(fit.aic)}
-    if len(fits) > 1 and len(scores) != len(fits):
-        raise ValueError("Model comparison needs a finite IMED AIC score for every fitted candidate.")
-    if len(fits) == 1:
-        return tuple(fits), scores
-    if not scores:
-        raise ValueError("No model survived parameter estimation.")
-    best = min(scores.values())
-    return tuple(index for index, score in scores.items() if score - best <= delta_aic), scores
+class RecipeCompiler:
+    """Resolve process profiles to the assigned devices for LOOP and one-off execution."""
+
+    def __init__(self, setup, template, configs, calibration_storage, assignments, monitors, mode):
+        self.setup, self.template, self.mode = setup, template, mode
+        self.calibration_storage = calibration_storage
+        self.assignments = {item.role: item for item in assignments}
+        self.roles = {role: item.device_id for role, item in self.assignments.items()}
+        self.monitors = tuple(monitors)
+        self.demo = template.experiments[0].imed_simulation if template else None
+        selected = set(self.roles.values()) | set(self.monitors)
+        self.configs = deepcopy({key: configs[key] for key in selected if key in configs})
+        if "T" not in self.roles:
+            raise ValueError("Assign a reactor temperature controller in the DoE or Automatic loop setup → Devices.")
+        for role, device in self.roles.items():
+            cfg = configs.get(device, {})
+            if cfg.get("type") not in ROLES[role].compatible_types or is_monitor_only(cfg):
+                raise ValueError(f"Assign a compatible controlled device for {ROLES[role].label}.")
+
+    def process_defaults(self, case):
+        if self.demo:
+            return model_inputs(self.demo["seeded"])[2]
+        template = next(iter(case.get("ProcInf", [])), {})
+        return {"SeedMass": 0., "AntiSolvMass": 0., "PowerRatio": 1., **template, **self.setup["process"]}
+
+    def check_devices(self, campaign, configs, connected, *, require_all=False):
+        actuators = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
+        used = (set(self.roles.values()) if require_all else actuators) | set(campaign.monitor_device_ids)
+        unavailable = used - set(connected)
+        if unavailable:
+            raise ValueError("Connect assigned devices and monitors: " + ", ".join(sorted(unavailable)))
+        for key in used:
+            if device_configuration_changed(self.configs.get(key), configs.get(key)):
+                raise ValueError(f"Device {key} changed since the recipe was assigned.")
+        for key in campaign.monitor_device_ids:
+            if not is_monitor_only(configs[key]):
+                raise ValueError(f"Assign {key} as a read-only monitor.")
+        for experiment in campaign.experiments:
+            ExperimentDefinition.from_frame(experiment.to_frame(), configs)
+
+    def check_support(self, campaign):
+        support = self.setup["support_profiles"]
+        bad_roles = set(support) - (set(self.roles) - {"T", "AS"})
+        if bad_roles:
+            raise ValueError("Support profiles need distinct assigned DoE roles: " + ", ".join(sorted(bad_roles)))
+        for role, profile in support.items():
+            self._support_profile(role, profile)
+        required = {role for role in self.roles if role not in {"T", "AS", "seed"}
+                    and _role_active(campaign, self.roles[role])}
+        if self.demo:
+            required -= {"clean_sol", "valve_state"}
+        missing = required - set(support) - ({"stirring_rate"} if self.mode == "bo" else set())
+        if missing:
+            raise ValueError("Define follow-up support profiles for: " + ", ".join(sorted(missing)))
+        if self.setup["seed_pump"] and ("seed" not in self.roles or "seed" in support):
+            raise ValueError("Assign a seed pump and choose either calibrated delivery or a support profile.")
+        if self.setup["seed_pump"]:
+            limits = target_limits(self.configs[self.roles["seed"]])
+            if not target_allowed(self.setup["seed_pump"]["rpm"], limits):
+                raise ValueError("Calibrated seed pump RPM exceeds the assigned pump limits.")
+        if not self.demo and "seed" in self.roles and _role_active(campaign, self.roles["seed"]):
+            if not self.setup["seed_pump"] and "seed" not in support:
+                raise ValueError("Set calibrated seed delivery or a fixed seed support profile for follow-ups.")
+
+    def _support_profile(self, role, settings):
+        data = _merge({"points": None, "step": role == "valve_state"}, settings, f"{role} support profile")
+        profile = make_profile(data["points"], "Configured support", step=data["step"])
+        if profile is None or profile.time[0] != 0 or type(data["step"]) is not bool:
+            raise ValueError(f"{role}: enter a timeline from zero as [times in s, values].")
+        device = self.roles[role]
+        config = self.configs[device]
+        if config["type"] in {"masterflex", "ismatec", "nidaq_valve"} and profile.values[-1] != 0:
+            raise ValueError(f"End the {role} support profile at zero.")
+        profile = self.device_profile(role, profile)
+        ExperimentDefinition.from_frame(ExperimentDefinition(role, (profile,)).to_frame(), self.configs)
+        return profile
+
+    def device_profile(self, role, profile, process=None):
+        assignment = self.assignments[role]
+        config = self.configs[assignment.device_id]
+        values = profile.values
+        if role == "AS" and config["type"] == "ismatec" and not config.get("pump_calibration"):
+            density = 1.
+            if not self.demo and np.any(values):
+                density = _number(process.get("AntiSolventDensity"), "antisolvent density (g/mL)", 1e-12)
+            values, unit = values * 60 / density, "mL/min"
+        else:
+            mass_flow = ROLES[role].unit == "g/h"
+            if role == "AS":
+                values = values * 3600
+            if mass_flow:
+                values, unit, _ = convert_profile(self.calibration_storage, assignment, config, values)
+            else:
+                unit = target_limits(config)["unit"]
+        return DeviceProfile(assignment.device_id, tuple(ProfilePoint(float(t), float(v))
+                             for t, v in zip(profile.time, values)),
+                             "step" if profile.step or role == "valve_state" else "linear", unit)
+
+    def build(self, recipe, process, *, name, source, default_seed, modeling=False):
+        temp = recipe["temperature"]
+        duration = float(temp.time[-1])
+        if temp.time[0] != 0 or duration <= 0:
+            raise ValueError("The follow-up temperature profile must start at zero and have a positive duration.")
+        device_profiles = {"T": self.device_profile("T", temp)}
+        feed = recipe.get("feed")
+        if feed is not None:
+            if feed.values.min() < 0 or feed.time[0] != 0 or feed.time[-1] != duration or feed.values[-1] != 0:
+                raise ValueError("The antisolvent profile must be nonnegative, span the crystallization window and end at zero.")
+            if np.any(feed.values > 0) and ("AS" not in self.roles or self.setup["recording"]["no_feed"]):
+                raise ValueError("Provide an assigned and monitored antisolvent pump for the recommended recipe.")
+            if "AS" in self.roles:
+                device_profiles["AS"] = self.device_profile("AS", feed, process)
+        stirring = recipe.get("stirring")
+        support = self.setup["support_profiles"]
+        if stirring is not None and "stirring_rate" in support:
+            raise ValueError("The BO stirring recommendation conflicts with the configured main stirrer support profile.")
+        if stirring is not None:
+            if "stirring_rate" not in self.roles and np.any(stirring.values != 0):
+                raise ValueError("Assign a main stirrer to execute the BO stirring recommendation.")
+        if stirring is not None and "stirring_rate" in self.roles:
+            device_profiles["stirring_rate"] = self.device_profile("stirring_rate", stirring)
+        if ("stirring_rate" in self.roles and _role_active(self.template, self.roles["stirring_rate"])
+                and "stirring_rate" not in device_profiles and "stirring_rate" not in support):
+            raise ValueError("Provide a recorded or configured main stirrer profile for the follow-up.")
+        seed_mass = _number(process.get("SeedMass", default_seed), "seed mass")
+        if self.demo:
+            for role, profile in support.items():
+                device_profiles[role] = self._support_profile(role, profile)
+            demo = self._append_demo_profiles(device_profiles, duration, seed_mass, temp, feed)
+        else:
+            demo = None
+            calibration = self.setup["seed_pump"]
+            if modeling and seed_mass > 0 and not self.setup["recording"]["seed_percentiles"]:
+                raise ValueError("Configure seed percentiles before executing a seeded follow-up.")
+            if seed_mass and calibration:
+                end = seed_mass / calibration["grams_per_second"]
+                if end >= duration:
+                    raise ValueError("Seed addition exceeds the recommended experiment duration.")
+                seed = Profile(np.array([0., end, duration]), np.array([calibration["rpm"], 0., 0.]),
+                               "Calibrated seed dose", step=True)
+                device_profiles["seed"] = self.device_profile("seed", seed)
+            elif seed_mass != default_seed:
+                raise ValueError("Configure calibrated seed delivery before changing the preloaded seed mass.")
+            start = self.setup["followup_start_s"]
+            if start:
+                for role, profile in device_profiles.items():
+                    points = tuple(ProfilePoint(point.time_s + start, point.target) for point in profile.points)
+                    before = [ProfilePoint(0., points[0].target if role in {"T", "stirring_rate"} else 0.)]
+                    if role == "AS" and profile.interpolation == "linear" and points[0].target != 0:
+                        transition = float(np.nextafter(start, 0.))
+                        if transition > 0:
+                            before.append(ProfilePoint(transition, 0.))
+                    device_profiles[role] = DeviceProfile(profile.device_id, (*before, *points),
+                                                          profile.interpolation, profile.unit)
+            for role, profile in support.items():
+                device_profiles[role] = self._support_profile(role, profile)
+        profiles = tuple(device_profiles.values())
+        experiment = ExperimentDefinition(name, profiles, source=source, imed_simulation=demo)
+        ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
+        start = 0. if self.demo else self.setup["followup_start_s"]
+        return Campaign(experiment.name, (experiment,), monitor_device_ids=self.monitors), (start, start + duration)
+
+    def _append_demo_profiles(self, profiles, duration, seed_mass, temp, feed):
+        _, _, seeded_process, _, _ = model_inputs(True)
+        if seed_mass and not np.isclose(seed_mass, seeded_process["SeedMass"]):
+            raise ValueError("The validation simulator supports its calibrated seed dose or zero seed.")
+        demo_template = next((exp for exp in self.template.experiments
+                              if exp.imed_simulation["seeded"] == bool(seed_mass)), None)
+        if demo_template is None:
+            raise ValueError("The simulated initial batch needs a matching seed-dose profile.")
+        original = demo_template.imed_simulation
+        last_change = max(temp.time[np.flatnonzero(np.diff(temp.values) != 0) + 1], default=0.)
+        final_feed = 0.
+        if feed is not None and np.any(feed.values > 0):
+            last = int(np.flatnonzero(feed.values > 0)[-1])
+            final_feed = feed.time[min(last + 1, len(feed.time) - 1)]
+        hold = float(max(last_change, final_feed, duration / 2))
+        if hold >= duration:
+            raise ValueError("The simulated recommendation needs a final hold at constant temperature and zero feed.")
+        for role, trace in (("T", temp), ("AS", feed)):
+            if trace is None:
+                trace = Profile(np.array([0., duration]), np.zeros(2), "No antisolvent")
+            time = np.union1d(trace.time, [hold, duration])
+            if trace.step:
+                changes = np.flatnonzero(np.diff(trace.values) != 0) + 1
+                before = np.nextafter(trace.time[changes], trace.time[changes - 1])
+                time = np.union1d(time, before)
+            profiles[role] = self.device_profile(role, Profile(time, trace.sample(time), trace.source, trace.step))
+        for role in ("seed", "clean_sol", "valve_state"):
+            if role in profiles:
+                continue
+            source = next(p for p in demo_template.profiles if p.device_id == self.roles[role])
+            if role == "seed":
+                points = tuple(p for p in source.points if p.time_s < hold)
+                if not points or points[-1].target != 0:
+                    raise ValueError("Seed delivery extends into simulated equilibration.")
+            else:
+                points = (ProfilePoint(0., 0.), ProfilePoint(duration, 0.), *(
+                    ProfilePoint(duration + p.time_s - original["end_s"], p.target)
+                    for p in source.points if p.time_s > original["end_s"] + 1e-8))
+            profiles[role] = DeviceProfile(source.device_id, points, source.interpolation, source.unit)
+        spec = {**original, "end_s": duration, "hold_start_s": hold, "label": f"{self.mode.upper()} recommendation"}
+        return compile_simulation(spec, self.roles, self.configs, self.monitors, None, tuple(profiles.values()))
 
 
 class AdaptiveLoop:
@@ -194,14 +397,12 @@ class AdaptiveLoop:
                  *, bo_settings=None, size_term, workers=1):
         self.mode = mode
         self.setup = validate_setup(setup)
-        self.calibration_storage = calibration_storage
-        self.assignments = {item.role: item for item in assignments}
-        self.roles = {role: item.device_id for role, item in self.assignments.items()}
+        self.compiler = RecipeCompiler(self.setup, campaign, configs, calibration_storage, assignments,
+                                       campaign.monitor_device_ids, mode)
+        self.roles = self.compiler.roles
+        self.configs = self.compiler.configs
+        self.demo = self.compiler.demo
         self.template = campaign
-        self.monitors = campaign.monitor_device_ids
-        selected = set(self.roles.values()) | set(self.monitors)
-        self.configs = deepcopy({key: configs[key] for key in selected if key in configs})
-        self.demo = campaign.experiments[0].imed_simulation
         self.case = deepcopy(case)
         self.bo = deepcopy(bo_settings)
         self.size_term, self.workers = size_term, workers
@@ -209,17 +410,12 @@ class AdaptiveLoop:
         self.process_by_id = {}
         self.windows = {}
         self.used_recordings = set()
+        self.recipe_origins = {}
         unmapped = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
         unmapped -= set(self.roles.values())
         if unmapped:
             raise ValueError("Assign the initial actuators to known profile roles: " + ", ".join(sorted(unmapped)))
-        for role, device in self.roles.items():
-            cfg = configs.get(device, {})
-            if cfg.get("type") not in ROLES[role].compatible_types or is_monitor_only(cfg):
-                raise ValueError(f"Assign a compatible controlled device for {ROLES[role].label}.")
-        self._check_devices(campaign, configs, connected)
-        if "T" not in self.roles:
-            raise ValueError("Assign the reactor temperature profile in the DoE.")
+        self.check_devices(campaign, configs, connected)
         self._prepare_measurements(campaign)
         expected_names = {experiment.name for experiment in campaign.experiments}
         unknown = self.setup["initial_processes"].keys() - expected_names
@@ -229,29 +425,16 @@ class AdaptiveLoop:
             self._prepare_bo(campaign)
         else:
             self._prepare_imed()
-        self._check_support(campaign)
+            self.active_models = tuple(range(len(self.case["ModelParameter"])))
+            self.stage_counts = Counter(stage["kind"] for stage in loop_stages(self.case))
+        self.compiler.check_support(campaign)
 
     @property
     def complete(self):
         return self.followups >= self.setup["max_followups"]
 
-    def _check_devices(self, campaign, configs, connected):
-        used = set(self.roles.values()) | set(campaign.monitor_device_ids)
-        unavailable = used - set(connected)
-        if unavailable:
-            raise ValueError("Connect assigned devices and monitors: " + ", ".join(sorted(unavailable)))
-        fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity")
-        for key, original in self.configs.items():
-            if key not in configs or any(configs[key].get(field) != original.get(field) for field in fields):
-                raise ValueError(f"Device {key} changed after the loop was started.")
-        for key in campaign.monitor_device_ids:
-            if not is_monitor_only(configs[key]):
-                raise ValueError(f"Assign {key} as a read-only monitor.")
-        for experiment in campaign.experiments:
-            ExperimentDefinition.from_frame(experiment.to_frame(), configs)
-
     def check_devices(self, campaign, configs, connected):
-        self._check_devices(campaign, configs, connected)
+        self.compiler.check_devices(campaign, configs, connected, require_all=True)
 
     def _prepare_measurements(self, campaign):
         if self.demo:
@@ -260,9 +443,7 @@ class AdaptiveLoop:
             self.case["pbmsetting"] = {**mesh, **self.case.get("pbmsetting", {})}
             self.mapping = {}
             return
-        template = next(iter(self.case.get("ProcInf", [])), {})
-        self.process = _process({"SeedMass": 0., "AntiSolvMass": 0., "PowerRatio": 1.,
-                                 **template, **self.setup["process"]})
+        self.process = _process(self.compiler.process_defaults(self.case))
         for experiment in campaign.experiments:
             process = _process({**self.process, **self.setup["initial_processes"].get(experiment.name, {})})
             if "InitialConcentration" in process:
@@ -364,7 +545,7 @@ class AdaptiveLoop:
             raise ValueError("Assign an antisolvent pump for the IMED design.")
         if addition:
             rates = np.array([addition / duration for duration in bounds[3]])
-            feed = self._device_profile("AS", Profile(np.array([0., 1.]), rates, "Design bounds"), self.process)
+            feed = self.compiler.device_profile("AS", Profile(np.array([0., 1.]), rates, "Design bounds"), self.process)
             feed_limits = target_limits(self.configs[feed.device_id])
             if not all(target_allowed(point.target, feed_limits) for point in feed.points):
                 raise ValueError("IMED antisolvent rate bounds exceed the assigned pump limits.")
@@ -384,43 +565,6 @@ class AdaptiveLoop:
                          for item in self.template.experiments]
             if low != high or not any(np.isclose(low, mass) for mass in available):
                 raise ValueError("Fix simulated IMED seed mass to a dose available in the validation DoE.")
-
-    def _check_support(self, campaign):
-        support = self.setup["support_profiles"]
-        bad_roles = set(support) - (set(self.roles) - {"T", "AS"})
-        if bad_roles:
-            raise ValueError("Support profiles need distinct assigned DoE roles: " + ", ".join(sorted(bad_roles)))
-        for role, profile in support.items():
-            self._support_profile(role, profile)
-        required = {role for role in self.roles if role not in {"T", "AS", "seed"}
-                    and _role_active(campaign, self.roles[role])}
-        if self.demo:
-            required -= {"clean_sol", "valve_state"}
-        missing = required - set(support) - ({"stirring_rate"} if self.mode == "bo" else set())
-        if missing:
-            raise ValueError("Define follow-up support profiles for: " + ", ".join(sorted(missing)))
-        if self.setup["seed_pump"] and ("seed" not in self.roles or "seed" in support):
-            raise ValueError("Assign a seed pump and choose either calibrated delivery or a support profile.")
-        if self.setup["seed_pump"]:
-            limits = target_limits(self.configs[self.roles["seed"]])
-            if not target_allowed(self.setup["seed_pump"]["rpm"], limits):
-                raise ValueError("Calibrated seed pump RPM exceeds the assigned pump limits.")
-        if not self.demo and "seed" in self.roles and _role_active(campaign, self.roles["seed"]):
-            if not self.setup["seed_pump"] and "seed" not in support:
-                raise ValueError("Set calibrated seed delivery or a fixed seed support profile for follow-ups.")
-
-    def _support_profile(self, role, settings):
-        data = _merge({"points": None, "step": role == "valve_state"}, settings, f"{role} support profile")
-        profile = make_profile(data["points"], "Configured support", step=data["step"])
-        if profile is None or profile.time[0] != 0 or type(data["step"]) is not bool:
-            raise ValueError(f"{role}: enter a timeline from zero as [times in s, values].")
-        device = self.roles[role]
-        config = self.configs[device]
-        if config["type"] in {"masterflex", "ismatec", "nidaq_valve"} and profile.values[-1] != 0:
-            raise ValueError(f"End the {role} support profile at zero.")
-        profile = self._device_profile(role, profile)
-        ExperimentDefinition.from_frame(ExperimentDefinition(role, (profile,)).to_frame(), self.configs)
-        return profile
 
     def _read_batch(self, manifest, target, report):
         folder = Path(manifest["campaign_folder"])
@@ -469,6 +613,9 @@ class AdaptiveLoop:
             loop_outputs.bo_inputs(target, state)
             publish("bo_inputs", state)
         else:
+            origin = self.recipe_origins.get(manifest["campaign_id"], {})
+            for experiment in experiments:
+                experiment.update(origin)
             self.case["ExpData"] = [*self.case.get("ExpData", []), *experiments]
             self.case["ProcInf"] = [*self.case.get("ProcInf", []), *processes]
             self.case[PE_WEIGHTS_KEY] = {**{f"W{i}": weight for i, weight in enumerate(self.weights, 1)},
@@ -476,17 +623,34 @@ class AdaptiveLoop:
             loop_outputs.imed_inputs(target, self.case)
             publish("imed_inputs", {"case": deepcopy(self.case), "folder": manifest["campaign_folder"]})
         progress(f"Saved {self.mode.upper()} inputs and recording CSVs to {target}")
+        if self.mode == "imed":
+            survivors, scores, pe_stage = self._fit_imed(cancelled, progress, publish, target)
         if collect_only:
+            if self.mode == "imed":
+                progress("Follow-up limit reached. The final IMED fit includes every completed experiment.")
+            else:
+                self._save_bo_stage(target, progress, publish)
+                progress("Follow-up limit reached. Final measurements were added to the modeling inputs.")
             self.used_recordings.add(manifest["campaign_id"])
-            progress("Follow-up limit reached. Final measurements were added to the modeling inputs.")
             return None
         if self.mode == "bo":
-            profiles, process, details = self._recommend_bo(state, progress, publish)
+            result, process, details = self._recommend_bo(state, progress, publish)
+            profiles = result.profiles
+            stage = self._save_bo_stage(target, progress, publish, proposal=result)
+            details.update(stage_name=stage["name"], stage_case=stage["path"])
         else:
-            profiles, process, details = self._recommend_imed(experiments, processes, cancelled, progress, publish, target)
+            if not survivors:
+                raise ValueError("No IMED candidate passed model screening. Review the saved PE results and model diagnostics.")
+            profiles, process, details = self._recommend_imed(
+                experiments, processes, survivors, scores, pe_stage, cancelled, progress, publish, target)
         progress("Validating the recommended experiment")
-        campaign = self._compile_recipe(profiles, process)
+        _process(process)
+        campaign, window = self.compiler.build(
+            profiles, process, name=f"{self.mode.upper()} follow-up {self.followups + 1}",
+            source=self.mode, default_seed=self.process["SeedMass"], modeling=True)
         experiment = campaign.experiments[0]
+        self.process_by_id[experiment.experiment_id] = process
+        self.windows[experiment.experiment_id] = window
         process_state = {key: float(process[key]) for key in (*POSITIVE_PROCESS, *NONNEGATIVE_PROCESS)}
         if (initial := process.get("InitialConcentration")) is not None:
             process_state["InitialConcentration"] = float(initial)
@@ -495,9 +659,12 @@ class AdaptiveLoop:
                    "process": process_state, "crystallization_window_s": self.windows[experiment.experiment_id],
                    **details}
         if self.mode == "imed":
-            from imed_python.native_case import save_native_case
-
             save_native_case(target / "fit.imed.json", self.case)
+            self.active_models = survivors
+        self.recipe_origins[campaign.campaign_id] = {
+            "RecipeSource": details["method"], "RecipeReason": details.get("design_reason", ""),
+            "RecipeStage": details["stage_name"], "RecipeModelFolder": str(target),
+        }
         loop_outputs.modeled_recipe(target, profiles, campaign, details.get("predictions"))
         atomic_json(target / "recommendation.json", payload)
         progress(f"Saved the {details['method']} recommendation and device-target CSVs to {target}")
@@ -509,6 +676,9 @@ class AdaptiveLoop:
 
         case = {"ExpData": experiments, "ProcInf": processes, "Solubility": self.case.get("Solubility")}
         added = case_runs(case, manifest["campaign_folder"], controls=self.roles)
+        if origin := self.recipe_origins.get(manifest["campaign_id"]):
+            for run in added:
+                run["recipe_stage"] = origin["RecipeStage"]
         indices = range(len(self.bo["runs"]), len(self.bo["runs"]) + len(added))
         self.bo["runs"].extend(added)
         self.bo["selected"].extend(indices)
@@ -529,55 +699,107 @@ class AdaptiveLoop:
         publish("bo_result", result)
         seed = result.profiles.get("seed")
         process = {**self.process, "SeedMass": float(seed.values[0]) if seed is not None else self.process["SeedMass"]}
-        return result.profiles, process, {"method": "BO", "acquisition": result.acquisition,
-                                           "predictions": result.predictions, "observations": len(state["selected"])}
+        return result, process, {"method": "BO", "acquisition": result.acquisition,
+                                 "predictions": result.predictions, "observations": len(state["selected"])}
 
-    def _recommend_imed(self, experiments, processes, cancelled, report, publish, target):
-        from imed_python.session import pack_fit, pe_signatures, record_step, signature
+    def _save_bo_stage(self, target, report, publish, *, proposal=None):
+        entries = self.bo.setdefault("loop_stages", [])
+        number = len(entries) + 1
+        path = target / f"bo_{number:02}.json"
+        entry = {"name": f"BO {number}", "path": str(path), "observations": len(self.bo["selected"]),
+                 "proposed": proposal is not None}
+        snapshot = {**self.bo, "loop_stages": [*entries, entry]}
+        if proposal is not None:
+            snapshot["loop_proposal"] = {
+                **recipe_data(proposal.profiles, proposal.stages, proposal.horizon),
+                "predictions": proposal.predictions, "acquisition": proposal.acquisition,
+                "weighted_loss": proposal.mean_loss, "weighted_loss_sd": proposal.loss_sd,
+            }
+        atomic_json(path, snapshot)
+        entries.append(entry)
+        report(f"Saved {entry['name']} with {entry['observations']} observations to {path}.")
+        publish("bo_stage", entry)
+        return entry
 
+    def _imed_stage(self, kind, target, candidates):
+        self.stage_counts[kind] += 1
+        number = self.stage_counts[kind]
+        return {"kind": kind, "name": f"{kind} {number}", "experiments": len(self.case["ExpData"]),
+                "case_file": str(target / f"{kind.lower()}_{number:02}.imed.json"), "candidates": candidates}
+
+    def _fit_imed(self, cancelled, report, publish, target):
         publish("imed_pe", deepcopy(self.case))
         solubility = self.case["Solubility"]
         objective = FitObjective(self.case["ExpData"], self.case["ProcInf"], solubility,
                                  self.pe_mesh, self.weights, self.size_term, cancelled=cancelled)
         optimizer = self.case.get(PYFIT_SETTINGS_KEY, {})
         options = {key: optimizer.get(key, default) for key, default in PYFIT_DEFAULTS.items()}
-        fits, models = {}, self.case["ModelParameter"]
-        for index, model in enumerate(models):
-            report(f"IMED parameter estimation · model {index + 1} of {len(models)}")
+        fits, models = {}, list(self.case["ModelParameter"])
+        for position, index in enumerate(self.active_models, 1):
+            model = models[index]
+            name = display_name(model, f"Model {index + 1}")
+            report(f"IMED parameter estimation · {name} · {position} of {len(self.active_models)} active candidates")
             fit = fit_model(model, objective, workers=self.workers, cancelled=cancelled, progress=report,
                             generation_progress=lambda generation, mean, best, i=index:
                             publish("imed_generation", (i, generation, mean, best)), **options)
-            if not fit.converged:
-                raise ValueError(f"IMED parameter estimation did not converge for model {index + 1}.")
             fits[index] = fit
-        survivors, scores = surviving_models(fits, objective.sample_count, self.setup["imed"]["delta_aic"])
-        if scores:
-            best = min(scores.values())
-            for index, score_value in scores.items():
-                decision = "retained" if index in survivors else "eliminated"
-                report(f"IMED model {index + 1} {decision} with ΔAIC {score_value - best:.3g}")
-        fitted = [{**model, "para": fit.parameters, "covmat": fit.covariance,
-                   "SSR": fit.ssr, "AICVector": fit.aic} for model, fit in zip(models, fits.values())]
+        assessment = screen_models(fits, sample_count=objective.sample_count, delta_aic=self.setup["imed"]["delta_aic"])
+        survivors = tuple(index for index, result in assessment.items() if not result["reasons"])
         for index, fit in fits.items():
-            record_step(self.case, "parameter_estimation", pack_fit(fit), model_index=index,
+            result = {**pack_fit(fit), "screening": pack_screening(assessment[index])}
+            record_step(self.case, "parameter_estimation", result, model_index=index,
                         context=pe_signatures(self.case, index)[0])
-        loop_outputs.imed_fits(target, models, fits, scores, survivors)
-        publish("imed_fits", fits)
-        self.case["ModelParameter"] = fitted
+        updated = list(models)
+        for index, fit in fits.items():
+            updated[index] = {**models[index], "para": fit.parameters, "covmat": fit.covariance,
+                              "SSR": fit.ssr, "AICVector": fit.aic, **matlab_screening_fields(assessment[index])}
+        self.case["ModelParameter"] = updated
+        candidates = [{"model": index + 1, "name": display_name(models[index], f"Model {index + 1}"),
+                       "retained": index in survivors, "reason": ", ".join(result["reasons"]),
+                       **pack_screening(result)} for index, result in assessment.items()]
+        stage = self._imed_stage("PE", target, candidates)
+        record_step(self.case, "model_screening", {"stage": stage})
+        stage_path = save_native_case(stage["case_file"], self.case)
+        report(f"Saved {stage['name']} with {len(survivors)} retained candidate(s) to {stage_path}.")
+        destination = save_native_case(target / "fit.imed.json", self.case)
+        report(f"Saved fitted IMED models to {destination}.")
+        publish("imed_fits", {"fits": fits, "case": deepcopy(self.case), "screening": assessment})
+        loop_outputs.imed_fits(target, models, fits, assessment)
+        report(f"Saved IMED parameter and covariance CSVs to {target / 'imed'}.")
+        for index, result in assessment.items():
+            decision = ", ".join(result["reasons"]) or "retained"
+            difference = result["delta_aic"]
+            aic = f"ΔAIC {difference:.3g}" if difference is not None else "ΔAIC unavailable"
+            report(f"IMED model {index + 1} · {aic} · F {result['f_value']:.3g}/{result['f_limit']:.3g} · {decision}")
+        scores = {index: result["total_aic"] for index, result in assessment.items() if result["total_aic"] is not None}
+        return survivors, scores, stage
+
+    def _recommend_imed(self, experiments, processes, survivors, scores, pe_stage, cancelled, report, publish, target):
+        fitted = self.case["ModelParameter"]
+        solubility = self.case["Solubility"]
+        cutoff = self.setup["imed"]["delta_aic"]
         settings = self.case["pbmsetting"]
         settings = {**settings, "N": int(settings.get("N", 250))}
         if len(survivors) > 1:
             method = "Model discrimination"
+            kind = "MD"
+            reason = f"{len(survivors)} candidates passed the F-test, parameter t-tests and ΔAIC cutoff ({cutoff:g})."
             score = partial(discrimination_score, [fitted[index] for index in survivors], solubility=solubility,
                             settings=settings, weights=self.weights, size_term="D10 D50 D90",
                             experiment_count=len(self.case["ExpData"]))
         else:
             method = "D-optimal design"
-            model = fitted[survivors[0]]
+            kind = "DO"
+            index = survivors[0]
+            model = fitted[index]
+            name = display_name(model, f"Model {index + 1}")
+            reason = f"Only {name} passed model screening."
+            report(f"IMED selected {method} and skipped model discrimination. {reason}")
             samples = parameter_samples(model, self.setup["imed"]["covariance_samples"])
             score = partial(d_optimal_log_score, model, solubility=solubility, settings=settings,
                             enabled_terms=[weight > 0 for weight in self.weights], samples=samples)
-        report(f"Saved IMED fit CSVs. {len(survivors)} surviving model(s) will enter {method}")
+        if len(survivors) > 1:
+            report(f"IMED selected {method}. {reason}")
         options = self.setup["imed"]
         conditions = {**options["conditions"], "equilibration_s": options["equilibration_s"]}
         design_experiment = {**experiments[-1]}
@@ -592,142 +814,19 @@ class AdaptiveLoop:
         value, proposal, process = optimize_recipe(
             design_experiment, processes[-1], conditions, score,
             iterations=options["iterations"], cancelled=cancelled, workers=self.workers)
-        action = "d_optimal_design" if len(survivors) == 1 else "model_discrimination"
-        record_step(self.case, action, {"score": value, "experiment": proposal, "process": process, "request": request},
+        stage = self._imed_stage(kind, target, pe_stage["candidates"])
+        action = "d_optimal_design" if kind == "DO" else "model_discrimination"
+        record_step(self.case, action, {"score": value, "experiment": proposal, "process": process,
+                                       "request": request, "reason": reason, "stage": stage},
                     context="|".join(signature(self.case, index) for index in survivors))
+        stage_path = save_native_case(stage["case_file"], self.case)
+        report(f"Saved {stage['name']} ({method}) and its fitted models to {stage_path}.")
         publish("imed_result", {"case": deepcopy(self.case), "result": (value, proposal, process)})
         profiles = {"temperature": Profile(*proposal["TemperatureData"], method),
                     "feed": Profile(*proposal["FlowRateData"], method)}
         process["InitialConcentration"] = options["conditions"]["concentration"]
-        return profiles, process, {"method": method, "score": value,
+        return profiles, process, {"method": method, "design_reason": reason, "score": value,
+                                   "stage_name": stage["name"], "stage_case": str(stage_path),
                                    "observations": len(self.case["ExpData"]),
                                    "surviving_models": [index + 1 for index in survivors],
                                    "aic_scores": {str(index + 1): score for index, score in scores.items()}}
-
-    def _device_profile(self, role, profile, process=None):
-        assignment = self.assignments[role]
-        config = self.configs[assignment.device_id]
-        values = profile.values
-        if role == "AS" and config["type"] == "ismatec" and not config.get("pump_calibration"):
-            values, unit = values * 60 / (1 if self.demo else process["AntiSolventDensity"]), "mL/min"
-        else:
-            mass_flow = ROLES[role].unit == "g/h"
-            if role == "AS":
-                values = values * 3600
-            if mass_flow:
-                values, unit, _ = convert_profile(self.calibration_storage, assignment, config, values)
-            else:
-                unit = target_limits(config)["unit"]
-        return DeviceProfile(assignment.device_id, tuple(ProfilePoint(float(t), float(v))
-                             for t, v in zip(profile.time, values)),
-                             "step" if profile.step or role == "valve_state" else "linear", unit)
-
-    def _compile_recipe(self, recipe, process):
-        _process(process)
-        temp = recipe["temperature"]
-        duration = float(temp.time[-1])
-        if temp.time[0] != 0 or duration <= 0:
-            raise ValueError("The follow-up temperature profile must start at zero and have a positive duration.")
-        device_profiles = {"T": self._device_profile("T", temp)}
-        feed = recipe.get("feed")
-        if feed is not None:
-            if feed.values.min() < 0 or feed.time[0] != 0 or feed.time[-1] != duration or feed.values[-1] != 0:
-                raise ValueError("The antisolvent profile must be nonnegative, span the crystallization window and end at zero.")
-            if np.any(feed.values > 0) and ("AS" not in self.roles or self.setup["recording"]["no_feed"]):
-                raise ValueError("Provide an assigned and monitored antisolvent pump for the recommended recipe.")
-            if "AS" in self.roles:
-                device_profiles["AS"] = self._device_profile("AS", feed, process)
-        stirring = recipe.get("stirring")
-        support = self.setup["support_profiles"]
-        if stirring is not None and "stirring_rate" in support:
-            raise ValueError("The BO stirring recommendation conflicts with the configured main stirrer support profile.")
-        if stirring is not None:
-            if "stirring_rate" not in self.roles and np.any(stirring.values != 0):
-                raise ValueError("Assign a main stirrer to execute the BO stirring recommendation.")
-        if stirring is not None and "stirring_rate" in self.roles:
-            device_profiles["stirring_rate"] = self._device_profile("stirring_rate", stirring)
-        if ("stirring_rate" in self.roles and _role_active(self.template, self.roles["stirring_rate"])
-                and "stirring_rate" not in device_profiles and "stirring_rate" not in support):
-            raise ValueError("Provide a recorded or configured main stirrer profile for the follow-up.")
-        seed_mass = process["SeedMass"]
-        if self.demo:
-            for role, profile in support.items():
-                device_profiles[role] = self._support_profile(role, profile)
-            demo = self._append_demo_profiles(device_profiles, duration, seed_mass, temp, feed)
-        else:
-            demo = None
-            calibration = self.setup["seed_pump"]
-            if seed_mass > 0 and not self.setup["recording"]["seed_percentiles"]:
-                raise ValueError("Configure seed percentiles before executing a seeded follow-up.")
-            if seed_mass and calibration:
-                end = seed_mass / calibration["grams_per_second"]
-                if end >= duration:
-                    raise ValueError("Seed addition exceeds the recommended experiment duration.")
-                seed = Profile(np.array([0., end, duration]), np.array([calibration["rpm"], 0., 0.]),
-                               "Calibrated seed dose", step=True)
-                device_profiles["seed"] = self._device_profile("seed", seed)
-            elif seed_mass != self.process["SeedMass"]:
-                raise ValueError("Configure calibrated seed delivery before changing the preloaded seed mass.")
-            start = self.setup["followup_start_s"]
-            if start:
-                for role, profile in device_profiles.items():
-                    points = tuple(ProfilePoint(point.time_s + start, point.target) for point in profile.points)
-                    before = [ProfilePoint(0., points[0].target if role in {"T", "stirring_rate"} else 0.)]
-                    if role == "AS" and profile.interpolation == "linear" and points[0].target != 0:
-                        transition = float(np.nextafter(start, 0.))
-                        if transition > 0:
-                            before.append(ProfilePoint(transition, 0.))
-                    device_profiles[role] = DeviceProfile(profile.device_id, (*before, *points),
-                                                          profile.interpolation, profile.unit)
-            for role, profile in support.items():
-                device_profiles[role] = self._support_profile(role, profile)
-        profiles = tuple(device_profiles.values())
-        experiment = ExperimentDefinition(f"{self.mode.upper()} follow-up {self.followups + 1}", profiles,
-                                          source=self.mode, imed_simulation=demo)
-        ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
-        self.process_by_id[experiment.experiment_id] = process
-        start = 0. if self.demo else self.setup["followup_start_s"]
-        self.windows[experiment.experiment_id] = (start, start + duration)
-        return Campaign(experiment.name, (experiment,), monitor_device_ids=self.monitors)
-
-    def _append_demo_profiles(self, profiles, duration, seed_mass, temp, feed):
-        _, _, seeded_process, _, _ = model_inputs(True)
-        if seed_mass and not np.isclose(seed_mass, seeded_process["SeedMass"]):
-            raise ValueError("The validation simulator supports its calibrated seed dose or zero seed.")
-        demo_template = next((exp for exp in self.template.experiments
-                              if exp.imed_simulation["seeded"] == bool(seed_mass)), None)
-        if demo_template is None:
-            raise ValueError("The simulated initial batch needs a matching seed-dose profile.")
-        original = demo_template.imed_simulation
-        last_change = max(temp.time[np.flatnonzero(np.diff(temp.values) != 0) + 1], default=0.)
-        final_feed = 0.
-        if feed is not None and np.any(feed.values > 0):
-            last = int(np.flatnonzero(feed.values > 0)[-1])
-            final_feed = feed.time[min(last + 1, len(feed.time) - 1)]
-        hold = float(max(last_change, final_feed, duration / 2))
-        if hold >= duration:
-            raise ValueError("The simulated recommendation needs a final hold at constant temperature and zero feed.")
-        for role, trace in (("T", temp), ("AS", feed)):
-            if trace is None:
-                trace = Profile(np.array([0., duration]), np.zeros(2), "No antisolvent")
-            time = np.union1d(trace.time, [hold, duration])
-            if trace.step:
-                changes = np.flatnonzero(np.diff(trace.values) != 0) + 1
-                before = np.nextafter(trace.time[changes], trace.time[changes - 1])
-                time = np.union1d(time, before)
-            profiles[role] = self._device_profile(role, Profile(time, trace.sample(time), trace.source, trace.step))
-        for role in ("seed", "clean_sol", "valve_state"):
-            if role in profiles:
-                continue
-            source = next(p for p in demo_template.profiles if p.device_id == self.roles[role])
-            if role == "seed":
-                points = tuple(p for p in source.points if p.time_s < hold)
-                if not points or points[-1].target != 0:
-                    raise ValueError("Seed delivery extends into simulated equilibration.")
-            else:
-                points = (ProfilePoint(0., 0.), ProfilePoint(duration, 0.), *(
-                    ProfilePoint(duration + p.time_s - original["end_s"], p.target)
-                    for p in source.points if p.time_s > original["end_s"] + 1e-8))
-            profiles[role] = DeviceProfile(source.device_id, points, source.interpolation, source.unit)
-        spec = {**original, "end_s": duration, "hold_start_s": hold, "label": f"{self.mode.upper()} recommendation"}
-        return compile_simulation(spec, self.roles, self.configs, self.monitors, None, tuple(profiles.values()))

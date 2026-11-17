@@ -86,6 +86,11 @@ def latest_step(case, action, *, model_index=-1, context=None):
     return None
 
 
+def loop_stages(case):
+    return [step["result"]["stage"] for step in history(case)
+            if isinstance(step.get("result"), dict) and isinstance(step["result"].get("stage"), dict)]
+
+
 def pe_signatures(case, model_index):
     fitting_case = {**case, "pbmsetting": effective_pe_pbm(case)}
     if PE_WEIGHTS_KEY in case:
