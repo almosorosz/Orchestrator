@@ -9,6 +9,7 @@ from scipy.stats import qmc
 from .candidate_workers import candidate_map
 from .distribution import cell_volumes, d_values
 from .estimation import TRIAL_ERRORS, normalized
+from .mesh_grid import grid_edges, is_log_grid
 from .solver import model_parameters, simulate
 
 
@@ -21,9 +22,15 @@ def responses(outputs, process, settings, active_terms, size_term, normalize_cou
         if index == 0 and normalize_count:
             y = normalized(y, y[-1])
         if index == 2:
-            edges = np.linspace(settings.get("Lmin", 0), settings.get("Lmax", 250), len(x) + 1)
+            edges = grid_edges(settings, len(x))
             y = y * cell_volumes(edges, process["ShapeFactor"])
-            y = normalized(y, y.sum()) if size_term == "CSD" else d_values(x, y)
+            log_grid = is_log_grid(settings)
+            if size_term == "CSD":
+                if log_grid:
+                    y *= np.diff(edges)
+                y = normalized(y, y.sum())
+            else:
+                y = d_values(x, y, edges=edges if log_grid else None)
         values[index] = y
     return values
 

@@ -19,6 +19,7 @@ from experiment.recording import atomic_json
 
 from .control_panel import fill_table, table
 from .estimation import FitObjective, fit_model
+from .mesh_grid import DEFAULT_LOG_OFFSET, is_log_grid
 from .native_case import NATIVE_FILTER, save_native_case
 from .pe_settings import (PE_PBM_KEY, PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, WEIGHT_DEFAULTS,
                           effective_pe_pbm, pbm_for_pe, pe_file, pe_mesh, read_pe_file)
@@ -60,9 +61,24 @@ class AdvancedSettings(QDialog):
             )
         )
         self.inputs = {}
-        self.comparison_button = QPushButton("Compare PBM with QMOM")
-        self.comparison_button.setEnabled(hasattr(parent, "case"))
-        self.comparison_button.clicked.connect(self.show_comparison)
+        self.grid_spacing = QComboBox()
+        self.grid_spacing.addItem("Uniform", "uniform")
+        self.grid_spacing.addItem("Logarithmic", "log")
+        self.grid_spacing.setCurrentIndex(int(is_log_grid(pbm) and mode != "matlab_pe"))
+        self.grid_spacing.setEnabled(mode != "matlab_pe")
+        self.grid_spacing.setToolTip("Archived MATLAB PE uses uniform spacing." if mode == "matlab_pe"
+                                    else "Logarithmic spacing puts more bins near Lmin.")
+        self.log_offset = QLineEdit(str(pbm.get("LogGridOffset", DEFAULT_LOG_OFFSET)))
+        self.log_offset.setToolTip("Edges are uniform in log(size + offset). Smaller positive offsets "
+                                  "concentrate more bins near Lmin.")
+        self.comparison_button = QPushButton("Compare HR-FVM to QMOM")
+        self.mesh_validation_button = QPushButton("Mesh validation")
+        comparison_actions = QHBoxLayout()
+        for button, callback in ((self.comparison_button, self.show_comparison),
+                                 (self.mesh_validation_button, self.show_mesh_validation)):
+            button.setEnabled(hasattr(parent, "case"))
+            button.clicked.connect(callback)
+            comparison_actions.addWidget(button)
         layout = QVBoxLayout(self)
         groups = QHBoxLayout()
         layout.addLayout(groups)
@@ -85,7 +101,9 @@ class AdvancedSettings(QDialog):
                 self.inputs[key] = field
                 form.addRow(label, field)
             if fields is self.mesh_fields:
-                form.addRow(self.comparison_button)
+                form.addRow("Grid spacing", self.grid_spacing)
+                form.addRow("Log offset (µm)", self.log_offset)
+                form.addRow(comparison_actions)
             groups.addWidget(group, 1)
 
         note = QLabel("The global search uses differential evolution, followed by local "
@@ -97,6 +115,9 @@ class AdvancedSettings(QDialog):
         layout.addWidget(self.error)
         for field in self.inputs.values():
             field.textChanged.connect(self.error.clear)
+        self.log_offset.textChanged.connect(self.error.clear)
+        self.grid_spacing.currentIndexChanged.connect(self.update_grid_spacing)
+        self.update_grid_spacing()
         actions = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                    | QDialogButtonBox.StandardButton.Cancel)
         actions.accepted.connect(self.accept)
@@ -127,29 +148,58 @@ class AdvancedSettings(QDialog):
 
     def show_comparison(self):
         from .comparison_dialog import ComparisonDialog
+        self.show_mesh_dialog(ComparisonDialog)
 
+    def show_mesh_validation(self):
+        from .mesh_validation_dialog import MeshValidationDialog
+        self.show_mesh_dialog(MeshValidationDialog)
+
+    def update_grid_spacing(self):
+        self.log_offset.setEnabled(self.grid_spacing.currentData() == "log")
+        self.error.clear()
+
+    def read_mesh_inputs(self):
         values = self.read_inputs(self.mesh_fields)
         if values is None:
             return
         if values["Lmax"] <= values["Lmin"]:
             self.error.setText("Lmax must be greater than Lmin.")
+            self.inputs["Lmax"].setFocus()
+            return
+        spacing = self.grid_spacing.currentData()
+        if spacing == "log":
+            try:
+                offset = float(self.log_offset.text())
+                if not isfinite(offset) or offset <= 0:
+                    raise ValueError
+            except ValueError:
+                self.error.setText("Log offset requires a finite positive number.")
+                self.log_offset.setFocus()
+                return
+            values.update(GridSpacing="log", LogGridOffset=offset)
+        elif "GridSpacing" in self.pbm:
+            values["GridSpacing"] = "uniform"
+        return values
+
+    def show_mesh_dialog(self, dialog_type):
+        values = self.read_mesh_inputs()
+        if values is None:
             return
         parent = self.parent()
         case = parent.analysis_case()
         settings = {**self.pbm, **values}
         case = {**case, "pbmsetting": settings}
         index = parent.model.currentData()
-        dialog = ComparisonDialog(case, self, model_index=index)
+        dialog = dialog_type(case, self, model_index=index)
         dialog.exec()
         dialog.deleteLater()
 
     def accept(self):
-        values = self.read_inputs(self.mesh_fields + self.optimizer_fields)
-        if values is None:
+        mesh = self.read_mesh_inputs()
+        if mesh is None:
             return
-        if values["Lmax"] <= values["Lmin"]:
-            self.error.setText("Lmax must be greater than Lmin.")
-            self.inputs["Lmax"].setFocus()
+        values = self.read_inputs(self.optimizer_fields)
+        if values is None:
             return
         if not values["mutation_min"] <= values["mutation_max"] < 2:
             self.error.setText("Mutation factors must be ordered and smaller than 2.")
@@ -160,7 +210,8 @@ class AdvancedSettings(QDialog):
             self.inputs["recombination"].setFocus()
             return
 
-        self.pbm.update({key: values[key] for key, *_ in self.mesh_fields})
+        self.pbm.pop("LogGridOffset", None)
+        self.pbm.update(mesh)
         if self.pbm.get("Numerics") == "matlab_pe":
             self.pbm["UseArchivedTolerances"] = True
         self.optimizer.update({key: values[key] for key, *_ in self.optimizer_fields})

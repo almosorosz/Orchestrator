@@ -3,10 +3,20 @@ import numpy as np
 from scipy.integrate import cumulative_trapezoid
 from scipy.interpolate import CubicSpline, interp1d
 
+from .mesh_grid import grid_edges, is_log_grid
+
 
 def cell_volumes(edges, shape_factor):
     boundary_volumes = shape_factor * edges**3
     return (boundary_volumes[:-1] + boundary_volumes[1:]) / 2
+
+
+def finite_volume_density(number_density, edges, shape_factor):
+    """Return percentage volume per unit size on the finite-volume cells."""
+    widths = np.diff(edges)
+    volume = np.maximum(number_density, 0) * cell_volumes(edges, shape_factor) * widths
+    total = volume.sum()
+    return 100 * volume / total / widths if total > 0 else np.zeros_like(volume)
 
 
 def seed_number_density(experiment, process, edges):
@@ -35,7 +45,11 @@ def seed_number_density(experiment, process, edges):
 
 def volume_distribution(csd, process, settings):
     length, number_density = csd
-    edges = np.linspace(settings.get("Lmin", 0), settings.get("Lmax", 250), len(length) + 1)
+    edges = grid_edges(settings, len(length))
+    if is_log_grid(settings):
+        density = finite_volume_density(number_density, edges, process["ShapeFactor"])
+        sizes = d_values(length, density, edges=edges) if density.any() else None
+        return np.vstack((length, density)), sizes
     density = np.maximum(number_density, 0) * cell_volumes(edges, process["ShapeFactor"])
     distribution = percent_density(length, density)
     if distribution is None:
@@ -50,7 +64,16 @@ def percent_density(length, density):
     return np.vstack((length, 100 * density / integral))
 
 
-def d_values(length, density):
+def d_values(length, density, *, edges=None):
+    if edges is not None:
+        widths = np.diff(edges)
+        cumulative = np.r_[0., np.cumsum(np.maximum(density, 0) * widths)]
+        if not np.isfinite(cumulative[-1]) or cumulative[-1] <= 0:
+            raise ValueError("The predicted size distribution has no particle volume")
+        targets = np.array([.1, .5, .9]) * cumulative[-1]
+        bins = np.searchsorted(cumulative, targets, side="left") - 1
+        fractions = (targets - cumulative[bins]) / (cumulative[bins + 1] - cumulative[bins])
+        return edges[bins] + widths[bins] * fractions
     x = np.linspace(length[0], length[-1], 100_000)
     pdf = np.maximum(np.interp(x, length, density), 0)
     cdf = cumulative_trapezoid(pdf, x, initial=0)

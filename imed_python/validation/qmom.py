@@ -11,6 +11,7 @@ from scipy.integrate import solve_ivp
 from scipy.linalg import LinAlgError, eigh
 
 from ..distribution import cell_volumes, seed_number_density
+from ..mesh_grid import grid_edges
 
 
 @dataclass(frozen=True)
@@ -150,7 +151,7 @@ def _ccas_daughters(br, bounds, shape, length_scale):
         # Retain the production mesh regularization for this law.
         sizes = (bounds[:-1] + bounds[1:]) / 2
         volume = shape * (bounds[:-1]**3 + bounds[1:]**3) / 2
-        moments = (2 / volume) @ ((sizes[:, None] / length_scale)**np.arange(6))
+        moments = (2 * np.diff(bounds) / volume) @ ((sizes[:, None] / length_scale)**np.arange(6))
     elif br[6] == 2 and br[5] > 0:
         lower, upper = bounds[[0, -1]]
         # Focus the integration knots around the Gaussian when it is narrow
@@ -215,7 +216,7 @@ def solve_ccas_qmom(parameters, experiment, process, solubility, settings, *, ti
     lower, upper = settings.get("Lmin", 0), settings.get("Lmax", 250)
     if n < 2 or not 0 <= lower < upper:
         raise ValueError("QMOM requires a positive size range with at least two cells")
-    bounds = np.linspace(lower, upper, n + 1)
+    bounds = grid_edges(settings, n)
     ls = max(upper / 4, 1.)
     powers = np.arange(6)
     shape, rho = process["ShapeFactor"], process["SolidDensity"]

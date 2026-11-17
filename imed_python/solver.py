@@ -9,6 +9,7 @@ from scipy.interpolate import interp1d
 from scipy.io import loadmat
 
 from .distribution import cell_volumes, seed_number_density
+from .mesh_grid import grid_edges, is_log_grid
 
 
 PBM_MODES = {
@@ -253,7 +254,7 @@ def simulate(parameters, experiment, process, solubility, settings=None, *,
 def _simulate_numpy(parameters, experiment, process, solubility, settings,
                     matlab_pe, return_history, check_cancelled):
     n = int(settings.get("N", 250))
-    bounds = np.linspace(settings.get("Lmin", 0), settings.get("Lmax", 250), n + 1)
+    bounds = grid_edges(settings, n)
     width = np.diff(bounds)
     if n < 2 or np.any(width <= 0) or bounds[0] < 0:
         raise ValueError("The grid requires at least two cells and increasing nonnegative bounds")
@@ -310,6 +311,8 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
             daughters = np.exp(log_density - log_density.max())
         else:
             raise ValueError("Active breakage requires a supported daughter distribution")
+        if is_log_grid(settings):
+            daughters *= width
         daughters /= np.dot(daughters, volume)
 
     deadline = monotonic() + settings.get("MaxIterationTime", 30)

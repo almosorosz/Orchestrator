@@ -1,6 +1,7 @@
 """Settings shared between a PE dialog and an IMED case."""
 import math
 
+from .mesh_grid import DEFAULT_LOG_OFFSET, is_log_grid
 from .size_data import FINAL_SIZE_TERM, TREND_SIZE_TERM
 
 # MATLAB ControlPanel.m and ParameterEst/+utils/pe_build_default_settings.m.
@@ -21,7 +22,7 @@ PYFIT_DEFAULTS = {
     "recombination": 0.7,
     "local_evaluations": 1500,
 }
-PE_PBM_FIELDS = (*PBM_DEFAULTS, "MaxSteps", "UseArchivedTolerances")
+PE_PBM_FIELDS = (*PBM_DEFAULTS, "MaxSteps", "UseArchivedTolerances", "GridSpacing", "LogGridOffset")
 
 
 def pbm_for_pe(saved):
@@ -38,11 +39,17 @@ def effective_pe_pbm(case):
     saved = case.get(PE_PBM_KEY)
     if isinstance(saved, dict):
         pbm.update({key: saved[key] for key in PE_PBM_FIELDS if key in saved})
+    if pbm.get("Numerics") == "matlab_pe":
+        pbm.pop("GridSpacing", None)
+        pbm.pop("LogGridOffset", None)
     return pbm
 
 
 def pe_mesh(pbm):
-    return {key: pbm[key] for key in PE_PBM_FIELDS if key in pbm}
+    mesh = {key: pbm[key] for key in PE_PBM_FIELDS if key in pbm}
+    if not is_log_grid(mesh):
+        mesh.pop("LogGridOffset", None)
+    return mesh
 
 
 def pe_file(pbm, optimizer, weights):
@@ -77,6 +84,9 @@ def read_pe_file(data):
             or type(pbm.get("MaxSteps", 1)) is not int or pbm.get("MaxSteps", 1) < 1
             or type(pbm.get("UseArchivedTolerances", False)) is not bool):
         raise ValueError("Invalid PE mesh, tolerances or step limit.")
+    if (pbm.get("GridSpacing", "uniform") not in ("uniform", "log")
+            or not valid(pbm.get("LogGridOffset", DEFAULT_LOG_OFFSET), 0, strict=True)):
+        raise ValueError("Choose uniform or logarithmic PE grid spacing and a positive log offset.")
     optimizer = {**PYFIT_DEFAULTS, **numbers("optimizer", PYFIT_DEFAULTS)}
     minima = {"global_iterations": 0, "population_size": 5, "local_evaluations": 1}
     if (any(not valid(value, minima.get(key, 0)) for key, value in optimizer.items())

@@ -10,6 +10,7 @@ from scipy.stats import qmc
 
 from .candidate_workers import candidate_map
 from .distribution import cell_volumes, d_values
+from .mesh_grid import grid_edges, is_log_grid
 from .pe_settings import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY
 from .solver import pbm_backend_label, simulate
 from .size_data import TREND_SIZE_TERM
@@ -54,8 +55,8 @@ class FitObjective:
         self.experiments = []
         self.residual_count = 0
         self.sample_count = 0
-        edges = np.linspace(settings.get("Lmin", 0), settings.get("Lmax", 250),
-                            int(settings.get("N", 250)) + 1)
+        edges = grid_edges(settings)
+        self.log_edges = edges if is_log_grid(settings) else None
         centers = edges[1:] - np.diff(edges) / 2
         if at_measurements and centers.size < 2:
             raise ValueError("Use a PBM grid with at least two bins.")
@@ -100,15 +101,18 @@ class FitObjective:
                     self.sample_count += 3
                 else:
                     points = series(experiment[field], field)
+                    if at_measurements and index == 1:
+                        points = points[:, points[0] > 0]
+                    elif index == 2 and (at_measurements or self.log_edges is not None):
+                        support = centers if self.log_edges is None else edges
+                        points = points[:, (points[0] >= support[0]) & (points[0] <= support[-1])]
+                        if self.log_edges is not None and not at_measurements and points.shape[1] < 2:
+                            raise ValueError("CSD fitting needs at least two measured sizes inside the log grid.")
                     if at_measurements:
-                        if index == 1:
-                            points = points[:, points[0] > 0]
-                        elif index == 2:
-                            points = points[:, (points[0] >= centers[0]) & (points[0] <= centers[-1])]
                         if points.shape[1] <= int(index != 1):
                             continue
                     observed[index] = points
-                    self.residual_count += (len(centers) if index == 2 and not at_measurements
+                    self.residual_count += (len(centers) if index == 2 and not at_measurements and self.log_edges is None
                                             else points.shape[1])
                     # Peak or total normalization removes one independent component.
                     self.sample_count += points.shape[1] - int(at_measurements and index != 1)
@@ -155,7 +159,14 @@ class FitObjective:
                             - points[1] for column, points in measured.items()])
                         count = len(difference)
                     elif self.terms == "CSD":
-                        if self.at_measurements:
+                        if self.log_edges is not None:
+                            # Compare measured CSD fractions over their actual size intervals.
+                            distances = np.diff(measured[0]) / 2
+                            widths = np.r_[distances, 0.] + np.r_[0., distances]
+                            predicted = np.interp(measured[0], x, volume_density) * widths
+                            observed_density = measured[1] * widths
+                            count = len(predicted)
+                        elif self.at_measurements:
                             predicted = np.interp(measured[0], x, volume_density,
                                                   left=np.nan, right=np.nan)
                             observed_density = measured[1]
@@ -167,7 +178,7 @@ class FitObjective:
                         difference = (normalized(predicted, predicted.sum())
                                       - normalized(observed_density, observed_density.sum()))
                     else:
-                        difference = d_values(x, volume_density) - measured
+                        difference = d_values(x, volume_density, edges=self.log_edges) - measured
                         count = 3
                 else:
                     predicted = np.interp(measured[0], x, prediction, left=np.nan, right=np.nan)

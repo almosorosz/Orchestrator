@@ -5,9 +5,11 @@ from .solver import PBM_MODES
 
 
 class SolverChoice(QComboBox):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, allow_archived=True):
         super().__init__(parent)
         for mode, label in PBM_MODES.items():
+            if mode == "matlab_pe" and not allow_archived:
+                continue
             self.addItem("JAX PBM (Auto)" if mode == "jax" else label, (mode, "auto"))
             if mode == "jax":
                 self.addItem("JAX PBM (CPU)", (mode, "cpu"))
