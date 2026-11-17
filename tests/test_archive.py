@@ -10,8 +10,8 @@ import unittest
 from unittest.mock import patch
 
 import pandas as pd
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QApplication, QDialog, QListWidget
 from experiment.archive import campaign_details, plot_traces, export_runs
 from experiment.models import Campaign, ExperimentDefinition
 from experiment.recording import RunRecorder, atomic_json
@@ -51,8 +51,7 @@ class ArchiveTests(unittest.TestCase):
 
         browser = CampaignBrowser()
         try:
-            browser.details = {"folder": "campaign"}
-            job = {"kind": "plot", "revision": browser._plot_revision, "folder": "campaign", "runs": ["run"]}
+            job = {"kind": "plot", "revision": browser._plot_revision, "runs": {"campaign": ["run"]}}
             browser._pending = job
             browser.clear_plots()
             browser._finished(job, QImage(1, 1, QImage.Format.Format_RGB32), "")
@@ -71,11 +70,75 @@ class ArchiveTests(unittest.TestCase):
         with patch('matplotlib.figure.Figure', return_value=fig), \
              patch('gui.campaign_browser.plot_traces', return_value={
                  'pump.target': [(0, 0), (1, 10)], 'pump.speed_rpm': [(0, 0), (1, 9)]}):
-            result = render_recorded(details, [str(i) for i in range(5)], None, True)
+            result = render_recorded([(details, [str(i) for i in range(5)])], None, True)
         self.assertFalse(result.isNull())
         self.assertEqual(len(fig.axes), 1)
         self.assertEqual(len(fig.axes[0].lines), 10)
         self.assertEqual(len({line.get_color() for line in fig.axes[0].lines}), 5)
+
+    def test_multiple_campaigns_keep_selections_and_plot_only_checked_devices(self):
+        from matplotlib.figure import Figure
+        from gui.campaign_browser import CampaignBrowser
+
+        configs, template = fixture()
+        configs.update(temperature={"name": "Temperature", "type": "huber"},
+                       scale={"name": "Scale", "type": "mettler"})
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+            root = Path(root)
+            for index, name in enumerate(("First", "Second"), 1):
+                folder = root / f"campaign_{index}"
+                run = folder / "run1"
+                run.mkdir(parents=True)
+                campaign = {**asdict(template), "name": name, "campaign_id": str(index)}
+                atomic_json(folder / "definition.json", {"campaign": campaign, "devices": configs})
+                atomic_json(run / "run.json", {"run_id": "run1", "experiment_id": template.experiments[0].experiment_id,
+                                               "status": "completed", "recording_complete": True})
+                (run / "planned.csv").write_text("time_s,pump\n0,10\n", encoding="utf-8")
+                (run / "execution.csv").write_text(
+                    f"elapsed_s,pump.speed_rpm,temperature.temp_external,scale.weight_g\n0,{index},25,60\n1,{index + 2},24,59\n",
+                    encoding="utf-8")
+            browser = CampaignBrowser()
+            try:
+                browser.root_input.setText(str(root))
+                browser.refresh()
+                wait(lambda: not browser._busy and len(browser.rows) == 2)
+                browser._select_row(browser.campaigns, 1)
+                self.assertEqual(browser.runs.rowCount(), 6)
+                self.assertEqual(len({browser.runs.item(row, 2).text() for row in (0, 3)}), 2)
+
+                def choose(dialog):
+                    choices = dialog.findChild(QListWidget)
+                    for index in range(choices.count()):
+                        if choices.item(index).text().startswith("scale:"):
+                            choices.item(index).setCheckState(Qt.CheckState.Unchecked)
+                    return QDialog.DialogCode.Accepted
+
+                with patch.object(QDialog, "exec", choose):
+                    browser.device.click()
+                self.assertIn("2 of 3 devices", browser.device.text())
+                figure = Figure()
+                with patch("matplotlib.figure.Figure", return_value=figure):
+                    browser.plot_selected()  # Include all executed runs across both campaigns.
+                    wait(lambda: not browser._busy and not browser._image.isNull())
+                self.assertEqual(len(figure.axes), 2)
+                for axis in figure.axes:
+                    self.assertEqual(len(axis.lines), 2)
+                    self.assertEqual({line.get_label().split()[0] for line in axis.lines}, {"C1", "C2"})
+                browser._select_row(browser.runs, 0)
+                browser._select_row(browser.runs, 3)
+                browser.refresh()
+                wait(lambda: not browser._busy)
+                self.assertEqual(len(browser.selected_campaigns), 2)
+                self.assertEqual(len(browser.selected_runs()), 2)
+                self.assertIn("2 of 3 devices", browser.device.text())
+                with patch("gui.campaign_browser.QFileDialog.getExistingDirectory", return_value=str(root)):
+                    browser.export_selected()
+                wait(lambda: not browser._busy)
+                exported, = root.glob("experiment_export_*")
+                self.assertEqual(len(list(exported.glob("*/run1/execution.csv"))), 2)
+            finally:
+                self.assertTrue(browser.shutdown())
+                browser.close()
 
     def test_archive_plot_during_actual_simulated_loop_execution(self):
         from MAIN_WINDOW import MainWindow
@@ -109,8 +172,8 @@ class ArchiveTests(unittest.TestCase):
                     browser = window.plots_page.browser
                     browser.root_input.setText(str(experiment_root))
                     browser.refresh()
-                    wait(lambda: not browser._busy and browser.details and browser.details["completed"] == 1)
-                    self.assertEqual([r["status"] for r in browser.details["runs"]], ["completed", "running", "queued"])
+                    wait(lambda: not browser._busy and browser.selected_campaigns and browser.selected_campaigns[0]["completed"] == 1)
+                    self.assertEqual([r["status"] for _, r in browser.run_rows], ["completed", "running", "queued"])
                     browser.runs.selectRow(0)
                     browser.plot_selected()
                     wait(lambda: not browser._busy and not browser._image.isNull())
@@ -144,8 +207,8 @@ class ArchiveTests(unittest.TestCase):
                         recorder.submit("run_end", run_id, {"run_id": run_id, "experiment_id": campaign.experiments[i].experiment_id, "status": "completed"})
                 wait(lambda: (recorder.folder / "run1" / "execution.csv").exists())
                 browser.set_roots([root])
-                wait(lambda: not browser._busy and browser.details is not None)
-                self.assertEqual([r["status"] for r in browser.details["runs"]], ["completed", "running", "queued"])
+                wait(lambda: not browser._busy and browser.selected_campaigns)
+                self.assertEqual([r["status"] for _, r in browser.run_rows], ["completed", "running", "queued"])
                 browser.runs.selectRow(0)
                 ticks = []
                 timer = QTimer()

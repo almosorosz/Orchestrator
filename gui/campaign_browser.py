@@ -2,60 +2,76 @@
 from pathlib import Path
 from math import isfinite
 
-from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot, Qt, QUrl
+from PySide6.QtCore import QItemSelectionModel, QObject, QSignalBlocker, QThread, QTimer, Signal, Slot, Qt, QUrl
 from PySide6.QtGui import QImage, QPixmap, QDesktopServices
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton,
     QLabel, QFileDialog, QTableWidget, QTableWidgetItem, QAbstractItemView, QSplitter,
-    QScrollArea, QComboBox, QCheckBox, QSpinBox)
+    QScrollArea, QCheckBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem)
 
-from experiment.archive import scan_campaigns, campaign_details, export_runs, plot_traces
+from experiment.archive import scan_campaigns, campaign_details, export_campaign_runs, plot_traces
 from gui.flow_layout import FlowLayout
 
-PLOT_HINT = "Ctrl/Shift-select runs to overlay them. Queued runs have no samples."
+PLOT_HINT = "Ctrl/Shift-select campaigns or runs. With no runs selected, Plot selected uses all executed runs."
 
 
-def render_recorded(details, run_ids, device_id, dark, time_range=(None, None)):
+def render_recorded(campaigns, device_keys, dark, time_range=(None, None)):
     from matplotlib.figure import Figure
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from gui.render_lock import RENDER_LOCK
-    traces = []
-    for run in details["runs"]:
-        if run.get("run_id") in run_ids:
-            traces.append((run, plot_traces(run, device_id, device_configs=details["devices"], time_range=time_range)))
-    devices = sorted({col.rsplit(".", 1)[0] for _, data in traces for col in data})
+    from hardware_devices.limits import DEFAULT_LIMITS
+
+    devices = {}
+    series = 0
+    for campaign_number, (details, run_ids) in enumerate(campaigns, 1):
+        configs = details["devices"]
+        run_ids = set(run_ids)
+        included = None if device_keys is None else {
+            key for key, kind in device_keys if configs.get(key, {}).get("type", "") == kind
+        }
+        if included is not None and not included:
+            continue
+        for run in details["runs"]:
+            if run.get("run_id") not in run_ids:
+                continue
+            label = f"C{campaign_number} #{run['index']}" if len(campaigns) > 1 else f"#{run['index']}"
+            try:
+                data = plot_traces(run, device_ids=included, device_configs=configs, time_range=time_range)
+            except FileNotFoundError:
+                continue  # A running experiment may have a run marker before its first sample.
+            for column, values in data.items():
+                device, field = column.rsplit(".", 1)
+                config = configs.get(device, {})
+                _, traces = devices.setdefault((device, config.get("type", "")), (config, []))
+                traces.append((series, label, field, values))
+            series += 1
     if not devices:
-        raise ValueError("No recorded numeric samples for the selected experiments, device and time range.")
+        raise ValueError("No recorded numeric samples for the selected experiments, devices and time range.")
     with RENDER_LOCK:
         fig = Figure(figsize=(12, max(3.5, 2.8 * len(devices))), dpi=100, layout="constrained")
         canvas = FigureCanvasAgg(fig)
         bg, fg = ("#111827", "#e5e7eb") if dark else ("#ffffff", "#111827")
         fig.set_facecolor(bg)
-        palette = ['#60a5fa', '#fb923c', '#4ade80', '#e879f9', '#facc15', '#22d3ee', '#f87171', '#c4b5fd']
-        for index, device in enumerate(devices, 1):
+        palette = ['#60a5fa', '#fb923c', '#4ade80', '#e879f9', '#facc15', '#22d3ee', '#f87171', '#c4b5fd',
+                   '#a3e635', '#f472b6', '#818cf8', '#fbbf24', '#2dd4bf', '#fda4af', '#a78bfa', '#38bdf8']
+        for index, ((device, kind), (config, traces)) in enumerate(sorted(devices.items()), 1):
             axis = fig.add_subplot(len(devices), 1, index)
             axis.set_facecolor(bg)
-            config = details["devices"].get(device, {})
-            from hardware_devices.limits import DEFAULT_LIMITS
-            primary_unit = DEFAULT_LIMITS.get(config.get("type"), {}).get("unit", "value")
+            primary_unit = DEFAULT_LIMITS.get(kind, {}).get("unit", "value")
             units = {"speed_rpm": "RPM", "flow": "mL/min", "setpoint": "°C", "temp_internal": "°C",
                      "temp_external": "°C", "weight_g": "g", "measured_voltage": "V", "torque_ozin": "oz·in",
                      "target_state": "0/1", "target": primary_unit}
             secondary = None
-            for experiment, (run, data) in enumerate(traces):
-                for column, values in data.items():
-                    if column.rsplit(".", 1)[0] != device:
-                        continue
-                    field = column.rsplit(".", 1)[1]
-                    secondary_field = field == "torque_ozin" or (config.get("type") == "nidaq_valve" and field in {"target", "target_state"})
-                    if secondary_field and secondary is None:
-                        secondary = axis.twinx()
-                        secondary.tick_params(colors=fg, labelsize=6)
-                        secondary.set_ylabel(units.get(field, "value"), color=fg, fontsize=7)
-                    plot_axis = secondary if secondary_field else axis
-                    plot_axis.plot([v[0] for v in values], [v[1] for v in values],
-                              "--" if field == "target" else ":" if field in {"temp_external", "torque_ozin"} else "-",
-                              color=palette[experiment % len(palette)], linewidth=1,
-                              label=f"{run['index']}: {field} ({units.get(field, 'value')})")
+            for experiment, label, field, values in traces:
+                secondary_field = field == "torque_ozin" or (kind == "nidaq_valve" and field in {"target", "target_state"})
+                if secondary_field and secondary is None:
+                    secondary = axis.twinx()
+                    secondary.tick_params(colors=fg, labelsize=6)
+                    secondary.set_ylabel(units.get(field, "value"), color=fg, fontsize=7)
+                plot_axis = secondary if secondary_field else axis
+                plot_axis.plot([v[0] for v in values], [v[1] for v in values],
+                               "--" if field == "target" else ":" if field in {"temp_external", "torque_ozin"} else "-",
+                               color=palette[experiment % len(palette)], linewidth=1,
+                               label=f"{label}: {field} ({units.get(field, 'value')})")
             axis.set_ylabel(f"{config.get('name', device)}\n{device}", color=fg, fontsize=7)
             axis.set_xlabel("Experiment elapsed time (s)", color=fg, fontsize=7)
             if time_range != (None, None):
@@ -68,7 +84,8 @@ def render_recorded(details, run_ids, device_id, dark, time_range=(None, None)):
                 handles += extra_handles
                 labels += extra_labels
             if handles:
-                legend = axis.legend(handles, labels, fontsize=6, facecolor=bg, edgecolor="#64748b", loc="best")
+                legend = axis.legend(handles, labels, fontsize=6, facecolor=bg, edgecolor="#64748b",
+                                     ncols=min(5, (len(handles) + 7) // 8), loc="upper right")
                 for text in legend.get_texts():
                     text.set_color(fg)
         canvas.draw()
@@ -93,11 +110,12 @@ class ArchiveWorker(QObject):
             elif kind == "recover":
                 from experiment.recovery import recover_roots
                 result = recover_roots(roots, allow_legacy=job.get("legacy", False))
-            elif kind == "plot":
-                details = campaign_details(job["folder"])
-                result = render_recorded(details, job["runs"], job["device"], job["dark"], job["time_range"])
-            elif kind == "export":
-                result = export_runs(campaign_details(job["folder"]), job["runs"], job["destination"])
+            elif kind in {"plot", "export"}:
+                campaigns = [(campaign_details(folder), ids) for folder, ids in job["runs"].items()]
+                if kind == "plot":
+                    result = render_recorded(campaigns, job["devices"], job["dark"], job["time_range"])
+                else:
+                    result = export_campaign_runs(campaigns, job["destination"])
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         self.finished.emit(job, result, error)
@@ -111,19 +129,21 @@ class CampaignBrowser(QWidget):
         super().__init__(parent)
         self.roots = []
         self.rows = []
-        self.details = None
+        self.selected_campaigns = []
+        self.run_rows = []
+        self.device_choices = {}
+        self.device_filter = None
         self.dark_mode = True
         self._busy = False
         self._pending = None
         self._closed = False
         self._image = QImage()
-        self._plotted_folder = None
         self._plot_revision = 0
         layout = QVBoxLayout(self)
         self.setObjectName('campaignBrowser')
         self.setStyleSheet('''
             QWidget#campaignBrowser QPushButton { padding: 3px 6px; font-size: 12px; }
-            QWidget#campaignBrowser QLineEdit, QWidget#campaignBrowser QComboBox,
+            QWidget#campaignBrowser QLineEdit,
             QWidget#campaignBrowser QSpinBox { padding: 3px 5px; font-size: 12px; }
             QWidget#campaignBrowser QTableWidget { font-size: 11px; }
             QWidget#campaignBrowser QHeaderView::section { padding: 1px 3px; font-size: 11px; }
@@ -142,7 +162,7 @@ class CampaignBrowser(QWidget):
         for button in (browse, refresh, self.recover_button):
             paths.addWidget(button)
         layout.addLayout(paths)
-        self.status = QLabel("Select a campaign to inspect recorded and queued experiments.")
+        self.status = QLabel("Select campaigns to inspect their experiments.")
         self.status.setWordWrap(True)
         self.status.setStyleSheet("font-size: 11px;")
         status_row = QHBoxLayout()
@@ -154,11 +174,11 @@ class CampaignBrowser(QWidget):
         split = QSplitter(Qt.Orientation.Horizontal)
         self.selection_split = split
         split.setMinimumHeight(56)
-        split.setMaximumHeight(78)
+        split.setMaximumHeight(145)
         self.campaigns = QTableWidget(0, 4)
         self.campaigns.setHorizontalHeaderLabels(["Campaign", "Status", "Completed", "Recorded (UTC)"])
-        self.runs = QTableWidget(0, 4)
-        self.runs.setHorizontalHeaderLabels(["#", "Experiment", "Status", "Run ID"])
+        self.runs = QTableWidget(0, 5)
+        self.runs.setHorizontalHeaderLabels(["#", "Experiment", "Campaign", "Status", "Run ID"])
         for table in (self.campaigns, self.runs):
             table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -166,15 +186,15 @@ class CampaignBrowser(QWidget):
             table.verticalHeader().setDefaultSectionSize(20)
             table.horizontalHeader().setStretchLastSection(True)
             split.addWidget(table)
-        self.campaigns.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.campaigns.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.campaigns.setToolTip("Ctrl-click to select several campaigns. Shift-click to select a range.")
         self.runs.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         layout.addWidget(split)
         actions = FlowLayout(spacing=4)
-        self.device = QComboBox()
-        self.device.setMaximumWidth(220)
-        self.device.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.device.setMinimumContentsLength(12)
-        self.device.addItem("All devices", None)
+        self.device = QPushButton("All devices ▾")
+        self.device.setToolTip("Choose which device plots to show")
+        self.device.setEnabled(False)
+        self.device.clicked.connect(self.choose_devices)
         self.plot_button = QPushButton("Plot selected")
         clear = QPushButton("Clear plots")
         clear.clicked.connect(self.clear_plots)
@@ -187,6 +207,7 @@ class CampaignBrowser(QWidget):
             field.returnPressed.connect(self.plot_selected)
         self.export_button = QPushButton("Export CSVs…")
         self.open_button = QPushButton("Open folder")
+        self.open_button.setToolTip("Open the current campaign’s recording folder.")
         self.auto = QCheckBox("Refresh list")
         self.auto.setToolTip("Refresh experiment and campaign lists while running")
         self.auto.setChecked(True)
@@ -297,28 +318,16 @@ class CampaignBrowser(QWidget):
         elif error:
             self.status.setText(error + " — refresh to retry; acquisition is unaffected.")
         elif job["kind"] == "scan":
-            previous = self.details["folder"] if self.details else None
-            self.rows = result["campaigns"]
-            self.campaigns.blockSignals(True)
-            self._fill(self.campaigns, [(r["name"], r["status"], f"{r['completed']}/{r['total']}", r["recorded_at"]) for r in self.rows])
-            for row, campaign in enumerate(self.rows):
-                for column in range(self.campaigns.columnCount()):
-                    self.campaigns.item(row, column).setToolTip(campaign["folder"])
-            index = next((i for i, r in enumerate(self.rows) if r["folder"] == previous), 0)
-            if self.rows:
-                self.campaigns.selectRow(index)
-            self.campaigns.blockSignals(False)
-            self._selection_changed()
+            self._update_campaigns(result["campaigns"])
             self.status.setText(f"{len(self.rows)} campaigns. " + ("Some files are temporarily unreadable; refresh to retry." if result["errors"] else ""))
         elif job["kind"] == "plot":
-            if self.details and self.details["folder"] == job["folder"]:
-                self._image = result
-                self._plotted_folder = job["folder"]
-                self.fit_image()
-                self.caption.setText(f"{len(job['runs'])} experiments overlaid • elapsed time (s) • full-resolution data retained in CSVs")
-                self.caption.setToolTip(f"Recorded CSV snapshot: {job['folder']}. Numeric fields show measurement units. "
-                                        "Display limited to 4,000 points/trace; exported CSVs retain all samples.")
-                self.status.setText("Recorded experiments plotted. Other experiments continue independently.")
+            self._image = result
+            self.fit_image()
+            count = sum(len(ids) for ids in job["runs"].values())
+            caption = f"{count} runs selected across {len(job['runs'])} campaign(s) · elapsed time (s)"
+            self.caption.setText(caption + (" · " + job["legend"] if job["legend"] else ""))
+            self.caption.setToolTip("\n".join(job["runs"]) + "\nDisplay limited to 4,000 points per trace.")
+            self.status.setText("Recorded experiment plots are ready.")
         elif job["kind"] == "export":
             self.status.setText(f"Exported to {result}")
         elif job["kind"] == "recover":
@@ -334,34 +343,103 @@ class CampaignBrowser(QWidget):
         if pending:
             self._submit(pending)
 
+    def _update_campaigns(self, rows):
+        previous = {campaign["folder"] for campaign in self.selected_campaigns}
+        current_row = self.campaigns.currentRow()
+        current = self.rows[current_row]["folder"] if 0 <= current_row < len(self.rows) else None
+        first_scan = not self.rows
+        self.rows = rows
+        with QSignalBlocker(self.campaigns):
+            self._fill(self.campaigns, [(r["name"], r["status"], f"{r['completed']}/{r['total']}", r["recorded_at"])
+                                        for r in rows])
+            self.campaigns.clearSelection()
+            selected = []
+            for index, campaign in enumerate(rows):
+                for column in range(self.campaigns.columnCount()):
+                    self.campaigns.item(index, column).setToolTip(campaign["folder"])
+                if campaign["folder"] in previous:
+                    selected.append(index)
+                if campaign["folder"] == current:
+                    self.campaigns.setCurrentCell(index, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            if rows and not selected and (first_scan or previous):
+                self.campaigns.selectRow(0)
+            else:
+                for index in selected:
+                    self._select_row(self.campaigns, index)
+        self._selection_changed()
+
+    @staticmethod
+    def _select_row(table, row):
+        table.selectionModel().select(table.model().index(row, 0),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+
     def _selection_changed(self):
-        selected = self.campaigns.selectionModel().selectedRows()
-        previous = self.details["folder"] if self.details else None
-        chosen = {r.get("run_id") for r in self.selected_runs()}
-        self.details = self.rows[selected[0].row()] if selected and selected[0].row() < len(self.rows) else None
-        self.runs.blockSignals(True)
-        self._fill(self.runs, [(r["index"], r["name"], r["status"], r.get("run_id", "—")) for r in self.details["runs"]] if self.details else [])
-        self.runs.clearSelection()
-        if self.details and previous == self.details["folder"]:
-            from PySide6.QtCore import QItemSelectionModel
-            for i, run in enumerate(self.details["runs"]):
-                if run.get("run_id") in chosen:
-                    self.runs.selectionModel().select(self.runs.model().index(i, 0),
-                        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
-        self.runs.blockSignals(False)
-        if previous != (self.details["folder"] if self.details else None):
-            self.device.clear()
-            self.device.addItem("All devices", None)
-            for key, config in (self.details["devices"].items() if self.details else ()):
-                self.device.addItem(f"{key}: {config.get('name', key)}", key)
+        previous = {campaign["folder"] for campaign in self.selected_campaigns}
+        chosen = {(campaign["folder"], run["experiment_id"]) for campaign, run in self.selected_runs()}
+        self.selected_campaigns = [self.rows[index] for index in sorted(
+            row.row() for row in self.campaigns.selectionModel().selectedRows()) if index < len(self.rows)]
+        self.run_rows = [(campaign, run) for campaign in self.selected_campaigns for run in campaign["runs"]]
+        with QSignalBlocker(self.runs):
+            self._fill(self.runs, [(run["index"], run["name"], campaign["name"], run["status"], run.get("run_id", "—"))
+                                   for campaign, run in self.run_rows])
+            self.runs.clearSelection()
+            for index, (campaign, run) in enumerate(self.run_rows):
+                self.runs.item(index, 2).setToolTip(f"{campaign['recorded_at']} UTC\n{campaign['folder']}")
+                if (campaign["folder"], run["experiment_id"]) in chosen:
+                    self._select_row(self.runs, index)
+        self.device_choices = {(key, config.get("type", "")): f"{key}: {config.get('name', key)}"
+                               for campaign in reversed(self.selected_campaigns) for key, config in campaign["devices"].items()}
+        self._update_device_button()
+        if previous != {campaign["folder"] for campaign in self.selected_campaigns}:
             self.clear_plots()
+
+    def _update_device_button(self):
+        self.device.setEnabled(bool(self.selected_campaigns))
+        if self.device_filter is None:
+            label = "All devices"
+        else:
+            count = len(self.device_filter.intersection(self.device_choices))
+            label = f"{count} of {len(self.device_choices)} devices"
+        self.device.setText(f"{label} ▾")
+
+    def choose_devices(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Device plots")
+        dialog.resize(350, 420)
+        layout = QVBoxLayout(dialog)
+        devices = QListWidget()
+        layout.addWidget(devices, 1)
+        choices = sorted(self.device_choices.items())
+        for key, label in choices:
+            if any(other[0] == key[0] and other != key for other in self.device_choices):
+                label += f" ({key[1] or 'unknown type'})"
+            item = QListWidgetItem(label, devices)
+            enabled = self.device_filter is None or key in self.device_filter
+            item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+
+        def check_all(state):
+            for index in range(devices.count()):
+                devices.item(index).setCheckState(state)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        check = buttons.addButton("Select all", QDialogButtonBox.ButtonRole.ActionRole)
+        clear = buttons.addButton("Clear selection", QDialogButtonBox.ButtonRole.ActionRole)
+        check.clicked.connect(lambda: check_all(Qt.CheckState.Checked))
+        clear.clicked.connect(lambda: check_all(Qt.CheckState.Unchecked))
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            checked = {key for index, (key, _) in enumerate(choices)
+                       if devices.item(index).checkState() == Qt.CheckState.Checked}
+            self.device_filter = None if len(checked) == len(choices) else checked
+            self._update_device_button()
 
     def clear_plots(self):
         self._plot_revision += 1
         if self._pending and self._pending["kind"] == "plot":
             self._pending = None
         self._image = QImage()
-        self._plotted_folder = None
         self.image_label.setText("Recorded experiment plots appear here.")
         self.image_label.setMinimumSize(0, 0)
         self.caption.setText(PLOT_HINT)
@@ -369,19 +447,27 @@ class CampaignBrowser(QWidget):
         self.status.setText("Plot area cleared.")
 
     def selected_runs(self):
-        if not self.details:
-            return []
-        return [self.details["runs"][r.row()] for r in self.runs.selectionModel().selectedRows()
-                if r.row() < len(self.details["runs"])]
+        return [self.run_rows[index] for index in sorted(row.row() for row in self.runs.selectionModel().selectedRows())
+                if index < len(self.run_rows)]
+
+    @staticmethod
+    def _group_runs(rows):
+        grouped = {}
+        for campaign, run in rows:
+            grouped.setdefault(campaign["folder"], []).append(run["run_id"])
+        return grouped
 
     def plot_selected(self):
-        selected = [r for r in self.selected_runs() if r.get("run_id")]
-        if not selected or not self.details:
+        selected = [(campaign, run) for campaign, run in self.selected_runs() or self.run_rows if run.get("run_id")]
+        if not selected:
             self.status.setText("Select at least one executed experiment; queued experiments have no recorded data.")
             return
-        if len(selected) > 8:
-            self.status.setText("Select up to eight experiments per plot to keep comparisons responsive. CSV export retains all selected experiments.")
-            return
+        devices = None
+        if self.device_filter is not None:
+            devices = self.device_filter.intersection(self.device_choices)
+            if not devices:
+                self.status.setText("Choose at least one device plot.")
+                return
         try:
             start, end = (float(field.text()) if field.text().strip() else None
                           for field in (self.time_start, self.time_end))
@@ -392,24 +478,29 @@ class CampaignBrowser(QWidget):
         except ValueError:
             self.status.setText("Enter nonnegative elapsed seconds with From less than To, or leave either field blank.")
             return
-        self._submit({"kind": "plot", "folder": self.details["folder"], "runs": [r["run_id"] for r in selected],
-                      "device": self.device.currentData(), "dark": self.dark_mode,
+        runs = self._group_runs(selected)
+        names = {campaign["folder"]: campaign["name"] for campaign, _ in selected}
+        legend = " / ".join(f"C{i}: {names[folder]}" for i, folder in enumerate(runs, 1)) if len(runs) > 1 else ""
+        self._plot_revision += 1
+        self._submit({"kind": "plot", "runs": runs, "devices": devices, "dark": self.dark_mode, "legend": legend,
                       "time_range": (start, end), "revision": self._plot_revision})
 
     def export_selected(self):
-        if not self.details:
-            return
         selected = self.selected_runs()
-        if not selected or any(r["status"] != "completed" for r in selected):
+        if not selected or any(run["status"] != "completed" or not run.get("recording_complete") for _, run in selected):
             self.status.setText("Select fully saved, completed experiments to export.")
             return
         destination = QFileDialog.getExistingDirectory(self, "Export selected experiment CSVs")
         if destination:
-            self._submit({"kind": "export", "folder": self.details["folder"], "runs": [r["run_id"] for r in selected], "destination": destination})
+            self._submit({"kind": "export", "runs": self._group_runs(selected), "destination": destination})
 
     def open_folder(self):
-        if self.details:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.details["folder"]))
+        if self.selected_campaigns:
+            current = self.campaigns.currentRow()
+            campaign = self.rows[current] if 0 <= current < len(self.rows) else None
+            if campaign not in self.selected_campaigns:
+                campaign = self.selected_campaigns[0]
+            QDesktopServices.openUrl(QUrl.fromLocalFile(campaign["folder"]))
 
     def _show_image(self):
         if not self._image.isNull():

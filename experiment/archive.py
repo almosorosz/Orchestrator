@@ -127,9 +127,11 @@ def csv_snapshot(path):
         yield from csv.DictReader(lines())
 
 
-def plot_traces(run, device_id=None, max_points=4000, device_configs=None, time_range=(None, None)):
+def plot_traces(run, device_id=None, max_points=4000, device_configs=None, time_range=(None, None), *, device_ids=None):
     """Bound memory independently of recording length; CSV stays full resolution."""
     traces, batches = {}, {}
+    if device_id is not None:
+        device_ids = {device_id}
     start, end = time_range
     def reduce(values):
         if len(values) <= max_points:
@@ -152,12 +154,12 @@ def plot_traces(run, device_id=None, max_points=4000, device_configs=None, time_
         if (start is not None and time_s < start) or (end is not None and time_s > end):
             continue
         for column, value in row.items():
-            if not column or "." not in column or (device_id and column.rsplit(".", 1)[0] != device_id):
+            if not column or "." not in column:
                 continue
-            if column.rsplit(".", 1)[-1] in {"connected", "error"}:
+            device, field = column.rsplit(".", 1)
+            if (device_ids is not None and device not in device_ids) or field in {"connected", "error"}:
                 continue
-            if (column.rsplit(".", 1)[-1].lower().startswith("torque")
-                    and (device_configs or {}).get(column.rsplit(".", 1)[0], {}).get("type") != "jkem"):
+            if field.lower().startswith("torque") and (device_configs or {}).get(device, {}).get("type") != "jkem":
                 continue
             try:
                 number = float(value)
@@ -173,23 +175,41 @@ def plot_traces(run, device_id=None, max_points=4000, device_configs=None, time_
 
 
 def export_runs(details, run_ids, destination):
-    selected = [r for r in details["runs"] if r.get("run_id") in run_ids]
-    if not selected or any(r["status"] != "completed" or not r.get("recording_complete") for r in selected):
+    return export_campaign_runs([(details, run_ids)], destination)
+
+
+def export_campaign_runs(campaigns, destination):
+    selections = []
+    for details, run_ids in campaigns:
+        selected = [r for r in details["runs"] if r.get("run_id") in run_ids]
+        if not selected or len(selected) != len(set(run_ids)) or any(
+            r["status"] != "completed" or not r.get("recording_complete") for r in selected
+        ):
+            raise ValueError("Select fully saved, completed experiments to export.")
+        definition = read_json(Path(details["folder"]) / "definition.json")
+        if definition is None:
+            raise ValueError("Campaign metadata is temporarily unavailable; retry export.")
+        selections.append((Path(details["folder"]).name, definition, selected))
+    if not selections:
         raise ValueError("Select fully saved, completed experiments to export.")
     output = Path(destination) / f"experiment_export_{uuid4().hex[:10]}"
     output.mkdir(parents=True, exist_ok=False)
-    definition = read_json(Path(details["folder"]) / "definition.json")
-    if definition is None:
-        raise ValueError("Campaign metadata is temporarily unavailable; retry export.")
+    for index, (name, definition, selected) in enumerate(selections, 1):
+        folder = output / f"{index:02d}_{name}" if len(selections) > 1 else output
+        folder.mkdir(exist_ok=True)
+        _export_campaign(folder, definition, selected)
+    return str(output)
+
+
+def _export_campaign(output, definition, selected):
     # CSV exports need profile/device metadata, not private SQL URLs or device
     # connection credentials from the recording configuration.
     metadata = {"campaign": definition["campaign"], "devices": {
         key: {field: config[field] for field in ("name", "type", "target_limits", "plot_index", "simulated") if field in config}
-        for key, config in definition.get("devices", {}).items()}, "exported_run_ids": list(run_ids)}
+        for key, config in definition.get("devices", {}).items()}, "exported_run_ids": [r["run_id"] for r in selected]}
     (output / "definition.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     for run in selected:
         target = output / run["run_id"]
         target.mkdir()
         for name in ("execution.csv", "planned.csv", "run.json"):
             shutil.copy2(Path(run["folder"]) / name, target / name)
-    return str(output)

@@ -38,16 +38,21 @@ Open **Data & Plots → Recorded campaigns**. It discovers Settings recordings,
 Control Panel recordings, the LOOP experiment folder, and previously used recording
 roots. Browse can select another root or a single campaign. The list refreshes
 every three seconds while visible; **Refresh list while running** can disable this.
-Select a campaign to see every experiment as queued, running, saving, completed,
+Use Ctrl-click to select several campaigns or Shift-click for a range. The
+experiment table combines their runs and shows the source campaign for each row.
+Experiment status shows queued, running, saving, completed,
 interrupted, or not executed. Completed experiments can be inspected while the
 remaining experiments run or wait in the queue.
 
-Ctrl/Shift-select up to eight executed experiments and **Plot selected**
-to compare target and measured values against each experiment's elapsed seconds.
+Ctrl/Shift-select runs and choose **Plot selected** to compare target and measured
+values against each experiment's elapsed seconds.
+With no experiment rows selected, **Plot selected** uses every executed run in
+the selected campaigns.
 Selected experiments overlay on shared device panels, with a distinct color for
 each experiment and line styles distinguishing target/measurement fields. Compact
 controls and short selection tables leave most of the page for the graphs.
-Choose one device or all devices. **Fit width** and zoom control the cached plot.
+Open **All devices** to check any combination of device plots. **Fit width** and
+zoom control the cached plot.
 Enter elapsed seconds in **From (s)** and **To (s)** before plotting to limit the
 time window. Leave either bound blank to keep that end open. **Clear plots**
 clears the display and discards pending plot results.
@@ -56,7 +61,8 @@ Read/plot/export work runs off the GUI thread, separately from acquisition. Disp
 traces retain up to 4,000 points using extrema-preserving reduction; CSV recordings
 and exported files retain every saved sample. Torque and valve commands use a
 separate axis where their units differ. **Export CSVs** copies fully saved,
-completed experiments to a new directory. **Open folder** opens their files.
+completed experiments to a new directory, grouped by campaign for a multi-campaign
+export. **Open folder** opens the current campaign's recording folder.
 
 ## Recording recovery
 
