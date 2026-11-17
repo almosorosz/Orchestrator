@@ -101,7 +101,7 @@ class AdaptiveLoopTests(unittest.TestCase):
             finally:
                 self.doCleanups()
 
-    def check_five_run_preset(self, backend, source="doe"):
+    def check_five_run_preset(self, backend, source="doe", *, load_from_control_panel=False):
         with TemporaryDirectory(dir=Path.cwd()) as directory:
             root = Path(directory)
             window = MainWindow()
@@ -120,9 +120,14 @@ class AdaptiveLoopTests(unittest.TestCase):
                 preset = PRESET.with_name(f"{backend}_five_run_{suffix}.json")
                 with patch("app.paths.DATA_DIR", root), \
                      patch("MAIN_WINDOW.QFileDialog.getOpenFileName", return_value=(str(preset), "")), \
-                     patch("MAIN_WINDOW.QMessageBox.warning") as warning:
-                    window.load_setup_preset()
+                     patch("MAIN_WINDOW.QMessageBox.warning") as warning, \
+                     patch("MAIN_WINDOW.QMessageBox.critical") as critical:
+                    if load_from_control_panel:
+                        window.control_panel.load_config_button.click()
+                    else:
+                        window.load_setup_preset()
                 warning.assert_not_called()
+                critical.assert_not_called()
                 self.assertIs(window.stack.currentWidget(), window.dashboard_page)
                 self.assertTrue(all(device.simulated and device.is_connected for device in window.control_panel.hardware.values()))
                 if source == "doe":
@@ -175,7 +180,7 @@ class AdaptiveLoopTests(unittest.TestCase):
         self.check_five_run_preset("imed")
 
     def test_load_and_start_bo_control_panel_preset(self):
-        self.check_five_run_preset("bo", "control-panel")
+        self.check_five_run_preset("bo", "control-panel", load_from_control_panel=True)
 
     def test_load_and_start_imed_control_panel_preset(self):
         self.check_five_run_preset("imed", "control-panel")

@@ -11,6 +11,9 @@ from experiment.models import ExperimentDefinition
 from experiment.recording import validate_settings
 
 
+PRESET_FORMAT = "crystalloop-setup"
+
+
 def validate_manual_experiments(panel):
     devices = panel["devices"]
     for index, saved in enumerate(panel.get("experiments", []), 1):
@@ -25,7 +28,7 @@ def validate_manual_experiments(panel):
 
 def read_preset(filename):
     data = json.loads(Path(filename).read_text(encoding="utf-8"))
-    if data.get("format") != "crystalloop-setup" or data.get("version") not in (1, 2, 3, 4):
+    if data.get("format") != PRESET_FORMAT or data.get("version") not in (1, 2, 3, 4):
         raise ValueError("Unsupported setup preset format/version")
     panel = data["control_panel"]
     from control_panel.control_panel import HARDWARE_TYPES
@@ -108,7 +111,7 @@ def read_preset(filename):
 def write_preset(filename, panel, parameters, assignments, environment, recording, generated_doe=None, *, monitor_device_ids=(), modeling=None):
     from app.version import __version__
     validate_manual_experiments(panel)
-    payload = {"format": "crystalloop-setup", "version": 2, "application_version": __version__,
+    payload = {"format": PRESET_FORMAT, "version": 2, "application_version": __version__,
                "control_panel": panel, "process": asdict(parameters),
                "assignments": [asdict(a) for a in assignments], "environment": environment,
                "recording": validate_settings(recording), "generated_doe": generated_doe,

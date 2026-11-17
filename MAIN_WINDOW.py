@@ -1822,12 +1822,13 @@ class MainWindow(QMainWindow):
         except Exception as error:
             QMessageBox.warning(self, "Preset save failed", str(error))
 
-    def load_setup_preset(self):
+    def load_setup_preset(self, filename=None):
         if (self.control_panel.hardware_manager.is_busy or self.control_panel.experiment_window_attached()
                 or self.execution.timer.isActive()):
             self.log_message("End the experiment session and stop monitoring before loading a setup preset.", "WARNING")
             return
-        filename, _ = QFileDialog.getOpenFileName(self, "Load setup preset", "", "JSON (*.json)")
+        if filename is None:
+            filename, _ = QFileDialog.getOpenFileName(self, "Load setup preset", "", "JSON (*.json)")
         if not filename:
             return
         try:
@@ -2262,6 +2263,7 @@ class MainWindow(QMainWindow):
         )
         self.control_panel = (self.control_panel_page.control_panel)
         self.control_panel.dashboard_host = self.embed_experiment_dashboard
+        self.control_panel.setup_preset_loader = self.load_setup_preset
 
         self.hardware = (self.control_panel_page.hardware)
 

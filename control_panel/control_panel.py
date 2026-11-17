@@ -1550,6 +1550,7 @@ class ControlPanel(QWidget):
         self.hardware = hardware
 
         self.hardware_manager = HardwareManager(self.hardware)
+        self.setup_preset_loader = None
 
         self._connection_token = None
         self._experiment_token = None
@@ -2142,6 +2143,16 @@ class ControlPanel(QWidget):
             ) as f:
     
                 data = json.load(f)
+
+            from app.presets import PRESET_FORMAT, validate_manual_experiments
+
+            if not isinstance(data, dict):
+                raise ValueError("Select a Control Panel configuration or CrystaLoop setup preset.")
+            if data.get("format") == PRESET_FORMAT:
+                if self.setup_preset_loader is None:
+                    raise ValueError("Open this setup preset in CrystaLoop using Settings → Load setup preset.")
+                self.setup_preset_loader(file_path)
+                return
     
             devices = data.get(
                 "devices",
@@ -2164,8 +2175,6 @@ class ControlPanel(QWidget):
                     "Configuration contains no devices."
                 )
     
-            from app.presets import validate_manual_experiments
-
             validate_manual_experiments({"devices": devices, "experiments": experiments_data})
             speed = float(data.get("simulation_speed", 1))
             if not self.simulation_speed.minimum() <= speed <= self.simulation_speed.maximum():

@@ -106,7 +106,8 @@ Estimation** without a separate MAT file. The default recording root is
 
 ## Five-run simulation presets
 
-In **Settings → Load setup preset…**, select a backend and starting source.
+Select a backend and starting source in **Settings → Load setup preset…** or
+**Control Panel → Load Configuration**. Both open the complete setup preset.
 
 | Backend | Settings-generated DoE | Control Panel profiles |
 | --- | --- | --- |
