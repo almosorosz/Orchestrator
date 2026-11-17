@@ -104,7 +104,28 @@ solubility and starting kinetic model together, so you can open **Parameter
 Estimation** without a separate MAT file. The default recording root is
 `data/imed_simulated_runs`.
 
-## Run the validation DoE from Dashboard Start
+## Five-run simulation presets
+
+In **Settings → Load setup preset…**, select one of these complete setups.
+
+- [IMED five-run setup](imed_five_run_setup.json) starts with five simulated
+  seeded and unseeded cooling and antisolvent experiments. The saved SciPy PBM
+  case fits two kinetic parameters. D-optimal design then chooses the cooling
+  ramp for one follow-up experiment.
+- [BO five-run setup](bo_five_run_setup.json) starts with five seeded isothermal
+  experiments at 13, 15.5, 18, 20.5, and 23 °C. The saved BO settings minimize D50
+  and propose one follow-up recipe within the observed temperature range.
+
+Each preset loads the Control Panel devices, connects the simulators, applies the
+saved DoE and measurement assignments, and opens the main dashboard. Click
+**Start Experiment** there. CrystaLoop records the five starting experiments,
+runs the selected optimizer, and executes and records one follow-up. It creates
+`runs/simulated_loops/imed` or `runs/simulated_loops/bo` under the application's
+writable data directory with separate `experiments` and `models` folders. Use
+**End Session** before loading the other preset. The BO setup requires the BO
+runtime described in the [main README](../../README.md#bayesian-optimization).
+
+## Run the three-experiment validation DoE from Dashboard Start
 
 Load `imed_validation_doe.json`, connect its simulated devices and apply the
 DoE assignments as above. In Settings, choose existing, writable Experiment and

@@ -88,9 +88,10 @@ device list, simulation settings, limits, editable/manual profiles, manual recor
 folder, LOOP folders, sampling settings, process parameters, profile assignments,
 and recording/optional SQL settings. The exact generated DoE conditions and profile
 tables are included when available, together with unit operations and connectivity.
-SQL connection URLs are included; treat presets
-containing credentials as private configuration. Loading requires an idle session,
-restores disconnected devices. A saved generated DoE restores without sampling again,
+Presets can include SQL connection URLs with credentials. Loading requires an idle
+session. Standard presets restore disconnected devices. The bundled
+[five-run simulation presets](examples/configurations/README.md#five-run-simulation-presets)
+prepare their simulated devices and assignments on load. A saved generated DoE restores without sampling again,
 including random samples. Open **Assign devices** to review the saved selections
 against the current devices, then preview and apply the assignments. Connect the
 required devices before starting. Valid saved LOOP folders are restored automatically.

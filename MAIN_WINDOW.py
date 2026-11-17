@@ -1826,6 +1826,22 @@ class MainWindow(QMainWindow):
             if modeling_payload and modeling_payload["active_workflow"] == "bo" and "bo" not in modeling_payload:
                 raise ValueError("The setup preset is missing its BO setup.")
             panel = data["control_panel"]
+            prepare_simulated = environment.get("prepare_simulated_loop") == "true"
+            if prepare_simulated:
+                from app.paths import DATA_DIR
+
+                backend = environment.get("loop_backend")
+                if (backend not in {"bo", "imed"} or modeling_payload is None
+                        or modeling_payload["active_workflow"] != backend or not data.get("generated_doe")
+                        or panel.get("experiments") or not all(cfg.get("simulated") is True for cfg in panel["devices"].values())):
+                    raise ValueError("Automatic preparation requires a simulated DoE and matching BO or IMED settings.")
+                root = DATA_DIR / "runs" / "simulated_loops" / backend
+                experiments, models = root / "experiments", root / "models"
+                for folder in (experiments, models):
+                    folder.mkdir(parents=True, exist_ok=True)
+                environment = {**environment, "experiment_path": str(experiments), "model_path": str(models)}
+                panel = {**panel, "recording_folder": str(experiments)}
+                data["recording"] = {"enabled": True, "sql_enabled": False, "output_folder": str(experiments)}
             if not self.control_panel.apply_loaded_configuration(panel["devices"], panel.get("profiles", {}),
                     panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology")):
                 return
@@ -1869,6 +1885,12 @@ class MainWindow(QMainWindow):
             self.imed_page.panel.restore_setup_settings(modeling if modeling is not None else {})
             self.bo_page.restore(bo_settings)
             self.modeling_workflow = modeling_payload["active_workflow"] if modeling_payload else "imed"
+            if prepare_simulated:
+                self._prepare_loaded_simulated_doe()
+                self.switch_page(self.stack.indexOf(self.dashboard_page))
+                self._update_archive_roots()
+                self.log_message(f"Simulated {backend.upper()} setup loaded. Dashboard Start is ready.", "SUCCESS")
+                return
             page = self.bo_page if self.modeling_workflow == "bo" else self.imed_page
             self.switch_page(self.stack.indexOf(page))
             self._update_archive_roots()
@@ -1878,6 +1900,26 @@ class MainWindow(QMainWindow):
             self.log_message(message, "SUCCESS")
         except Exception as error:
             QMessageBox.warning(self, "Preset load failed", str(error))
+
+    def _prepare_loaded_simulated_doe(self):
+        from experiment.doe_campaign import DoeCampaignService
+        from hardware_devices.simulated import SimulatedDevice
+
+        panel = self.control_panel
+        if not all(isinstance(device, SimulatedDevice) for device in panel.hardware.values()):
+            raise ValueError("Automatic preparation only connects simulated devices.")
+        configs, _ = panel.collect_current_configuration()
+        doe = DoeCampaignService(self.create_experiments)
+        if not doe.imed_simulations:
+            raise ValueError("The preset needs simulated process telemetry for the starting DoE.")
+        campaign = doe.compile(self._doe_assignments, configs, self._saved_doe_monitors)
+        ids = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
+        ids.update(campaign.monitor_device_ids)
+        for key in sorted(ids):
+            if not panel.device_widgets[key].connect_device():
+                raise ValueError(f"Could not connect simulated device {key}.")
+        panel.update_global_status()
+        self._apply_doe_campaign(campaign, configs)
 
 
     def log_message(self, message, level="INFO"):
