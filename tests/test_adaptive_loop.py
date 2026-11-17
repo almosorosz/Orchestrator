@@ -20,6 +20,7 @@ from experiment.adaptive_loop import AdaptiveLoop, surviving_models
 from experiment.doe_campaign import DoeCampaignService
 from experiment.doe_snapshot import restore_doe
 from imed_python.demo_campaign import model_inputs
+from gui.loop_setup_dialog import LoopSetupDialog
 from MAIN_WINDOW import MainWindow
 
 
@@ -211,7 +212,6 @@ class AdaptiveLoopTests(unittest.TestCase):
                 _, _, process, solubility, _ = model_inputs(False)
                 window.imed_page.panel.restore_setup_settings({"Solubility": solubility})
                 setup = window.settings_page.loop_setup
-                setup["max_followups"] = 2
                 setup["manual_assignments"] = {"T": "T1"}
                 setup["process"] = process
                 setup["recording"].update(no_feed=True, initial_concentration=.1)
@@ -221,6 +221,15 @@ class AdaptiveLoopTests(unittest.TestCase):
                 bo["targets"]["yield"]["enabled"] = True
                 bo["physical_profiles"] = {}
                 window.bo_page.restore(bo)
+
+                def set_followups(dialog):
+                    dialog.max_followups.setValue(2)
+                    dialog.accept()
+                    return dialog.result()
+
+                with patch.object(LoopSetupDialog, "exec", set_followups):
+                    window.settings_page.loop_setup_button.click()
+                self.assertEqual(window.settings_page.loop_setup["max_followups"], 2)
                 with patch.object(window, "_choose_loop_source", return_value="manual"):
                     window.start_command()
                 self.assertIsNotNone(window._adaptive_loop, logs)

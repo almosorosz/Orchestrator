@@ -2267,7 +2267,9 @@ class MainWindow(QMainWindow):
 
         self.hardware = (self.control_panel_page.hardware)
 
-        self.settings_page = SettingsPage(parent=self)
+        self.settings_page = SettingsPage(parent=self, loop_devices=lambda: {
+            key: widget.config for key, widget in self.control_panel.device_widgets.items()
+        })
         self.imed_page = IMEDPage(parent=self)
         self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case)
         self.modeling_workflow = "imed"

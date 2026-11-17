@@ -57,6 +57,7 @@ class StatusBadge(QLabel):
 
         colors={
             "Running":"#22c55e",
+            "Completed":"#15803d",
             "Inactive":"#64748b",
             "Stopped":"#ef4444"
         }

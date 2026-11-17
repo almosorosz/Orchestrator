@@ -1,5 +1,3 @@
-import json
-
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -13,7 +11,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QSizePolicy,
-    QInputDialog,
+    QDialog,
     QMessageBox,
 )
 
@@ -37,11 +35,12 @@ class SettingsPage(QWidget):
     save_preset_requested = Signal()
     load_preset_requested = Signal()
 
-    def __init__(self,parent=None):
+    def __init__(self, parent=None, *, loop_devices=None):
         super().__init__(parent)
         from experiment.adaptive_loop import default_setup
 
         self.loop_setup = default_setup()
+        self.loop_devices = loop_devices
         self._build_ui()
 
     def _build_ui(self):
@@ -595,20 +594,17 @@ class SettingsPage(QWidget):
         self.exp_number_input.clear()
 
     def edit_loop_setup(self):
-        from experiment.adaptive_loop import validate_setup
+        from gui.loop_setup_dialog import LoopSetupDialog
 
-        draft = json.dumps(self.loop_setup, indent=2, ensure_ascii=False)
-        while True:
-            draft, accepted = QInputDialog.getMultiLineText(
-                self, "Automatic loop setup", "Recording mappings, process inputs and design settings (JSON)", draft)
-            if not accepted:
-                return
-            try:
-                self.loop_setup = validate_setup(json.loads(draft))
-            except ValueError as error:
-                QMessageBox.warning(self, "Check loop setup", str(error))
-            else:
-                return
+        try:
+            configs = self.loop_devices() if self.loop_devices is not None else {}
+            dialog = LoopSetupDialog(self.loop_setup, self.loop_backend.currentData(), configs, self)
+        except (TypeError, ValueError) as error:
+            QMessageBox.warning(self, "Check loop setup", str(error))
+            return
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.loop_setup = dialog.setup
+        dialog.deleteLater()
 
     def update_loop_setup_button(self):
         self.loop_setup_button.setEnabled(self.loop_backend.isEnabled() and self.loop_backend.currentData() != "external")

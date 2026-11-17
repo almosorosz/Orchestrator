@@ -525,9 +525,12 @@ assignments again.
 
 Choose **Bayesian optimization** or **IMED** under **Dashboard LOOP modeling**.
 Generate or load a DoE and apply its device assignments, or prepare a Control
-Panel batch and map its device IDs to DoE roles in `manual_assignments`. Connect
-the devices and monitors, then choose writable Experiment and MODEL folders. **Automatic loop
-setup** stores the recording and follow-up settings in the setup preset. BO
+Panel batch and map its device IDs to DoE roles on the **Devices** tab. Connect
+the devices and monitors, then choose writable Experiment and MODEL folders. Open
+**Automatic loop setup…** to set the number of **Follow-up experiments** and edit
+the **Recording**, **Process inputs**, **Devices** and **Support profiles** tabs.
+The **IMED design** tab is available when IMED is selected. **Save setup preset…**
+retains these choices for the next session. BO
 targets and stage templates come from the BO page. IMED uses the case, solver,
 PE settings and response weights loaded in IMED, plus the size-sample choice in
 Settings. Use the [simulated configurations](examples/configurations/README.md)
@@ -558,23 +561,22 @@ device connectivity and limits, then repeats until `max_followups` is reached.
 worker. An active solver call may take time to finish. End the final session to
 leave the hardware available for another campaign.
 
-For physical runs, configure `channels` with the measured CSV column names and
-`recording` with the crystallization window, concentration multiplier and scale
-direction. `process` supplies the starting masses in grams, densities in g/mL,
-shape factor and seed mass. Values can come from the first IMED process record.
-Use `initial_processes` to override these inputs by initial DoE experiment name.
-`followup_start_s` places the recommended profiles after any charging window.
-Provide `support_profiles` for assigned actuator roles that still need charging,
-stirring, discharge, or cleaning commands. Their `points` are `[times, values]`
-from elapsed zero, using the DoE role units above, and `step` selects step
-interpolation. Keep pump and valve support profiles at zero at their end. For
-variable seed mass, specify a calibrated `seed_pump` with `rpm` and
-`grams_per_second` and supply the seed D10, D50 and D90 in `recording.seed_percentiles`.
+For physical runs, use **Recording** to select measured CSV columns and set the
+crystallization window, concentration multiplier and scale direction. Use
+**Process inputs** for starting masses, densities, shape factor and seed mass.
+Blank fields can inherit values from the first IMED process record. The override
+table sets individual values by starting experiment name. Set **Follow-up
+crystallization start** to place the recommended profiles after charging.
+Use **Support profiles** for charging, stirring, discharge, or cleaning commands.
+Enter time and target points, starting at elapsed zero, in the displayed role
+units. Keep pump and valve support profiles at zero at their end. For variable
+seed mass, enable calibrated seed-pump delivery in **Devices** and enter the
+seed D10, D50 and D90 in **Process inputs**.
 Check that the configured startup conditions and auxiliary profiles deliver the
 same physical conditions the optimizer assumes.
 If both Control Panel and assigned DoE profiles are present, Dashboard Start
-asks which batch to use. For a physical Control Panel batch, leave
-`manual_simulation` empty. For a physical DoE, apply the actuator and monitor
+asks which batch to use. For a physical Control Panel batch, turn off simulated
+PBM telemetry in **Devices**. For a physical DoE, apply the actuator and monitor
 assignments after connecting the instruments.
 
 Dashboard/sidebar **Start** offers **Use Control Panel experiments** when the

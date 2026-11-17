@@ -26,6 +26,10 @@ from imed_python.solver import pbm_backend_label
 MODES = (("External MODEL file", "external"), ("Bayesian optimization", "bo"), ("IMED", "imed"))
 POSITIVE_PROCESS = ("SolvMass", "SolventDensity", "AntiSolventDensity", "SolidDensity", "ShapeFactor")
 NONNEGATIVE_PROCESS = ("AntiSolvMass", "SeedMass", "PowerRatio")
+DEVICE_RECORDING_COLUMNS = {
+    "huber": ("temp_external", "temp_internal"), "opcua": ("value",), "mettler": ("weight_g",),
+    "jkem": ("speed", "target"), "ismatec": ("flow", "target"), "masterflex": ("speed", "target"),
+}
 
 
 def default_setup():
@@ -169,10 +173,7 @@ def _role_active(campaign, device_id):
 def _column_exists(column, configs):
     device, _, field = column.rpartition(".")
     kind = configs.get(device, {}).get("type")
-    fields = {"huber": {"temp_external", "temp_internal"}, "opcua": {"value"},
-              "mettler": {"weight_g"}, "jkem": {"speed", "target"},
-              "ismatec": {"flow", "target"}, "masterflex": {"speed", "target"}}
-    return field in fields.get(kind, ())
+    return field in DEVICE_RECORDING_COLUMNS.get(kind, ())
 
 
 def surviving_models(fits, sample_count, delta_aic):
