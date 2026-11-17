@@ -1389,6 +1389,7 @@ class MainWindow(QMainWindow):
         self.settings_page.update_plot_theme(self.dark_mode)
         self.dashboard_page.set_theme(self.dark_mode)
         self.plots_page.browser.dark_mode = self.dark_mode
+        self.sentinel_page.set_theme(self.dark_mode)
         self.control_panel_page.control_panel.set_theme(self.dark_mode)
 
         # Update embedded ExperimentDashboard
@@ -2199,7 +2200,7 @@ class MainWindow(QMainWindow):
 
         self.experiment_page    = ExperimentPage( parent=self)    
         self.plots_page         = PlotsPage(parent=self)
-        self.sentinel_page         = SentinelPage(parent=self)
+        self.sentinel_page      = SentinelPage(parent=self, dark_mode=self.dark_mode)
         self.modeling_page      = ModelingPage(parent=self)    
         self.control_panel_page = ControlPanelPage(parent=self)
         self.control_panel_page.control_panel.set_theme(

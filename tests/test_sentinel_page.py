@@ -385,6 +385,7 @@ class SentinelPageTests(unittest.TestCase):
     def test_real_pi_dashboard_runs_inside_desktop_page(self):
         source = Path(__file__).resolve().parents[1] / "sentinel/pi/fumehood_dashboard.html"
         self.server.dashboard = source.read_bytes()
+        self.page.set_theme(True)
         if os.environ.get("SENTINEL_PREVIEW_CONNECTION") == "wifi":
             self.select_wifi()
         self.page._auto_started = True
@@ -418,6 +419,33 @@ class SentinelPageTests(unittest.TestCase):
             self.assertTrue(self.page._online)
             self.assertIs(self.page.content.currentWidget(), self.page._browser)
             self.assertTrue(self.page.grab().save(preview))
+
+        web_page = self.page._browser.page()
+        web_page.runJavaScript('openView("sensors")')
+        self.page.set_theme(False)
+        colors = []
+
+        def light_theme_visible():
+            web_page.runJavaScript(
+                'JSON.stringify([getComputedStyle(document.body).backgroundColor,'
+                'getComputedStyle(document.querySelector(".detail-title h2")).color,'
+                'document.querySelector(".detail").classList.contains("open")])',
+                colors.append,
+            )
+            return colors and colors[-1] == '["rgb(248, 250, 252)","rgb(30, 41, 59)",true]'
+
+        self.wait_until(light_theme_visible)
+
+        self.page.set_theme(True)
+        self.page.refresh_dashboard()
+        self.wait_until(lambda: self.page._page_loaded)
+        backgrounds = []
+
+        def dark_theme_visible():
+            web_page.runJavaScript('getComputedStyle(document.body).backgroundColor', backgrounds.append)
+            return backgrounds and backgrounds[-1] == "rgb(7, 17, 31)"
+
+        self.wait_until(dark_theme_visible)
 
     def test_tc001_card_shows_heatmap_and_clears_offline_readings(self):
         try:

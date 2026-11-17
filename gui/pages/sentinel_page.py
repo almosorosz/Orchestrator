@@ -11,9 +11,10 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 from gui.sentinel_archive_ui import ArchiveController
+from gui.sentinel_theme import DASHBOARD_STYLESHEET
 
 try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
     from PySide6.QtWebEngineWidgets import QWebEngineView
 except ImportError:
     QWebEngineView = None
@@ -63,8 +64,9 @@ class SentinelPage(QWidget):
     POLL_INTERVAL_MS = 5000
     REQUEST_TIMEOUT_MS = 4000
 
-    def __init__(self, parent=None, *, settings=None):
+    def __init__(self, parent=None, *, settings=None, dark_mode=None):
         super().__init__(parent)
+        self._dark_mode = dark_mode
         self._settings = settings if settings is not None else QSettings("Crystalloop", "Orchestrator")
         # Migrate saved connection profiles from the previous application name.
         for key in ("url", "connection_mode", "ethernet_url", "wifi_url", "download_directory"):
@@ -397,6 +399,8 @@ class SentinelPage(QWidget):
         self._browser.load(QUrl(self._base_url + "/"))
 
     def _dashboard_loaded(self, success):
+        if success and self._online:
+            self._apply_dashboard_theme()
         if not self._page_loading or not self._online or self._browser.url().scheme() == "about":
             return
         self._page_loading = False
@@ -408,6 +412,32 @@ class SentinelPage(QWidget):
             self._show_message(
                 "Dashboard unavailable. Retrying…"
             )
+
+    def set_theme(self, dark_mode):
+        self._dark_mode = dark_mode
+        if self._page_loaded:
+            self._apply_dashboard_theme()
+
+    def _apply_dashboard_theme(self):
+        if self._dark_mode is None or not self._is_pi_page(self._browser.url()):
+            return
+        theme = "dark" if self._dark_mode else "light"
+        # The isolated world can style the DOM without sharing globals with the Pi page.
+        self._browser.page().runJavaScript(
+            f"""(() => {{
+                if (location.origin !== new URL({json.dumps(self._base_url)}).origin ||
+                    !document.querySelector('#home.dashboard')) return;
+
+                document.documentElement.dataset.crystalloopTheme = {json.dumps(theme)};
+                if (!document.getElementById('crystalloop-dashboard-style')) {{
+                    const style = document.createElement('style');
+                    style.id = 'crystalloop-dashboard-style';
+                    style.textContent = {json.dumps(DASHBOARD_STYLESHEET)};
+                    document.head.append(style);
+                }}
+            }})()""",
+            QWebEngineScript.ScriptWorldId.ApplicationWorld.value,
+        )
 
     def refresh_dashboard(self):
         if self._enabled:
