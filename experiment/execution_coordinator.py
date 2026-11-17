@@ -12,6 +12,7 @@ class ExperimentCoordinator(QObject):
     omni_completed = Signal(dict)
     model_completed = Signal(dict)
     next_experiment_required = Signal(dict)
+    campaign_ready = Signal(dict)
     stage_changed = Signal(object)
     experiment_progress = Signal(dict)
     error_occurred = Signal(dict)
@@ -29,6 +30,7 @@ class ExperimentCoordinator(QObject):
         # An optimizer adapter must explicitly provide the next experiment.
         self.next_experiment_provider = None
         self.campaign_mode = False
+        self.native_modeling = False
         self.awaiting_campaign = False
         self.campaign_id = None
         self.expected_experiments = set()
@@ -161,6 +163,7 @@ class ExperimentCoordinator(QObject):
         self.stop_execution()
         self.next_experiment_provider = None
         self.campaign_mode = False
+        self.native_modeling = False
         self.awaiting_campaign = False
         self.campaign_id = None
         self.expected_experiments.clear()
@@ -248,7 +251,7 @@ class ExperimentCoordinator(QObject):
             # MODEL
             # --------------------------------------------------
     
-            elif self.monitor_mode == Stage.MODEL:
+            elif self.monitor_mode == Stage.MODEL and not self.native_modeling:
     
                 self.check_model_transition(
                     self.controller.omni_folder
@@ -285,10 +288,11 @@ class ExperimentCoordinator(QObject):
     
         return new_experiments
 
-    def begin_campaign(self, campaign):
+    def begin_campaign(self, campaign, *, native_modeling=False):
         if self.controller is None:
             raise RuntimeError("Define experiment and MODEL folders first")
         self.campaign_mode = True
+        self.native_modeling = native_modeling
         self.awaiting_campaign = False
         self.campaign_id = campaign.campaign_id
         self.expected_experiments = {e.experiment_id for e in campaign.experiments}
@@ -362,10 +366,11 @@ class ExperimentCoordinator(QObject):
         # A lock while publishing campaign_input.json must allow this same
         # transition to retry without failing on the directory already created.
         model_path.mkdir(exist_ok=True)
-        (model_path / "campaign_input.json").write_text(json.dumps({"campaign_id": self.campaign_id,
+        manifest = {"campaign_id": self.campaign_id,
             "campaign_folder": str(folder), "experiments": sorted(completed),
             "skipped_experiments": sorted(skipped),
-            "pbm_fitting": {"size_term": self.controller.pbm_size_term}}, indent=2), encoding="utf-8")
+            "pbm_fitting": {"size_term": self.controller.pbm_size_term}}
+        (model_path / "campaign_input.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         self.controller.current_model_folder = str(model_path)
         self.controller.omni_count += 1
         self.omni_run_count = self.controller.omni_count
@@ -373,6 +378,14 @@ class ExperimentCoordinator(QObject):
         self.controller.current_stage = Stage.MODEL
         self.omni_completed.emit({"omni_run_count": self.omni_run_count, "model_path": str(model_path)})
         self.stage_changed.emit(Stage.MODEL)
+        if self.native_modeling:
+            self.campaign_ready.emit({**manifest, "model_path": str(model_path)})
+
+    def native_model_completed(self):
+        self.controller.model_count += 1
+        self.model_run_count = self.controller.model_count
+        self.model_completed.emit({"model_run_count": self.model_run_count,
+                                   "model_path": self.controller.current_model_folder})
     
     
     def begin_omni_monitor(

@@ -135,6 +135,10 @@ def _candidate_recipe(candidate, *, experiment, process, conditions, addition):
         flow = np.vstack((t[keep], np.array([0, 0, rate, rate, 0, 0])[keep]))
     else:
         flow = np.array([[0, batch], [0, 0]])
+    equilibration = conditions.get("equilibration_s", 0.)
+    if equilibration:
+        temperature = np.column_stack((temperature, [batch + equilibration, end_t]))
+        flow = np.column_stack((flow, [batch + equilibration, 0.]))
     proposed = {**experiment, "TemperatureData": temperature, "FlowRateData": flow,
                 "ConcentrationData": np.array([[0], [concentration]]),
                 "InitialConcentration": concentration}
@@ -157,11 +161,7 @@ def _design_trial(candidate, *, recipe, score, cancelled):
     return _recipe_cost(score, *recipe(candidate))
 
 
-def optimize_recipe(experiment, process, conditions, score, *, iterations=5, population=12,
-                    cancelled=None, workers=1):
-    """Optimize a recipe. Parallel searches require a picklable score callable."""
-    from scipy.optimize import differential_evolution
-
+def recipe_space(conditions):
     batch = conditions["batch"]
     start_t, end_t = conditions["temperature"]
     solvent, antisolvent = conditions["liquid_masses"]
@@ -191,7 +191,15 @@ def optimize_recipe(experiment, process, conditions, score, *, iterations=5, pop
 
     ramp = duration_bounds(delta_t, conditions["temperature_rates"], batch, 0)
     pulse = duration_bounds(add, conditions["antisolvent_rates"], batch - 0.1, 0.1)
-    bounds = [seed_bounds, ramp, (0, int(bool(delta_t))), pulse, (0, int(bool(add)))]
+    return add, [seed_bounds, ramp, (0, int(bool(delta_t))), pulse, (0, int(bool(add)))]
+
+
+def optimize_recipe(experiment, process, conditions, score, *, iterations=5, population=12,
+                    cancelled=None, workers=1):
+    """Optimize a recipe. Parallel searches require a picklable score callable."""
+    from scipy.optimize import differential_evolution
+
+    add, bounds = recipe_space(conditions)
     recipe = partial(_candidate_recipe, experiment=experiment, process=process,
                      conditions=conditions, addition=add)
     best = None

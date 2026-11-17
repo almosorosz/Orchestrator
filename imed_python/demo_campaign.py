@@ -75,6 +75,15 @@ def model_inputs(seeded):
     return parameters, experiment, process, solubility, settings
 
 
+def validation_model():
+    parameters, _, _, _, _ = model_inputs(True)
+    table = np.column_stack((np.zeros(len(parameters)), parameters, parameters, parameters))
+    for index in (0, 12):
+        nominal = parameters[index]
+        table[index] = (1, nominal - 0.08, nominal - 0.35, nominal + 0.35)
+    return {"Name": "Validation PBM", "paraset": table}
+
+
 def recorded_columns(spec):
     return {
         "Temperature": f"{spec['controls']['T']}.temp_external",
@@ -170,12 +179,8 @@ def import_simulated_campaign(folder):
             experiment["InitialD10D50D90"] = np.array([trace[1, 0] for trace in size_traces])
         experiments.append(experiment)
         processes.append({**process, "No": number or len(processes) + 1})
-    parameters, _, _, solubility, settings = model_inputs(True)
-    table = np.column_stack((np.zeros(len(parameters)), parameters, parameters, parameters))
-    for index in (0, 12):
-        nominal = parameters[index]
-        table[index] = (1, nominal - 0.08, nominal - 0.35, nominal + 0.35)
+    _, _, _, solubility, settings = model_inputs(True)
     return {"ExpData": experiments, "ProcInf": processes, "Solubility": solubility,
-            "ModelParameter": [{"Name": "Validation PBM", "paraset": table}],
+            "ModelParameter": [validation_model()],
             "pbmsetting": {**settings, "Numerics": "conservative"},
             "objweightfactor": {"W1": 0., "W2": 1., "W3": 0., "Terms": "D10 D50 D90"}}

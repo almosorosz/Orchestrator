@@ -2648,7 +2648,7 @@ class ControlPanel(QWidget):
 
             QTimer.singleShot(
                 200,
-                dashboard.start_orchestrator,
+                dashboard.start_scheduled_campaign,
             )
 
             print(

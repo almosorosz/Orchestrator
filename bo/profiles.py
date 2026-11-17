@@ -82,7 +82,7 @@ def make_profile(points, source, *, step=False):
     return Profile(*trace, source, step) if trace is not None else None
 
 
-def campaign_profiles(experiment, process, definition):
+def campaign_profiles(experiment, process, definition, controls=None):
     recording = experiment.get("RecordingFile")
     if not isinstance(recording, str):
         return {}
@@ -90,9 +90,9 @@ def campaign_profiles(experiment, process, definition):
     experiment_id = metadata.get("experiment_id")
     spec = next((entry for entry in definition.get("campaign", {}).get("experiments", [])
                  if entry.get("experiment_id") == experiment_id), {})
-    demo = spec.get("imed_simulation", {})
+    demo = spec.get("imed_simulation") or {}
     devices = definition.get("devices", {})
-    controls = demo.get("controls", {})
+    controls = {**(controls or {}), **demo.get("controls", {})}
     recorded_temp = pairs(experiment.get("TemperatureData"))
     duration = float(recorded_temp[0, -1]) if recorded_temp is not None else 0.
     start = scalar(experiment.get("RecordingStart_s")) or 0.
@@ -105,7 +105,7 @@ def campaign_profiles(experiment, process, definition):
     associations = {
         "temperature": controls.get("T") or unique_device(("huber",)),
         "feed": controls.get("AS") or unique_device(("ismatec", "masterflex"), antisolvent=True),
-        "stirring": unique_device(("jkem",)),
+        "stirring": controls.get("stirring_rate") or unique_device(("jkem",)),
     }
     found = {}
     for entry in spec.get("profiles", []):
@@ -117,7 +117,7 @@ def campaign_profiles(experiment, process, definition):
             continue
         scale = 1.
         if name == "feed":
-            density = scalar(process.get("AntiSolventDensity"))
+            density = 1. if demo else scalar(process.get("AntiSolventDensity"))
             factors = {"g/s": 1., "g/h": 1 / 3600, "g/min": 1 / 60}
             if density is not None and density > 0:
                 factors["ml/min"] = density / 60
@@ -135,7 +135,7 @@ def campaign_profiles(experiment, process, definition):
     return found
 
 
-def case_runs(case, folder=None):
+def case_runs(case, folder=None, *, controls=None):
     definition = read_json(Path(folder) / "definition.json") if folder else {}
     process_records = case.get("ProcInf", [])
     runs = []
@@ -163,7 +163,7 @@ def case_runs(case, folder=None):
             if rpm is not None:
                 profiles["stirring"] = Profile(np.array([0., end]), np.array([rpm, rpm]), "Process setting")
         if folder:
-            profiles.update(campaign_profiles(exp, process, definition))
+            profiles.update(campaign_profiles(exp, process, definition, controls))
         conc = pairs(exp.get("ConcentrationData"))
         initial = scalar(exp.get("InitialConcentration"))
         if initial is None and conc is not None and conc[0, 0] == 0:

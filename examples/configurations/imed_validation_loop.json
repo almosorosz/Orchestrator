@@ -1,0 +1,18 @@
+{
+  "max_followups": 1,
+  "imed": {
+    "iterations": 0,
+    "covariance_samples": 2,
+    "equilibration_s": 5,
+    "conditions": {
+      "batch": 35,
+      "temperature": [18, 18],
+      "temperature_rates": [0, 1],
+      "liquid_masses": [68, 0],
+      "concentration": 0.1,
+      "final_anti": 0,
+      "antisolvent_rates": [0, 1],
+      "seed_bounds": [0.050176, 0.050176]
+    }
+  }
+}

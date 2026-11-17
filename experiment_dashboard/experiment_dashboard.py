@@ -2040,6 +2040,10 @@ class ExperimentDashboard(QMainWindow):
     # START
     # ==============================================================
 
+    def start_scheduled_campaign(self):
+        if not getattr(self, "_startup_cancelled", False):
+            self.start_orchestrator()
+
     def start_orchestrator(self):
 
         _debug("[DASHBOARD] start_orchestrator() ENTERED")
@@ -2172,7 +2176,7 @@ class ExperimentDashboard(QMainWindow):
                 self._release_hardware_ownership()
                 self.thread = None
                 self.worker = None
-                self.btn_start.setEnabled(True)
+                self.btn_start.setEnabled(not getattr(self, "single_run", False))
                 self.btn_stop.setEnabled(False)
                 self.execution_active_changed.emit(False)
             else:
@@ -2180,6 +2184,11 @@ class ExperimentDashboard(QMainWindow):
                 if self.worker is not None:
                     self.worker.request_stop()
 
+            if getattr(self, "single_run", False):
+                self.run_status_label.setText(f"Startup failed: {error}")
+                self.campaign_finished.emit({"campaign_id": self.campaign.campaign_id,
+                                             "status": "failed", "error": str(error)})
+                return
             QMessageBox.critical(
                 self,
                 "Experiment Startup Error",
@@ -2193,6 +2202,14 @@ class ExperimentDashboard(QMainWindow):
     def stop_orchestrator(self):
 
         if self.worker is None:
+            # Start may have been scheduled but not yet entered on the GUI thread.
+            if self.is_execution_active():
+                self._startup_cancelled = True
+                self._release_hardware_ownership()
+                self.btn_start.setEnabled(not getattr(self, "single_run", False))
+                self.btn_stop.setEnabled(False)
+                self.run_status_label.setText("Stopped before startup")
+                self.execution_active_changed.emit(False)
             return
 
         _debug("[GUI] Emergency stop requested.")
@@ -2260,7 +2277,7 @@ class ExperimentDashboard(QMainWindow):
         self.thread = self.worker = None
         if thread is not None:
             thread.deleteLater()
-        self.btn_start.setEnabled(not self._closing_application)
+        self.btn_start.setEnabled(not self._closing_application and not getattr(self, "single_run", False))
         self.execution_active_changed.emit(False)
 
     def is_execution_active(self):

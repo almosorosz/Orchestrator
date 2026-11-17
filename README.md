@@ -514,15 +514,54 @@ Locked final run/summary writes also retry before recording is marked complete.
 When all expected experiments and the final campaign recording are complete,
 the loop creates a unique `_model_<n>_<campaign>` folder in the selected MODEL
 root. `campaign_input.json` points to the campaign folder and completed experiment
-IDs. The dashboard enters MODEL and waits for an externally produced `MODEL*.csv`,
-`.mat`, `.json`, `.txt`, or extensionless result to stabilize. The app does not
-launch MATLAB/IMED/BO yet. `MODEL.csv` is currently a nonempty completion marker;
-its contents are not parsed as recommended profiles. After the file stabilizes,
-MODEL becomes inactive and OMNI monitoring resumes, ready for the next campaign.
-The previous campaign is not replayed automatically. End its session, then use
-Dashboard/sidebar Start to launch the next assigned DoE. Regeneration requires
-applying assignments again. Defining and
-consuming an optimizer recommendation format remains part of Release D.
+IDs. With **Settings → Dashboard LOOP modeling → External MODEL file**, the
+dashboard waits for an externally produced `MODEL*.csv`, `.mat`, `.json`, `.txt`,
+or extensionless completion marker. After it stabilizes, end the session and use
+Dashboard/sidebar Start to launch the next batch. Regeneration requires applying
+assignments again.
+
+### Automatic BO and IMED
+
+Choose **Bayesian optimization** or **IMED** under **Dashboard LOOP modeling**.
+Generate or load a DoE and apply its device assignments, or prepare a Control
+Panel batch and map its device IDs to DoE roles in `manual_assignments`. Connect
+the devices and monitors, then choose writable Experiment and MODEL folders. **Automatic loop
+setup** stores the recording and follow-up settings in the setup preset. BO
+targets and stage templates come from the BO page. IMED uses the case, solver,
+PE settings and response weights loaded in IMED, plus the size-sample choice in
+Settings. Use the [simulated configurations](examples/configurations/README.md)
+to try the workflow without instruments.
+
+**Dashboard Start** first checks the setup. Once the initial batch is saved, BO
+adds the new observations to the selected prior runs, fits its surrogates, and
+proposes a recipe within the configured bounds. IMED refits the candidate models
+on the accumulated recordings. Models within `imed.delta_aic` of the lowest total
+AIC score survive. Multiple survivors trigger model discrimination. One survivor
+with usable covariance triggers D-optimal design. A fit failure or unavailable
+comparison pauses the loop and reports the reason in the dashboard log.
+
+Each MODEL folder contains `recommendation.json` with the validated device
+profiles, units, process inputs and campaign ID. IMED also saves `fit.imed.json`.
+CrystaLoop launches the follow-up after recording and hardware cleanup, rechecks
+device connectivity and limits, then repeats until `max_followups` is reached.
+**Stop** discards any pending launch and requests cancellation from the model
+worker. An active solver call may take time to finish. End the final session to
+leave the hardware available for another campaign.
+
+For physical runs, configure `channels` with the measured CSV column names and
+`recording` with the crystallization window, concentration multiplier and scale
+direction. `process` supplies the starting masses in grams, densities in g/mL,
+shape factor and seed mass. Values can come from the first IMED process record.
+Use `initial_processes` to override these inputs by initial DoE experiment name.
+`followup_start_s` places the recommended profiles after any charging window.
+Provide `support_profiles` for assigned actuator roles that still need charging,
+stirring, discharge, or cleaning commands. Their `points` are `[times, values]`
+from elapsed zero, using the DoE role units above, and `step` selects step
+interpolation. Keep pump and valve support profiles at zero at their end. For
+variable seed mass, specify a calibrated `seed_pump` with `rpm` and
+`grams_per_second` and supply the seed D10, D50 and D90 in `recording.seed_percentiles`.
+Check that the configured startup conditions and auxiliary profiles deliver the
+same physical conditions the optimizer assumes.
 
 Dashboard/sidebar **Start** offers **Use Control Panel experiments** when the
 Control Panel has a manual batch. This runs the batch using the configured LOOP
@@ -532,8 +571,8 @@ inferred when the Settings experiment count is blank. The Control Panel's own
 sessions. Use **Skip to next experiment** in the
 running dashboard to save the current run as skipped and idle the actuators before
 starting the next run. The loop lists skipped runs separately from MODEL inputs.
-Use Stop to cancel an active loop, then wait for hardware
-cleanup before Reset or End Session.
+Use Stop to cancel an active loop, then wait for hardware cleanup before Reset or
+End Session.
 
 ## Scope and next hardware gate
 

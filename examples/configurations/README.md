@@ -103,3 +103,26 @@ crystallization interval. It loads the seed distribution, process inputs,
 solubility and starting kinetic model together, so you can open **Parameter
 Estimation** without a separate MAT file. The default recording root is
 `data/imed_simulated_runs`.
+
+## Run the validation DoE from Dashboard Start
+
+Load `imed_validation_doe.json`, connect its simulated devices and apply the
+DoE assignments as above. In Settings, choose existing, writable Experiment and
+MODEL folders. You can set **Simulation speed** to 100× in Control Panel.
+
+- For BO, open the BO page and use **Load BO setup** with
+  [`bo_validation_loop.json`](bo_validation_loop.json). It minimizes D50 with an
+  isothermal follow-up template and zero antisolvent feed. In Settings, select
+  **Bayesian optimization** under **Dashboard LOOP modeling**.
+- For IMED, select **IMED** under **Dashboard LOOP modeling**. Open **Automatic
+  loop setup** and paste the contents of
+  [`imed_validation_loop.json`](imed_validation_loop.json). With no model case
+  loaded, the simulated run supplies a validation PBM with one candidate model
+  and a short PE search. It proceeds to D-optimal design after estimating the
+  parameters. A loaded IMED case can supply multiple candidates and its own PE
+  settings.
+
+Press **Start Experiment** on the main dashboard. The initial three runs are
+recorded, the selected model proposes a follow-up, and the dashboard runs it.
+Each example runs one follow-up. The MODEL folder links the recommendation to
+its recorded campaign ID. Use **End Session** when the loop is done.

@@ -1,3 +1,5 @@
+import json
+
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -11,6 +13,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QFrame,
     QSizePolicy,
+    QInputDialog,
+    QMessageBox,
 )
 
 from PySide6.QtCore import Qt, Signal
@@ -35,7 +39,9 @@ class SettingsPage(QWidget):
 
     def __init__(self,parent=None):
         super().__init__(parent)
+        from experiment.adaptive_loop import default_setup
 
+        self.loop_setup = default_setup()
         self._build_ui()
 
     def _build_ui(self):
@@ -233,6 +239,18 @@ class SettingsPage(QWidget):
         config_layout.addWidget(self.load_preset_button, 11, 0, 1, 2)
         config_layout.addWidget(QLabel("PBM size samples in LOOP"), 12, 0)
         config_layout.addWidget(self.pbm_size_samples, 12, 1)
+        from experiment.adaptive_loop import MODES
+
+        self.loop_backend = QComboBox()
+        for label, mode in MODES:
+            self.loop_backend.addItem(label, mode)
+        self.loop_setup_button = QPushButton("Automatic loop setup…")
+        self.loop_setup_button.setEnabled(False)
+        self.loop_setup_button.clicked.connect(self.edit_loop_setup)
+        self.loop_backend.currentIndexChanged.connect(self.update_loop_setup_button)
+        config_layout.addWidget(QLabel("Dashboard LOOP modeling"), 13, 0)
+        config_layout.addWidget(self.loop_backend, 13, 1)
+        config_layout.addWidget(self.loop_setup_button, 14, 0, 1, 2)
 
         doe_controls.setLayout(form)
 
@@ -576,10 +594,33 @@ class SettingsPage(QWidget):
         self.MODEL_path_input.clear()
         self.exp_number_input.clear()
 
+    def edit_loop_setup(self):
+        from experiment.adaptive_loop import validate_setup
+
+        draft = json.dumps(self.loop_setup, indent=2, ensure_ascii=False)
+        while True:
+            draft, accepted = QInputDialog.getMultiLineText(
+                self, "Automatic loop setup", "Recording mappings, process inputs and design settings (JSON)", draft)
+            if not accepted:
+                return
+            try:
+                self.loop_setup = validate_setup(json.loads(draft))
+            except ValueError as error:
+                QMessageBox.warning(self, "Check loop setup", str(error))
+            else:
+                return
+
+    def update_loop_setup_button(self):
+        self.loop_setup_button.setEnabled(self.loop_backend.isEnabled() and self.loop_backend.currentData() != "external")
+
 
     def reset_ui(self):
         self.set_doe_available(False)
         self.clear_inputs()
+        from experiment.adaptive_loop import default_setup
+
+        self.loop_backend.setCurrentIndex(0)
+        self.loop_setup = default_setup()
 
         self.changed_dimensions_count_label.clear()
         self.changed_dimensions_label.clear()
@@ -599,6 +640,10 @@ class SettingsPage(QWidget):
         self._controls_enabled = bool(enabled)
         self.load_preset_button.setEnabled(enabled)
         self.define_button.setEnabled(enabled)
+        for control in (self.exp_path_input, self.MODEL_path_input, self.exp_number_input, self.pbm_size_samples,
+                        self.loop_backend):
+            control.setEnabled(enabled)
+        self.update_loop_setup_button()
         self.generate_button.setEnabled(enabled)
         self.profile_button.setEnabled(enabled)
         self.plot_doe_button.setEnabled(enabled)

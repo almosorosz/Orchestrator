@@ -12,9 +12,12 @@
 
 
 import sys            
+import json
 import os
 import time
 from copy import deepcopy
+from dataclasses import replace
+from uuid import uuid4
 
 from pathlib import Path
 
@@ -74,6 +77,8 @@ from experiment.models import Campaign, ExperimentDefinition
 from hardware_devices.capabilities import is_monitor_only
 from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
+from experiment.adaptive_loop import AdaptiveLoop, check_loop_folders, validate_setup
+from gui.loop_model_job import LoopModelJob
 import logging
 
 class MainWindow(QMainWindow):
@@ -323,6 +328,12 @@ class MainWindow(QMainWindow):
         self._saved_doe_monitors = None
         self._assigned_doe_campaign = None
         self._assigned_doe_configs = {}
+        self._adaptive_loop = None
+        self._loop_model_job = None
+        self._loop_recommendation = None
+        self._loop_launch_timer = QTimer(self)
+        self._loop_launch_timer.setInterval(100)
+        self._loop_launch_timer.timeout.connect(self._launch_recommendation)
 
         self.execution = ExperimentCoordinator(parent=self)
 
@@ -332,6 +343,7 @@ class MainWindow(QMainWindow):
         self.execution.experiment_progress.connect(self.on_experiment_progress)
         self.execution.error_occurred.connect(self.on_execution_error)
         self.execution.next_experiment_required.connect(self.on_next_experiment_required)
+        self.execution.campaign_ready.connect(self._model_completed_campaign)
 
     @Slot(dict)
     def on_next_experiment_required(self, result):
@@ -427,6 +439,8 @@ class MainWindow(QMainWindow):
         user access to Reset.
         """
 
+        automatic = self._adaptive_loop is not None
+        self._cancel_adaptive_loop()
         stage = error_info["stage"]
         path = error_info["path"]
         error_type = error_info["error_type"]
@@ -448,6 +462,8 @@ class MainWindow(QMainWindow):
             "ERROR",
         )
 
+        if automatic:
+            return
         QMessageBox.critical(
             self,
             "Experiment Execution Error",
@@ -1559,18 +1575,30 @@ class MainWindow(QMainWindow):
                 self.log_message("Device configuration changed. Apply DoE assignments again before starting.", "WARNING")
                 return
         if for_loop:
-            if any(experiment.imed_simulation for experiment in campaign.experiments):
+            if (self.settings_page.loop_backend.currentData() == "external"
+                    and any(experiment.imed_simulation for experiment in campaign.experiments)):
                 self.log_message("Run the IMED validation preset with Start DoE independent from loop.", "WARNING")
                 return
             return self._start_loop_campaign(campaign)
         return panel.start_campaign(campaign)
 
     def _start_loop_campaign(self, campaign):
-        self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
+        mode = self.settings_page.loop_backend.currentData()
+        if mode != "external" and self._adaptive_loop is None:
+            if not self._prepare_adaptive_loop(mode, campaign):
+                return False
+            campaign = replace(campaign, campaign_id=uuid4().hex)
+        if self._adaptive_loop is None:
+            self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
         dashboard = self.control_panel.start_campaign(campaign, {"enabled": True, "output_folder": self.CONTROLLER.omni_folder})
         if dashboard is None:
-            return
-        self.execution.begin_campaign(campaign)
+            if self._adaptive_loop is not None:
+                self._fail_adaptive_loop("The validated experiment runner could not start the campaign.")
+            return False
+        dashboard.single_run = self._adaptive_loop is not None
+        if dashboard.single_run:
+            dashboard.btn_start.setEnabled(False)
+        self.execution.begin_campaign(campaign, native_modeling=dashboard.single_run)
         self._loop_dashboard = dashboard
         dashboard.recording_started.connect(self.execution.set_campaign_folder)
         dashboard.campaign_finished.connect(self.on_loop_campaign_finished)
@@ -1578,6 +1606,128 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_experiment_count(0)
         self.dashboard_page.set_monitoring_state(True)
         self.log_message(f"LOOP started with {campaign.name}. Completed recordings will advance it to MODEL.", "INFO")
+        return True
+
+    def _connected_loop_devices(self):
+        return {key for key, widget in self.control_panel.device_widgets.items() if widget.is_connected()}
+
+    def _prepare_adaptive_loop(self, mode, campaign):
+        from experiment.doe_campaign import ProfileAssignment
+
+        settings = self.settings_page
+        experiments, models, _ = settings.get_environment_inputs()
+        problems = check_loop_folders(experiments, models)
+        try:
+            setup = validate_setup(settings.loop_setup)
+            if campaign is self._assigned_doe_campaign:
+                assignments = self._doe_assignments
+                calibration_storage = self.create_experiments.exp_storage
+            else:
+                assignments = tuple(ProfileAssignment(role, device) for role, device in setup["manual_assignments"].items())
+                calibration_storage = self.experiment_service.exp_storage
+            configs, _ = self.control_panel.collect_current_configuration()
+            imed = self.imed_page.panel
+            session = AdaptiveLoop(mode, setup, campaign, configs,
+                                   self._connected_loop_devices(), calibration_storage,
+                                   assignments, imed.checkpoint_case(),
+                                   bo_settings=self.bo_page.settings() if mode == "bo" else None,
+                                   size_term=settings.pbm_size_samples.currentData(), workers=imed.cpu_workers())
+        except (ValueError, TypeError, RuntimeError, OSError, ImportError, KeyError) as error:
+            problems.append(str(error))
+        if problems:
+            message = "LOOP setup needs attention. " + " ".join(problems)
+            settings.set_message(error=message)
+            self.log_message(message, "WARNING")
+            return False
+        if not self.define_command(default_count=len(campaign.experiments)):
+            self.log_message("Check the experiment count under Settings before starting LOOP.", "WARNING")
+            return False
+        self.execution.omni_run_count = self.execution.model_run_count = 0
+        self.dashboard_page.set_omni_count(0)
+        self.dashboard_page.set_model_count(0)
+        self._adaptive_loop = session
+        return True
+
+    @Slot(dict)
+    def _model_completed_campaign(self, manifest):
+        if self._adaptive_loop is None or self.CONTROLLER.process_stop:
+            return
+        if self._adaptive_loop.complete:
+            self._cancel_adaptive_loop()
+            self.execution.stop_execution()
+            self.set_buttons_enabled(True)
+            self.dashboard_page.set_monitoring_state(False)
+            self.dashboard_page.set_omni_status("Completed")
+            self.dashboard_page.set_model_status("Completed")
+            self.log_message("Automatic LOOP completed its configured follow-up experiments.", "SUCCESS")
+            return
+        job = self._loop_model_job = LoopModelJob(self._adaptive_loop, manifest, self)
+        job.progress.connect(self._log_loop_model_progress)
+        job.finished.connect(self._on_loop_model_finished)
+        job.start()
+
+    @Slot(str)
+    def _log_loop_model_progress(self, message):
+        if self._adaptive_loop is not None:
+            self.log_message(message, "INFO")
+
+    @Slot()
+    def _on_loop_model_finished(self):
+        job = self._loop_model_job
+        self._loop_model_job = None
+        job.deleteLater()
+        if self._adaptive_loop is not job.session or self.CONTROLLER.process_stop:
+            return
+        if job.error is not None:
+            self._fail_adaptive_loop(str(job.error))
+            return
+        self.execution.native_model_completed()
+        self._loop_recommendation = job.recommendation
+        self._launch_recommendation()
+
+    @Slot()
+    def _launch_recommendation(self):
+        session, campaign = self._adaptive_loop, self._loop_recommendation
+        if session is None or campaign is None or self.CONTROLLER.process_stop:
+            self._loop_launch_timer.stop()
+            return
+        dashboard = self.experiment_page.dashboard
+        if dashboard is not None and dashboard.is_execution_active():
+            if not self._loop_launch_timer.isActive():
+                self._loop_launch_timer.start()
+            return
+        self._loop_launch_timer.stop()
+        self._loop_recommendation = None
+        if dashboard is not None:
+            self.end_experiment_session(automatic=True)
+            if self.experiment_page.dashboard is not None:
+                self._fail_adaptive_loop("The previous experiment session could not release its dashboard.")
+                return
+        try:
+            configs, _ = self.control_panel.collect_current_configuration()
+            session.check_devices(campaign, configs, self._connected_loop_devices())
+            problems = check_loop_folders(self.CONTROLLER.omni_folder, self.CONTROLLER.model_folder)
+            if problems:
+                raise ValueError(" ".join(problems))
+        except (ValueError, OSError, TypeError) as error:
+            self._fail_adaptive_loop(str(error))
+            return
+        if self._start_loop_campaign(campaign):
+            session.followups += 1
+
+    def _cancel_adaptive_loop(self):
+        self._adaptive_loop = self._loop_recommendation = None
+        self._loop_launch_timer.stop()
+        if self._loop_model_job is not None:
+            self._loop_model_job.requestInterruption()
+
+    def _fail_adaptive_loop(self, reason):
+        self._cancel_adaptive_loop()
+        self.execution.stop_execution()
+        self.dashboard_page.set_model_status("Error")
+        self.dashboard_page.set_monitoring_state(False)
+        self.set_buttons_enabled(True)
+        self.log_message(f"Automatic LOOP paused. {reason}", "ERROR")
 
     @Slot(dict)
     def on_loop_campaign_finished(self, result):
@@ -1636,6 +1786,8 @@ class MainWindow(QMainWindow):
                            "model_path": self.settings_page.MODEL_path_input.text(),
                            "experiment_count": self.settings_page.exp_number_input.text(),
                            "pbm_size_term": self.settings_page.pbm_size_samples.currentData(),
+                           "loop_backend": self.settings_page.loop_backend.currentData(),
+                           "loop_setup": json.dumps(self.settings_page.loop_setup, allow_nan=False),
                            "sampling_strategy": self.settings_page.get_sampling_strategy()}
             write_preset(filename, panel, self.experiment_service.exp_par, self._doe_assignments,
                          environment, load_recording_settings(),
@@ -1662,6 +1814,11 @@ class MainWindow(QMainWindow):
             data, parameters, assignments = read_preset(filename)
             from imed_python.setup_snapshot import read_imed_settings
 
+            environment = data.get("environment", {})
+            loop_setup = validate_setup(json.loads(environment.get("loop_setup", "{}")))
+            loop_backend = self.settings_page.loop_backend.findData(environment.get("loop_backend", "external"))
+            if loop_backend < 0:
+                raise ValueError("Unsupported LOOP backend in the setup preset.")
             modeling_payload = data.get("modeling")
             modeling = read_imed_settings(modeling_payload)
             bo_settings = (validate_bo_settings(modeling_payload["bo"])
@@ -1681,7 +1838,8 @@ class MainWindow(QMainWindow):
             self.experiment_service.exp_par = parameters
             self.experiment_service._build_doe_dependencies()
             self.control_panel.simulation_speed.setValue(panel.get("simulation_speed", 1))
-            environment = data.get("environment", {})
+            self.settings_page.loop_setup = loop_setup
+            self.settings_page.loop_backend.setCurrentIndex(loop_backend)
             self.settings_page.exp_path_input.setText(environment.get("experiment_path", ""))
             self.settings_page.MODEL_path_input.setText(environment.get("model_path", ""))
             self.settings_page.exp_number_input.setText(environment.get("experiment_count", ""))
@@ -1891,21 +2049,23 @@ class MainWindow(QMainWindow):
 
     def start_command(self):
         panel = self.control_panel
-        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
+        if (self._loop_model_job is not None or self._adaptive_loop is not None
+                or panel.hardware_manager.is_busy or panel.experiment_window_attached()
                 or (self.execution.timer.isActive() and not self.execution.awaiting_campaign)):
             self.log_message("End the active experiment or monitoring session before starting another LOOP batch.", "WARNING")
             return
         source = self._choose_loop_source()
         if source is None:
             return
-        if self.CONTROLLER is None and source == "manual":
-            self.define_command(default_count=len(panel.experiments))
-        if self.CONTROLLER is None:
-            self.log_message('Define the Experiment and MODEL folders first.', 'WARNING')
-            return
-        if not all(os.path.isdir(path) for path in (self.CONTROLLER.omni_folder, self.CONTROLLER.model_folder)):
-            self.log_message('Experiment and MODEL folders must exist.', 'ERROR')
-            return
+        if self.settings_page.loop_backend.currentData() == "external":
+            if self.CONTROLLER is None and source == "manual":
+                self.define_command(default_count=len(panel.experiments))
+            if self.CONTROLLER is None:
+                self.log_message('Define the Experiment and MODEL folders first.', 'WARNING')
+                return
+            if not all(os.path.isdir(path) for path in (self.CONTROLLER.omni_folder, self.CONTROLLER.model_folder)):
+                self.log_message('Experiment and MODEL folders must exist.', 'ERROR')
+                return
         if source == "doe":
             return self._choose_doe_campaign(True)
         configs, _ = panel.collect_current_configuration()
@@ -1922,6 +2082,7 @@ class MainWindow(QMainWindow):
         return self._start_loop_campaign(Campaign("Control Panel experiments", experiments, monitor_device_ids=monitors))
 
     def stop_command(self):
+        self._cancel_adaptive_loop()
         dashboard = getattr(self, '_loop_dashboard', None)
         if dashboard is not None and dashboard.is_execution_active():
             dashboard.stop_orchestrator()
@@ -1948,7 +2109,7 @@ class MainWindow(QMainWindow):
 
 
     def reset_command(self):
-        if self.control_panel.hardware_manager.is_busy:
+        if self.control_panel.hardware_manager.is_busy or self._loop_model_job is not None:
             self.log_message("Wait for experiment cleanup before resetting the loop.", "WARNING")
             return
 
@@ -2048,7 +2209,7 @@ class MainWindow(QMainWindow):
 
         self.switch_page(1)
 
-    def end_experiment_session(self):
+    def end_experiment_session(self, *, automatic=False):
         """
         End the embedded ExperimentDashboard session safely.
 
@@ -2061,6 +2222,9 @@ class MainWindow(QMainWindow):
         if dashboard is None:
             return
 
+        if self._adaptive_loop is not None and not automatic:
+            self.log_message("Stop the automatic loop before ending its experiment session.", "WARNING")
+            return
         if dashboard.is_execution_active():
             self.log_message("Stop the experiment and wait for cleanup before ending the session.", "WARNING")
             return
@@ -2122,6 +2286,8 @@ class MainWindow(QMainWindow):
 
         if panel.experiment_window is dashboard:
             panel.experiment_window = None
+        if getattr(self, "_loop_dashboard", None) is dashboard:
+            self._loop_dashboard = None
         panel.refresh_connectivity_fields()
 
         print(
@@ -2346,6 +2512,11 @@ class MainWindow(QMainWindow):
         self.switch_page(2)
 
     def closeEvent(self, event):
+        if self._loop_model_job is not None:
+            self.stop_command()
+            self.log_message("Wait for the modeling worker to stop before exiting.", "WARNING")
+            event.ignore()
+            return
         if not self.imed_page.panel.close_simulation():
             event.ignore()
             return

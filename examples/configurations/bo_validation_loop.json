@@ -1,0 +1,34 @@
+{
+  "format": "crystalloop-bo",
+  "version": 4,
+  "source": "Simulated validation DoE",
+  "runs": [],
+  "selected": [],
+  "constraints": {
+    "duration": [null, null], "cooling": [null, null],
+    "seed": [null, null], "feed": [null, null]
+  },
+  "targets": {
+    "yield": {"enabled": false, "mode": "max", "weight": 1, "target": 0, "scale": 1},
+    "duration": {"enabled": false, "mode": "min", "weight": 1, "target": 0, "scale": 1},
+    "d10": {"enabled": false, "mode": "min", "weight": 1, "target": 0, "scale": 1},
+    "d50": {"enabled": true, "mode": "min", "weight": 1, "target": 0, "scale": 1},
+    "d90": {"enabled": false, "mode": "min", "weight": 1, "target": 0, "scale": 1}
+  },
+  "yield_basis": "theoretical",
+  "overrides": {},
+  "output_bounds": {"yield": [null, null], "d10": [null, null], "d50": [null, null], "d90": [null, null]},
+  "exploration": 1,
+  "output_margin": 1.96,
+  "physical_profiles": {
+    "temperature": {
+      "stages": [{"duration_s": 60, "start": 25, "end": 25}],
+      "controls": ["final_temperature"]
+    },
+    "feed": {
+      "stages": [{"duration_s": 60, "start": 0, "end": 0}],
+      "controls": []
+    }
+  },
+  "tolerances": {"temperature": 0.15, "feed": 0.001, "seed": 0, "stirring": 1}
+}

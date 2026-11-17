@@ -47,6 +47,29 @@ class ProfileAssignment:
     density_g_ml: float | None = None
 
 
+def convert_profile(storage, assignment, config, values):
+    role = ROLES[assignment.role]
+    if config["type"] not in role.compatible_types or is_monitor_only(config):
+        raise ValueError(f"{role.label} cannot be assigned to {config['type']}")
+    if role.unit != "g/h":
+        return values, role.unit, "identity"
+    if config.get("pump_calibration"):
+        from experiment.pump_calibration_files import convert_flow, OUTPUT_UNITS
+        calibration = config["pump_calibration"]
+        return (convert_flow(calibration, config["type"], values), OUTPUT_UNITS[config["type"]],
+                f"Loaded calibration: {calibration['source_name']} (g/h → {OUTPUT_UNITS[config['type']]})")
+    if config["type"] == "ismatec":
+        return values / 60, "mL/min", "g/h ÷ 60 (assumed density 1 g/mL)"
+    converter_names = {"AS": "as_rate_converter", "solution": "solution_rate_converter",
+                       "solvent": "solvent_rate_converter", "clean_sol": "cleaning_sol_rate_converter"}
+    converter = getattr(storage, converter_names[assignment.role])
+    # Preserve sign and exact zero; the fitted calibration is for magnitude.
+    converted = np.sign(values) * converter.convert_to_rpm(np.abs(values))
+    if not np.all(np.isfinite(converted)) or np.any(converted * values < 0):
+        raise ValueError(f"{role.label}: calibration produced invalid pump targets")
+    return converted, "RPM", f"{assignment.role} pump calibration (g/h → RPM)"
+
+
 def sampled_doe_factors(creator):
     factors = set(getattr(creator, "DoE_val", {}))
     snapshots = getattr(creator, "parameter_snapshots", {}).values()
@@ -82,28 +105,6 @@ class DoeCampaignService:
             role in frame and (role == "T" or np.any(frame[role].to_numpy(dtype=float) != 0))
             for frame in self.frames.values()
         )}
-
-    def _convert(self, assignment, config, values):
-        role = ROLES[assignment.role]
-        if config["type"] not in role.compatible_types or is_monitor_only(config):
-            raise ValueError(f"{role.label} cannot be assigned to {config['type']}")
-        if role.unit != "g/h":
-            return values, role.unit, "identity"
-        if config.get("pump_calibration"):
-            from experiment.pump_calibration_files import convert_flow, OUTPUT_UNITS
-            calibration = config["pump_calibration"]
-            return (convert_flow(calibration, config["type"], values), OUTPUT_UNITS[config["type"]],
-                    f"Loaded calibration: {calibration['source_name']} (g/h → {OUTPUT_UNITS[config['type']]})")
-        if config["type"] == "ismatec":
-            return values / 60, "mL/min", "g/h ÷ 60 (assumed density 1 g/mL)"
-        converter_names = {"AS": "as_rate_converter", "solution": "solution_rate_converter",
-                           "solvent": "solvent_rate_converter", "clean_sol": "cleaning_sol_rate_converter"}
-        converter = getattr(self.creator.exp_storage, converter_names[assignment.role])
-        # Preserve sign and exact zero; the fitted calibration is for magnitude.
-        converted = np.sign(values) * converter.convert_to_rpm(np.abs(values))
-        if not np.all(np.isfinite(converted)) or np.any(converted * values < 0):
-            raise ValueError(f"{role.label}: calibration produced invalid pump targets")
-        return converted, "RPM", f"{assignment.role} pump calibration (g/h → RPM)"
 
     def compile(self, assignments, configs, monitor_device_ids=(), *, imed_monitors=None):
         assignments = tuple(assignments)
@@ -141,7 +142,7 @@ class DoeCampaignService:
                 if assignment.role not in frame:
                     raise ValueError(f"{name}: missing {assignment.role} profile")
                 values = frame[assignment.role].to_numpy(dtype=float)
-                converted, unit, _ = self._convert(assignment, configs[assignment.device_id], values)
+                converted, unit, _ = convert_profile(self.creator.exp_storage, assignment, configs[assignment.device_id], values)
                 profile_times = times
                 if times[0] > 0:
                     profile_times = np.insert(times, 0, 0.)
@@ -168,7 +169,7 @@ class DoeCampaignService:
     def assignment_details(self, assignments, configs):
         result = []
         for assignment in assignments:
-            _, unit, conversion = self._convert(assignment, configs[assignment.device_id], np.array([0.]))
+            _, unit, conversion = convert_profile(self.creator.exp_storage, assignment, configs[assignment.device_id], np.array([0.]))
             result.append({"role": assignment.role, "device_id": assignment.device_id,
                            "source_unit": ROLES[assignment.role].unit, "target_unit": unit,
                            "density_g_ml": 1.0 if configs[assignment.device_id]["type"] == "ismatec" else None, "conversion": conversion})
