@@ -1,6 +1,5 @@
 """PBM mesh comparison plots against an independent QMOM solution."""
 import csv
-from threading import Event
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -11,8 +10,11 @@ from PySide6.QtWidgets import (
     QLabel, QMessageBox, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from .analysis_budget import AnalysisBudget, budget_field
 from .comparison import compare_model
+from .mesh_grid import is_log_grid
 from .session import history, record_step, signature
+from .solver_choice import SolverChoice
 
 
 class ComparisonJob(QThread):
@@ -20,10 +22,10 @@ class ComparisonJob(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, case, model_index, experiment_index, parent, *, cancelled):
+    def __init__(self, case, model_index, experiment_index, parent, *, budget):
         super().__init__(parent)
         self.case, self.model_index, self.experiment_index = case, model_index, experiment_index
-        self.cancelled = cancelled
+        self.budget = budget
 
     def run(self):
         try:
@@ -31,12 +33,14 @@ class ComparisonJob(QThread):
                 self.case["ModelParameter"][self.model_index],
                 self.case["ExpData"][self.experiment_index], self.case["ProcInf"][self.experiment_index],
                 self.case["Solubility"], self.case["pbmsetting"],
-                cancelled=self.cancelled, progress=self.message.emit)
+                cancelled=self.budget.check, progress=self.message.emit, budget_expired=self.budget.expired)
         except InterruptedError:
-            self.failed.emit("PBM–QMOM comparison stopped.")
+            self.failed.emit("Time budget reached before the PBM comparison finished." if self.budget.expired()
+                             else "PBM–QMOM comparison stopped.")
         except Exception as error:
             self.failed.emit(str(error))
         else:
+            result["time_budget_s"] = self.budget.seconds
             self.completed.emit(result)
 
 
@@ -44,15 +48,18 @@ class ComparisonDialog(QDialog):
     def __init__(self, case, parent=None, *, model_index=None):
         super().__init__(parent)
         self.setWindowTitle("IMED | PBM–QMOM mesh comparison")
-        self.resize(1050, 800)
+        screen = self.screen().availableGeometry()
+        self.resize(min(1040, screen.width() - 24), min(670, screen.height() - 48))
+        self.setSizeGripEnabled(True)
         self.case = case
         self.result = None
         self.job = None
-        self.cancel_requested = Event()
-        # Diffrax specializes the event condition on the callback identity.
-        self.cancelled = self.cancel_requested.is_set
+        self.budget = AnalysisBudget()
         settings = case.get("pbmsetting")
         settings = settings if isinstance(settings, dict) else {}
+        self.numerics = SolverChoice(allow_archived=not is_log_grid(settings))
+        self.numerics.load_settings(settings)
+        self.time_budget = budget_field()
         self.model = QComboBox()
         self.model.addItems(f"Model {i+1}" for i in range(len(case["ModelParameter"])))
         self.model.setCurrentIndex(0 if model_index is None else model_index)
@@ -67,8 +74,16 @@ class ComparisonDialog(QDialog):
         self.cells.setRange(2, 10000)
         self.cells.setValue(int(settings.get("N", 250)))
         form = QFormLayout()
-        form.addRow("Model", self.model)
-        form.addRow("Experiment", self.experiment)
+        selection = QHBoxLayout()
+        selection.addWidget(self.model, 1)
+        selection.addWidget(QLabel("Experiment"))
+        selection.addWidget(self.experiment, 1)
+        form.addRow("Model", selection)
+        solver_controls = QHBoxLayout()
+        solver_controls.addWidget(self.numerics, 1)
+        solver_controls.addWidget(QLabel("Total time budget"))
+        solver_controls.addWidget(self.time_budget)
+        form.addRow("PBM solver", solver_controls)
         mesh = QWidget()
         row = QHBoxLayout(mesh)
         row.setContentsMargins(0, 0, 0, 0)
@@ -109,31 +124,37 @@ class ComparisonDialog(QDialog):
             buttons.addWidget(button)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addLayout(buttons)
+        layout.addWidget(self.status)
         layout.addWidget(note)
         layout.addWidget(self.tabs, 1)
-        layout.addWidget(self.status)
-        layout.addLayout(buttons)
-        self.controls = (self.model, self.experiment, self.lmax, self.cells)
+        self.controls = (self.model, self.experiment, self.lmax, self.cells, self.numerics, self.time_budget)
         for step in reversed(history(case)):
             if step["action"] != "pbm_qmom_comparison":
                 continue
             record = step["result"]
             index = int(step["model_index"])
-            saved_case = {**case, "pbmsetting": {"Lmin": 0., "Lmax": 250., "N": 250, **settings}}
-            if (index < self.model.count()
-                    and (model_index is None or index == model_index)
-                    and 0 <= int(record["experiment_index"]) < self.experiment.count()
-                    and step["signature"] == signature(saved_case, index, include_weights=False)):
+            if (not 0 <= index < self.model.count() or model_index not in (None, index)
+                    or not 0 <= int(record["experiment_index"]) < self.experiment.count()):
+                continue
+            mesh = record["settings"]
+            legacy_case = {**case, "pbmsetting": {"Lmin": 0., **settings, "Lmax": mesh["Lmax"], "N": mesh["N"]}}
+            if step["signature"] in (signature(case, index, include_weights=False),
+                                     signature(legacy_case, index, include_weights=False)):
                 self.model.setCurrentIndex(index)
                 self.experiment.setCurrentIndex(int(record["experiment_index"]))
-                self.lmax.setValue(float(record["settings"]["Lmax"]))
-                self.cells.setValue(int(record["settings"]["N"]))
+                self.lmax.setValue(float(mesh["Lmax"]))
+                self.cells.setValue(int(mesh["N"]))
+                self.numerics.load_settings(mesh)
+                self.time_budget.setValue(float(record.get("time_budget_s", 0.)))
                 self.show_result(record, remember=False)
                 break
         self.model.currentIndexChanged.connect(self.clear_result)
         self.experiment.currentIndexChanged.connect(self.clear_result)
         self.lmax.valueChanged.connect(self.clear_result)
         self.cells.valueChanged.connect(self.clear_result)
+        self.numerics.currentIndexChanged.connect(self.clear_result)
+        self.time_budget.valueChanged.connect(self.clear_result)
 
     def clear_result(self):
         self.result = None
@@ -146,13 +167,14 @@ class ComparisonDialog(QDialog):
     def start(self):
         if self.job is not None:
             return
-        self.cancel_requested.clear()
         self.clear_result()
+        self.budget.start(self.time_budget.value())
         settings = {"Lmin": 0., **self.case.get("pbmsetting", {}),
                     "Lmax": self.lmax.value(), "N": self.cells.value()}
-        self.request_case = {**self.case, "pbmsetting": settings}
-        self.job = ComparisonJob(self.request_case, self.model.currentIndex(),
-                                 self.experiment.currentIndex(), self, cancelled=self.cancelled)
+        settings = self.budget.apply(self.numerics.apply_settings(settings))
+        request_case = {**self.case, "pbmsetting": settings}
+        self.job = ComparisonJob(request_case, self.model.currentIndex(),
+                                 self.experiment.currentIndex(), self, budget=self.budget)
         for control in (*self.controls, self.run_button, self.close_button):
             control.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -164,7 +186,7 @@ class ComparisonDialog(QDialog):
 
     def stop(self):
         if self.job is not None:
-            self.cancel_requested.set()
+            self.budget.stop()
             self.stop_button.setEnabled(False)
             self.status.setText("Stopping comparison…")
 
@@ -241,17 +263,20 @@ class ComparisonDialog(QDialog):
             for ax in figure.axes:
                 ax.grid(alpha=.2)
             canvas.draw_idle()
-        timing = (f" PBM {result['pbm_seconds']:.3f} s · QMOM {result['qmom_seconds']:.3f} s"
+        pbm_label = "PBM (second solve)" if result.get("warm_timing") else "PBM"
+        timing = (f" {pbm_label} {result['pbm_seconds']:.3f} s · QMOM {result['qmom_seconds']:.3f} s"
                   f" · total {result['total_seconds']:.3f} s") if "pbm_seconds" in result else ""
+        bins_label = "log-spaced bins" if is_log_grid(result["settings"]) else "bins"
         self.status.setText(
             f"Model {self.model.currentIndex()+1} · Experiment {int(result['experiment_index'])+1} · "
-            f"Lmax {result['settings']['Lmax']:g} µm · {int(result['settings']['N'])} bins · "
+            f"{result.get('backend', self.numerics.currentText())} · "
+            f"Lmax {result['settings']['Lmax']:g} µm · {int(result['settings']['N'])} {bins_label} · "
             + (f"QMOM unavailable. {result['qmom_error']}" if "qmom_error" in result
                else "PBM and QMOM comparison complete.") + timing)
         self.export_button.setEnabled(True)
         if remember:
             record_step(self.case, "pbm_qmom_comparison", result, model_index=self.model.currentIndex(),
-                        context=signature(self.request_case, self.model.currentIndex(), include_weights=False))
+                         context=signature(self.case, self.model.currentIndex(), include_weights=False))
 
     def export_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export comparison", "pbm_qmom_comparison.csv",

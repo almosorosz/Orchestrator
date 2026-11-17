@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from ..distribution import cell_volumes
+from ..mesh_grid import grid_edges
 from ..solver import simulate
 from .cases import Case
 from .qmom import solve_ccas_qmom
@@ -100,7 +101,7 @@ def reference_values(reference, process):
 
 def pbm_values(count, concentration, csd, state, process, settings):
     cells = settings["N"]
-    edges = np.linspace(settings["Lmin"], settings["Lmax"], cells + 1)
+    edges = grid_edges(settings, cells)
     numbers = state[:cells] * np.diff(edges)[:, None]
     volume = cell_volumes(edges, process["ShapeFactor"])
     moments = csd[0]**np.arange(6)[:, None] @ numbers

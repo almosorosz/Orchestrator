@@ -10,6 +10,7 @@ from jax.experimental import io_callback
 from scipy.interpolate import interp1d
 
 from .distribution import cell_volumes, seed_number_density
+from .mesh_grid import grid_edges, is_log_grid
 from .solver import check_liquid_inventory
 
 # Match the precision used for the notebook comparisons.
@@ -259,10 +260,7 @@ def prepare_collisions(length, volume, kernel_code):
 
 def prepare_jax_case(parameters, experiment, process, solubility, settings):
     n = int(settings.get("N", 250))
-    lower, upper = settings.get("Lmin", 0.), settings.get("Lmax", 250.)
-    if n < 2 or not 0 <= lower < upper or not np.isfinite(upper):
-        raise ValueError("Use at least two bins and increasing nonnegative size bounds.")
-    edges = np.linspace(lower, upper, n + 1)
+    edges = grid_edges(settings, n)
     width = np.diff(edges)
     length = edges[1:] - width / 2
     shape = process["ShapeFactor"]
@@ -294,6 +292,8 @@ def prepare_jax_case(parameters, experiment, process, solubility, settings):
             daughters = np.exp(log_density - log_density.max())
         else:
             raise ValueError("Use a supported daughter law and a positive width for Gaussian breakage.")
+        if is_log_grid(settings):
+            daughters *= width
         daughters /= daughters @ volume
 
     temperature = np.asarray(experiment["TemperatureData"], dtype=float)

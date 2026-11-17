@@ -51,8 +51,8 @@ class MeshValidationTests(unittest.TestCase):
         for bins in counts:
             solutions.extend([None, outputs(bins)])
         with (patch("imed_python.mesh_validation.pbm_backend_label", return_value="JAX PBM (test)"),
-              patch("imed_python.mesh_validation.simulate", side_effect=solutions) as solve,
-              patch("imed_python.mesh_validation.monotonic", side_effect=[10, 11, 20, 22, 30, 33])):
+              patch("imed_python.comparison.simulate", side_effect=solutions) as solve,
+              patch("imed_python.comparison.monotonic", side_effect=[10, 11, 20, 22, 30, 33])):
             result = validate_meshes(case, 0, 0, counts)
         self.assertTrue(result["uses_jax"])
         self.assertEqual([call.args[-1]["N"] for call in solve.call_args_list], [20, 20, 30, 30, 40, 40])
