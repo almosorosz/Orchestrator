@@ -51,14 +51,15 @@ class DesignJob(QThread):
 
 
 class DesignDialog(QDialog):
-    def __init__(self, case, optimal, parent=None, *, workers=1):
+    def __init__(self, case, optimal, parent=None, *, workers=1, model_indices=None):
         super().__init__(parent)
         name = "D-Optimal Design" if optimal else "Model Discrimination"
         self.setWindowTitle(f"IMED | {name}")
         self.resize(800, 650)
         self.case, self.optimal = case, optimal
         self.workers = workers
-        self.models = fitted_models(case)
+        self.models = [(index, model) for index, model in fitted_models(case)
+                       if model_indices is None or index in model_indices]
         self.job = None
         self.recipe = None
         self.template = QComboBox()
@@ -140,32 +141,34 @@ class DesignDialog(QDialog):
         step = latest_step(case, action, context=context)
         if step is not None:
             saved = step["result"]
-            request = saved.get("request", {})
-            self.template.setCurrentIndex(int(request.get("template_index", 0)))
-            self.model.setCurrentIndex(int(request.get("model_index", 0)))
-            self.iterations.setValue(int(request.get("iterations", 5)))
-            self.samples.setValue(int(request.get("samples", 8)))
-            position = self.terms.findText(str(request.get("terms", "CSD")))
-            if position >= 0:
-                self.terms.setCurrentIndex(position)
-            for control, weight in zip(self.weights, np.asarray(request.get("weights", [])).reshape(-1)):
-                if optimal:
-                    control.setChecked(bool(weight))
-                else:
-                    control.setValue(float(weight))
-            conditions = request.get("conditions", {})
-            for key, control in (("batch", self.batch), ("concentration", self.concentration),
-                                 ("final_anti", self.final_anti)):
-                if key in conditions:
-                    control.setValue(float(conditions[key]))
-            for key, controls in (("temperature", self.temperatures), ("temperature_rates", self.temp_rates),
-                                  ("liquid_masses", self.masses), ("antisolvent_rates", self.anti_rates),
-                                  ("seed_bounds", self.seed)):
-                for control, value in zip(controls, np.asarray(conditions.get(key, [])).reshape(-1)):
-                    control.setValue(float(value))
+            self.load_request(saved.get("request", {}))
             self.show_recipe((float(saved["score"]), saved["experiment"], saved["process"]),
                              remember=False)
             self.export_button.setEnabled(True)
+
+    def load_request(self, request):
+        self.template.setCurrentIndex(int(request.get("template_index", 0)))
+        self.model.setCurrentIndex(int(request.get("model_index", 0)))
+        self.iterations.setValue(int(request.get("iterations", 5)))
+        self.samples.setValue(int(request.get("samples", 8)))
+        position = self.terms.findText(str(request.get("terms", "CSD")))
+        if position >= 0:
+            self.terms.setCurrentIndex(position)
+        for control, weight in zip(self.weights, np.asarray(request.get("weights", [])).reshape(-1)):
+            if self.optimal:
+                control.setChecked(bool(weight))
+            else:
+                control.setValue(float(weight))
+        conditions = request.get("conditions", {})
+        for key, control in (("batch", self.batch), ("concentration", self.concentration),
+                             ("final_anti", self.final_anti)):
+            if key in conditions:
+                control.setValue(float(conditions[key]))
+        for key, controls in (("temperature", self.temperatures), ("temperature_rates", self.temp_rates),
+                              ("liquid_masses", self.masses), ("antisolvent_rates", self.anti_rates),
+                              ("seed_bounds", self.seed)):
+            for control, value in zip(controls, np.asarray(conditions.get(key, [])).reshape(-1)):
+                control.setValue(float(value))
 
     @staticmethod
     def number(lower, upper):

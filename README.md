@@ -541,9 +541,18 @@ AIC score survive. Multiple survivors trigger model discrimination. One survivor
 with usable covariance triggers D-optimal design. A fit failure or unavailable
 comparison pauses the loop and reports the reason in the dashboard log.
 
-Each MODEL folder contains `recommendation.json` with the validated device
-profiles, units, process inputs and campaign ID. IMED also saves `fit.imed.json`.
-CrystaLoop launches the follow-up after recording and hardware cleanup, rechecks
+The loop opens the selected modeling page and fills it from the saved recordings.
+IMED displays Experimental Input and automatically opens Parameter Estimation,
+followed by the applicable design window. BO shows the input table, then the
+predictions and proposed recipe. The dashboard log follows the source selection,
+data import, calculations, files written and follow-up launch.
+
+Each MODEL folder contains `inputs/` with the completed run CSVs, a `model.log`,
+and BO or IMED input CSVs. A round that produces a recipe also saves model result
+CSVs and `recommendation.json` with the validated device profiles, units, process
+inputs and campaign ID. IMED also saves `fit.imed.json`. The final round archives
+its recordings and refreshes the modeling inputs. CrystaLoop launches each
+follow-up after recording and hardware cleanup, rechecks
 device connectivity and limits, then repeats until `max_followups` is reached.
 **Stop** discards any pending launch and requests cancellation from the model
 worker. An active solver call may take time to finish. End the final session to
@@ -563,6 +572,10 @@ variable seed mass, specify a calibrated `seed_pump` with `rpm` and
 `grams_per_second` and supply the seed D10, D50 and D90 in `recording.seed_percentiles`.
 Check that the configured startup conditions and auxiliary profiles deliver the
 same physical conditions the optimizer assumes.
+If both Control Panel and assigned DoE profiles are present, Dashboard Start
+asks which batch to use. For a physical Control Panel batch, leave
+`manual_simulation` empty. For a physical DoE, apply the actuator and monitor
+assignments after connecting the instruments.
 
 Dashboard/sidebar **Start** offers **Use Control Panel experiments** when the
 Control Panel has a manual batch. This runs the batch using the configured LOOP

@@ -106,26 +106,37 @@ Estimation** without a separate MAT file. The default recording root is
 
 ## Five-run simulation presets
 
-In **Settings → Load setup preset…**, select one of these complete setups.
+In **Settings → Load setup preset…**, select a backend and starting source.
 
-- [IMED five-run setup](imed_five_run_setup.json) starts with five simulated
-  seeded and unseeded cooling and antisolvent experiments. The saved SciPy PBM
-  case fits two kinetic parameters. D-optimal design then chooses the cooling
-  ramp for one follow-up experiment.
-- [BO five-run setup](bo_five_run_setup.json) starts with five seeded isothermal
-  experiments at 13, 15.5, 18, 20.5, and 23 °C. The saved BO settings minimize D50
-  and propose one follow-up recipe within the observed temperature range.
+| Backend | Settings-generated DoE | Control Panel profiles |
+| --- | --- | --- |
+| IMED | [IMED DoE preset](imed_five_run_setup.json) | [IMED Control Panel preset](imed_five_run_control_panel.json) |
+| BO | [BO DoE preset](bo_five_run_setup.json) | [BO Control Panel preset](bo_five_run_control_panel.json) |
+
+The IMED presets run seeded and unseeded cooling and antisolvent trials. They load
+two candidate SciPy PBMs. The first fits the nucleation and growth rate constants.
+The second also fits the growth supersaturation exponent. IMED imports the
+measurements into Experimental Input, opens Parameter Estimation, and switches to
+model discrimination or D-optimal design based on the fitted candidates.
+
+The BO presets run five seeded isothermal experiments at 13, 15.5, 18, 20.5, and
+23 °C. The app fills the BO experiment table, minimizes D50, and shows the
+prediction and proposal before starting the follow-up.
 
 Each preset loads the Control Panel devices, connects the simulators, applies the
-saved DoE and measurement assignments, and opens the main dashboard. Click
+saved profile and measurement assignments, and opens the main dashboard. Click
 **Start Experiment** there. CrystaLoop records the five starting experiments,
 runs the selected optimizer, and executes and records one follow-up. It creates
 `runs/simulated_loops/imed` or `runs/simulated_loops/bo` under the application's
-writable data directory with separate `experiments` and `models` folders. Use
+writable data directory with separate `experiments` and `models` folders. Each
+model round includes copies of the run CSVs, model inputs, modeling results and
+`model.log`. The Dashboard log shows the source, stage transitions and paths.
+The final follow-up's recordings appear in the modeling inputs when the loop
+reaches its configured limit. Use
 **End Session** before loading the other preset. The BO setup requires the BO
 runtime described in the [main README](../../README.md#bayesian-optimization).
 
-## Run the three-experiment validation DoE from Dashboard Start
+## Run the validation DoE from Dashboard Start
 
 Load `imed_validation_doe.json`, connect its simulated devices and apply the
 DoE assignments as above. In Settings, choose existing, writable Experiment and

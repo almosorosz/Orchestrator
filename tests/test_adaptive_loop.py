@@ -101,14 +101,23 @@ class AdaptiveLoopTests(unittest.TestCase):
             finally:
                 self.doCleanups()
 
-    def check_five_run_preset(self, backend, method):
+    def check_five_run_preset(self, backend, source="doe"):
         with TemporaryDirectory(dir=Path.cwd()) as directory:
             root = Path(directory)
             window = MainWindow()
             logs = []
+            stages = []
             window.log_message = lambda message, level="INFO": logs.append((level, message))
+            show_stage = window._loop_views.show_stage
+
+            def observe(stage, value, job):
+                show_stage(stage, value, job)
+                stages.append(stage)
+
+            window._loop_views.show_stage = observe
             try:
-                preset = PRESET.with_name(f"{backend}_five_run_setup.json")
+                suffix = "setup" if source == "doe" else "control_panel"
+                preset = PRESET.with_name(f"{backend}_five_run_{suffix}.json")
                 with patch("app.paths.DATA_DIR", root), \
                      patch("MAIN_WINDOW.QFileDialog.getOpenFileName", return_value=(str(preset), "")), \
                      patch("MAIN_WINDOW.QMessageBox.warning") as warning:
@@ -116,29 +125,60 @@ class AdaptiveLoopTests(unittest.TestCase):
                 warning.assert_not_called()
                 self.assertIs(window.stack.currentWidget(), window.dashboard_page)
                 self.assertTrue(all(device.simulated and device.is_connected for device in window.control_panel.hardware.values()))
-                self.assertEqual(len(window._assigned_doe_campaign.experiments), 5)
+                if source == "doe":
+                    self.assertEqual(len(window._assigned_doe_campaign.experiments), 5)
+                else:
+                    self.assertEqual(len(window.control_panel.experiments), 5)
+                    self.assertIsNone(window.create_experiments)
+                if backend == "imed":
+                    candidates = window.imed_page.panel.case["ModelParameter"]
+                    self.assertEqual(len(candidates), 2)
+                    self.assertFalse(np.array_equal(candidates[0]["paraset"], candidates[1]["paraset"]))
                 output = root / "runs" / "simulated_loops" / backend
                 self.assertFalse(list((output / "experiments").glob("campaign_*")))
                 window.dashboard_page.start_button.click()
                 self.assertIsNotNone(window._adaptive_loop, logs)
-                self.assertTrue(self.wait_for(lambda: window._adaptive_loop is None, timeout=180), logs)
+                self.assertTrue(self.wait_for(lambda: window._adaptive_loop is None, timeout=300), logs)
                 self.assertFalse(any(level == "ERROR" for level, _ in logs), logs)
                 recommendation, = (output / "models").glob("*/recommendation.json")
                 recipe = json.loads(recommendation.read_text())
-                self.assertEqual(recipe["method"], method)
+                self.assertIn(recipe["method"], {"BO"} if backend == "bo" else {"D-optimal design", "Model discrimination"})
                 self.assertEqual(recipe["observations"], 5)
                 summaries = [json.loads(path.read_text()) for path in (output / "experiments").glob("*/summary.json")]
                 self.assertEqual(sorted(len(summary["runs"]) for summary in summaries), [1, 5])
                 self.assertTrue(all(summary["status"] == "completed" and summary["recording_complete"]
                                     for summary in summaries))
+                self.assertEqual(len(list(recommendation.parent.glob("inputs/*/execution.csv"))), 5)
+                self.assertTrue(recommendation.with_name("device_targets.csv").is_file())
+                self.assertEqual(len(list((output / "models").glob("*/inputs/*/execution.csv"))), 6)
+                if backend == "bo":
+                    self.assertEqual(stages, ["bo_inputs", "bo_result", "bo_inputs"])
+                    self.assertEqual(len(window.bo_page.state["runs"]), 6)
+                    self.assertIsNotNone(window.bo_page.proposal)
+                    self.assertTrue((recommendation.parent / "bo" / "predictions.csv").is_file())
+                else:
+                    self.assertEqual([stage for stage in stages if stage != "imed_generation"],
+                                     ["imed_inputs", "imed_pe", "imed_fits", "imed_design", "imed_result", "imed_inputs"])
+                    self.assertEqual(len(window.imed_page.panel.case["ExpData"]), 6)
+                    self.assertEqual(len(pd.read_csv(recommendation.parent / "imed" / "pe_models.csv")), 2)
+                messages = "\n".join(message for _, message in logs)
+                self.assertIn("Saved the", messages)
+                self.assertIn("Launched automatic follow-up", messages)
+                self.assertIn("Control Panel profiles" if source != "doe" else "Settings DoE", messages)
             finally:
                 self.close_window(window)
 
     def test_load_and_start_bo_five_run_preset(self):
-        self.check_five_run_preset("bo", "BO")
+        self.check_five_run_preset("bo")
 
     def test_load_and_start_imed_five_run_preset(self):
-        self.check_five_run_preset("imed", "D-optimal design")
+        self.check_five_run_preset("imed")
+
+    def test_load_and_start_bo_control_panel_preset(self):
+        self.check_five_run_preset("bo", "control-panel")
+
+    def test_load_and_start_imed_control_panel_preset(self):
+        self.check_five_run_preset("imed", "control-panel")
 
     def test_automatic_preset_preparation_rejects_real_device_configs(self):
         with TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -153,7 +193,7 @@ class AdaptiveLoopTests(unittest.TestCase):
                      patch.object(window.control_panel, "apply_loaded_configuration") as apply:
                     window.load_setup_preset()
                 apply.assert_not_called()
-                self.assertIn("simulated DoE", warning.call_args.args[2])
+                self.assertIn("simulated experiment source", warning.call_args.args[2])
             finally:
                 self.close_window(window)
 
@@ -228,7 +268,7 @@ class AdaptiveLoopTests(unittest.TestCase):
     def test_stop_while_modeling_prevents_a_followup(self):
         started = Event()
 
-        def wait_for_stop(session, manifest, cancelled, report):
+        def wait_for_stop(session, manifest, cancelled, report, **kwargs):
             started.set()
             deadline = monotonic() + 15
             while not cancelled() and monotonic() < deadline:

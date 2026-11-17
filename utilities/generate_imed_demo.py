@@ -25,7 +25,7 @@ BO_CASES = tuple((f"Seeded isothermal at {temp:g} °C", True, temp, 0)
                  for temp in (13, 15.5, 18, 20.5, 23))
 
 
-def generate(path, recording_folder, *, mode=None):
+def generate(path, recording_folder, *, mode=None, source="doe"):
     root = Path(__file__).resolve().parents[1]
     examples = root / "examples" / "configurations"
     example = json.loads((examples / "crystallization_system_simulated.json")
@@ -89,17 +89,35 @@ def generate(path, recording_folder, *, mode=None):
         case = {"Solubility": solubility, "pbmsetting": {**mesh, "Numerics": "conservative"}}
         setup = {"max_followups": 1}
         if mode == "imed":
-            case.update(ModelParameter=[validation_model()],
+            base, alternative = validation_model(), validation_model()
+            alternative["Name"] = "Validation PBM with fitted growth order"
+            alternative["paraset"][13] = (1, 1., .8, 1.25)
+            case.update(ModelParameter=[base, alternative],
                         objweightfactor={"W1": 0., "W2": 1., "W3": 1., "Terms": "D10 D50 D90"},
-                        pyfitsettings={"global_iterations": 0, "population_size": 5, "local_evaluations": 60})
+                        pyfitsettings={"global_iterations": 0, "population_size": 5, "local_evaluations": 100})
             setup = json.loads((examples / "imed_validation_loop.json").read_text(encoding="utf-8"))
+            setup["imed"]["delta_aic"] = 6
             setup["imed"]["conditions"].update(temperature=[21, 18], temperature_rates=[0.11, 0.3])
         modeling = pack_imed_settings(case)
         if mode == "bo":
             modeling.update(active_workflow="bo", bo=json.loads(
                 (examples / "bo_validation_loop.json").read_text(encoding="utf-8")))
+        if source == "control-panel":
+            setup.update(manual_assignments=ASSIGNMENTS,
+                         manual_simulation={"hold_start_s": 35, "end_s": 60, "monitors": MONITORS})
         environment.update(prepare_simulated_loop="true", loop_backend=mode, loop_setup=json.dumps(setup))
-    write_preset(path, {"devices": devices, "profiles": {}, "experiments": [],
+    experiments, profiles = [], {}
+    if source == "control-panel":
+        for saved in frames.values():
+            frame = pd.DataFrame(**saved)
+            converted = {device: frame[role] / 60 if role in {"AS", "clean_sol"} else frame[role]
+                         for role, device in ASSIGNMENTS.items()}
+            experiments.append(pd.DataFrame({"time_s": times, **converted}).to_dict(orient="split"))
+        first = pd.DataFrame(**experiments[0])
+        profiles = {device: first[["time_s", device]].rename(columns={device: "value"}).to_dict(orient="split")
+                    for device in ASSIGNMENTS.values()}
+        snapshot = None
+    write_preset(path, {"devices": devices, "profiles": profiles, "experiments": experiments,
                         "recording_folder": str(recording_folder), "simulation_speed": 100,
                         "system_topology": example["system_topology"]},
                  ExperimentProfileParameters(),
@@ -113,5 +131,8 @@ if __name__ == "__main__":
     parser.add_argument("preset", type=Path)
     parser.add_argument("--recordings", type=Path, default=Path("data/imed_simulated_runs"))
     parser.add_argument("--mode", choices=("imed", "bo"), help="Generate a five-run automatic loop preset.")
+    parser.add_argument("--source", choices=("doe", "control-panel"), default="doe")
     args = parser.parse_args()
-    generate(args.preset, args.recordings, mode=args.mode)
+    if args.source == "control-panel" and args.mode is None:
+        parser.error("--source control-panel needs --mode")
+    generate(args.preset, args.recordings, mode=args.mode, source=args.source)

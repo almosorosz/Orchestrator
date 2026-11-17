@@ -362,10 +362,13 @@ class ControlPanel(QMainWindow):
         return dialog, QVBoxLayout(dialog)
 
     @staticmethod
-    def show_dialog(dialog, layout):
+    def show_dialog(dialog, layout, *, modeless=False):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        if modeless:
+            dialog.show()
+            return dialog
         dialog.exec()
         dialog.deleteLater()
 
@@ -417,6 +420,10 @@ class ControlPanel(QMainWindow):
         self._set_case(case)
         self.show_message("Restored IMED settings from the setup preset.")
 
+    def display_loop_case(self, case, folder):
+        self._set_case(case)
+        self.campaign_path = Path(folder)
+
     def _set_case(self, case, *, source=None):
         self.case = case
         self.source, self.campaign_path = source, None
@@ -431,7 +438,7 @@ class ControlPanel(QMainWindow):
         case["PythonWorkflow"]["cpu_workers"] = self.workers.value()
         return case
 
-    def show_inputs(self):
+    def show_inputs(self, *, modeless=False):
         dialog, layout = self.dialog("IMED | Initial DoE / Experimental input")
         layout.addWidget(QLabel("Review saved experimental inputs"))
         tabs = QTabWidget()
@@ -471,7 +478,7 @@ class ControlPanel(QMainWindow):
         if self.campaign_path is not None and experiments:
             self.add_recording_tab(tabs, experiments)
             tabs.setCurrentIndex(tabs.count() - 1)
-        self.show_dialog(dialog, layout)
+        return self.show_dialog(dialog, layout, modeless=modeless)
 
     def add_recording_tab(self, tabs, experiments):
         page = QWidget()

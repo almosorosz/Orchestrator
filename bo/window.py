@@ -107,6 +107,7 @@ class BOWindow(QWidget):
         self.imed_case = imed_case
         self.state = empty_settings()
         self.job = None
+        self.loop_busy = False
         self.revision = 0
         self.rendering = False
         self.proposal = None
@@ -120,7 +121,7 @@ class BOWindow(QWidget):
         self.tabs = QTabWidget()
         layout = QVBoxLayout(self)
         toolbar = QHBoxLayout()
-        title = QLabel("Bayesian optimization")
+        title = QLabel("📈  Bayesian optimization")
         title.setStyleSheet("font-size: 22px; font-weight: 700;")
         toolbar.addWidget(title, 1)
         if imed_case is not None:
@@ -562,7 +563,7 @@ class BOWindow(QWidget):
     def update_buttons(self):
         if not hasattr(self, "propose_button"):
             return
-        available = self.job is None
+        available = self.job is None and not self.loop_busy
         channel = self.channel_choice.currentData()
         self.propose_button.setEnabled(available and len(self.state["selected"]) >= 2)
         self.preview_button.setEnabled(available and channel is not None)
@@ -572,7 +573,7 @@ class BOWindow(QWidget):
         self.export_button.setEnabled(self.proposal is not None)
 
     def run_job(self, task, callback, *, check_profile=False):
-        if self.job is not None:
+        if self.job is not None or self.loop_busy:
             return
         self.status.setText("Preparing Bayesian optimization…")
         self.job = BOJob(task)

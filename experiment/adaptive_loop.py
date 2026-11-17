@@ -10,6 +10,7 @@ import numpy as np
 
 from bo.profiles import Profile, case_runs, make_profile
 from experiment.doe_campaign import ROLES, convert_profile
+from experiment import loop_outputs
 from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
 from experiment.recording import atomic_json
 from hardware_devices.capabilities import is_monitor_only
@@ -33,7 +34,8 @@ def default_setup():
         "recording": {"start_s": 0, "end_s": None, "concentration_multiplier": 1,
                       "initial_concentration": None, "scale_direction": -1, "smoothing": 5,
                       "seed_percentiles": [], "no_feed": False},
-        "manual_assignments": {}, "followup_start_s": 0, "support_profiles": {}, "seed_pump": None,
+        "manual_assignments": {}, "manual_simulation": None, "followup_start_s": 0,
+        "support_profiles": {}, "seed_pump": None,
         "imed": {"delta_aic": 2, "iterations": 5, "covariance_samples": 8,
                  "equilibration_s": 5, "conditions": {}},
     }
@@ -68,6 +70,20 @@ def validate_setup(updates):
             or any(not isinstance(device, str) or not device for device in manual.values())
             or len(set(manual.values())) != len(manual)):
         raise ValueError("Map each manual profile role to a distinct control device.")
+    if data["manual_simulation"] is not None:
+        from imed_python.demo_campaign import MONITOR_TYPES
+
+        simulation = _merge({"hold_start_s": None, "end_s": None, "monitors": {}},
+                            data["manual_simulation"], "manual PBM simulation")
+        hold = _number(simulation["hold_start_s"], "simulated equilibration start", 1e-12)
+        if _number(simulation["end_s"], "simulated recording end") <= hold:
+            raise ValueError("Simulation end must follow the equilibration start.")
+        monitors = simulation["monitors"]
+        if (not isinstance(monitors, dict) or set(monitors) != set(MONITOR_TYPES)
+                or any(not isinstance(device, str) or not device for device in monitors.values())
+                or len(set(monitors.values())) != len(monitors)):
+            raise ValueError("Assign a distinct simulated device for each PBM telemetry channel.")
+        data["manual_simulation"] = simulation
     mapping = data["channels"]
     if (not isinstance(mapping, dict) or set(mapping) - set(CHANNELS)
             or any(not isinstance(value, str) for value in mapping.values())):
@@ -405,12 +421,13 @@ class AdaptiveLoop:
         ExperimentDefinition.from_frame(ExperimentDefinition(role, (profile,)).to_frame(), self.configs)
         return profile
 
-    def _read_batch(self, manifest):
+    def _read_batch(self, manifest, target, report):
         folder = Path(manifest["campaign_folder"])
         runs = campaign_runs(folder)
         identities = {read_json(file.with_name("run.json"))["experiment_id"] for _, _, file in runs}
         if identities != set(manifest["experiments"]) or len(identities) != len(runs):
             raise ValueError("Recorded experiment identities differ from the completed campaign manifest.")
+        loop_outputs.saved_recordings(target, runs, report)
         demo = import_simulated_campaign(folder)
         if demo is not None:
             return demo["ExpData"], demo["ProcInf"]
@@ -433,7 +450,9 @@ class AdaptiveLoop:
             processes.append({**process, "No": number or len(processes) + 1})
         return experiments, processes
 
-    def recommend(self, manifest, cancelled, report):
+    def recommend(self, manifest, cancelled, report, *, publish=None, collect_only=False):
+        publish = publish or (lambda stage, payload: None)
+
         def progress(message):
             if cancelled():
                 raise InterruptedError("Modeling stopped.")
@@ -441,12 +460,29 @@ class AdaptiveLoop:
 
         if manifest["campaign_id"] in self.used_recordings:
             raise ValueError("This campaign was already modeled.")
-        progress("Importing completed recordings")
-        experiments, processes = self._read_batch(manifest)
+        target = Path(manifest["model_path"])
+        progress(f"Importing {len(manifest['experiments'])} completed recordings into {self.mode.upper()}")
+        experiments, processes = self._read_batch(manifest, target, progress)
         if self.mode == "bo":
-            profiles, process, details = self._recommend_bo(experiments, processes, manifest, progress)
+            state = self._collect_bo(experiments, processes, manifest)
+            loop_outputs.bo_inputs(target, state)
+            publish("bo_inputs", state)
         else:
-            profiles, process, details = self._recommend_imed(experiments, processes, cancelled, progress)
+            self.case["ExpData"] = [*self.case.get("ExpData", []), *experiments]
+            self.case["ProcInf"] = [*self.case.get("ProcInf", []), *processes]
+            self.case[PE_WEIGHTS_KEY] = {**{f"W{i}": weight for i, weight in enumerate(self.weights, 1)},
+                                         "Terms": self.size_term}
+            loop_outputs.imed_inputs(target, self.case)
+            publish("imed_inputs", {"case": deepcopy(self.case), "folder": manifest["campaign_folder"]})
+        progress(f"Saved {self.mode.upper()} inputs and recording CSVs to {target}")
+        if collect_only:
+            self.used_recordings.add(manifest["campaign_id"])
+            progress("Follow-up limit reached. Final measurements were added to the modeling inputs.")
+            return None
+        if self.mode == "bo":
+            profiles, process, details = self._recommend_bo(state, progress, publish)
+        else:
+            profiles, process, details = self._recommend_imed(experiments, processes, cancelled, progress, publish, target)
         progress("Validating the recommended experiment")
         campaign = self._compile_recipe(profiles, process)
         experiment = campaign.experiments[0]
@@ -457,17 +493,17 @@ class AdaptiveLoop:
                    "input_campaign_id": manifest["campaign_id"], "campaign": asdict(campaign),
                    "process": process_state, "crystallization_window_s": self.windows[experiment.experiment_id],
                    **details}
-        target = Path(manifest["model_path"])
         if self.mode == "imed":
             from imed_python.native_case import save_native_case
 
             save_native_case(target / "fit.imed.json", self.case)
+        loop_outputs.modeled_recipe(target, profiles, campaign, details.get("predictions"))
         atomic_json(target / "recommendation.json", payload)
+        progress(f"Saved the {details['method']} recommendation and device-target CSVs to {target}")
         self.used_recordings.add(manifest["campaign_id"])
         return campaign
 
-    def _recommend_bo(self, experiments, processes, manifest, report):
-        from bo.optimizer import propose
+    def _collect_bo(self, experiments, processes, manifest):
         from bo.physical_fit import initial_spec
 
         case = {"ExpData": experiments, "ProcInf": processes, "Solubility": self.case.get("Solubility")}
@@ -481,15 +517,24 @@ class AdaptiveLoop:
                 spec = initial_spec(channel, selected)
                 if spec is not None:
                     self.bo["physical_profiles"][channel] = spec
-        result = propose(self.bo, report=report)
+        self.bo["source"] = manifest["campaign_folder"]
+        return deepcopy(self.bo)
+
+    def _recommend_bo(self, state, report, publish):
+        from bo.optimizer import propose
+
+        report("BO is fitting response models and searching for the next experiment")
+        result = propose(state, report=report)
+        publish("bo_result", result)
         seed = result.profiles.get("seed")
         process = {**self.process, "SeedMass": float(seed.values[0]) if seed is not None else self.process["SeedMass"]}
         return result.profiles, process, {"method": "BO", "acquisition": result.acquisition,
-                                           "predictions": result.predictions, "observations": len(selected)}
+                                           "predictions": result.predictions, "observations": len(state["selected"])}
 
-    def _recommend_imed(self, experiments, processes, cancelled, report):
-        self.case["ExpData"] = [*self.case.get("ExpData", []), *experiments]
-        self.case["ProcInf"] = [*self.case.get("ProcInf", []), *processes]
+    def _recommend_imed(self, experiments, processes, cancelled, report, publish, target):
+        from imed_python.session import pack_fit, pe_signatures, record_step, signature
+
+        publish("imed_pe", deepcopy(self.case))
         solubility = self.case["Solubility"]
         objective = FitObjective(self.case["ExpData"], self.case["ProcInf"], solubility,
                                  self.pe_mesh, self.weights, self.size_term, cancelled=cancelled)
@@ -498,13 +543,25 @@ class AdaptiveLoop:
         fits, models = {}, self.case["ModelParameter"]
         for index, model in enumerate(models):
             report(f"IMED parameter estimation · model {index + 1} of {len(models)}")
-            fit = fit_model(model, objective, workers=self.workers, cancelled=cancelled, progress=report, **options)
+            fit = fit_model(model, objective, workers=self.workers, cancelled=cancelled, progress=report,
+                            generation_progress=lambda generation, mean, best, i=index:
+                            publish("imed_generation", (i, generation, mean, best)), **options)
             if not fit.converged:
                 raise ValueError(f"IMED parameter estimation did not converge for model {index + 1}.")
             fits[index] = fit
         survivors, scores = surviving_models(fits, objective.sample_count, self.setup["imed"]["delta_aic"])
+        if scores:
+            best = min(scores.values())
+            for index, score_value in scores.items():
+                decision = "retained" if index in survivors else "eliminated"
+                report(f"IMED model {index + 1} {decision} with ΔAIC {score_value - best:.3g}")
         fitted = [{**model, "para": fit.parameters, "covmat": fit.covariance,
                    "SSR": fit.ssr, "AICVector": fit.aic} for model, fit in zip(models, fits.values())]
+        for index, fit in fits.items():
+            record_step(self.case, "parameter_estimation", pack_fit(fit), model_index=index,
+                        context=pe_signatures(self.case, index)[0])
+        loop_outputs.imed_fits(target, models, fits, scores, survivors)
+        publish("imed_fits", fits)
         self.case["ModelParameter"] = fitted
         settings = self.case["pbmsetting"]
         settings = {**settings, "N": int(settings.get("N", 250))}
@@ -519,16 +576,25 @@ class AdaptiveLoop:
             samples = parameter_samples(model, self.setup["imed"]["covariance_samples"])
             score = partial(d_optimal_log_score, model, solubility=solubility, settings=settings,
                             enabled_terms=[weight > 0 for weight in self.weights], samples=samples)
-        report(f"IMED {method} · {len(survivors)} surviving model(s)")
+        report(f"Saved IMED fit CSVs. {len(survivors)} surviving model(s) will enter {method}")
         options = self.setup["imed"]
         conditions = {**options["conditions"], "equilibration_s": options["equilibration_s"]}
         design_experiment = {**experiments[-1]}
         if conditions["seed_bounds"][1] > 0:
             design_experiment["InitialCSDsData"] = (model_inputs(True)[1]["InitialCSDsData"] if self.demo
                                                     else seed_distribution(self.setup["recording"]["seed_percentiles"]))
+        request = {"template_index": len(self.case["ExpData"]) - 1, "model_index": 0,
+                   "iterations": options["iterations"], "samples": options["covariance_samples"],
+                   "terms": "D10 D50 D90", "weights": self.weights, "conditions": conditions}
+        publish("imed_design", {"case": deepcopy(self.case), "method": method,
+                                "survivors": survivors, "request": request})
         value, proposal, process = optimize_recipe(
             design_experiment, processes[-1], conditions, score,
             iterations=options["iterations"], cancelled=cancelled, workers=self.workers)
+        action = "d_optimal_design" if len(survivors) == 1 else "model_discrimination"
+        record_step(self.case, action, {"score": value, "experiment": proposal, "process": process, "request": request},
+                    context="|".join(signature(self.case, index) for index in survivors))
+        publish("imed_result", {"case": deepcopy(self.case), "result": (value, proposal, process)})
         profiles = {"temperature": Profile(*proposal["TemperatureData"], method),
                     "feed": Profile(*proposal["FlowRateData"], method)}
         process["InitialConcentration"] = options["conditions"]["concentration"]

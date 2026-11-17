@@ -40,7 +40,6 @@ from gui.pages.dashboard_page             import DashboardPage
 from gui.pages.experiment_page            import ExperimentPage
 from gui.pages.plots_page                 import PlotsPage
 from gui.pages.sentinel_page                 import SentinelPage
-from gui.pages.modeling_page              import ModelingPage
 from bo.settings                          import empty_settings as empty_bo_settings, validate_settings as validate_bo_settings
 from bo.window                            import BOWindow
 from gui.pages.imed_page                  import IMEDPage
@@ -79,6 +78,7 @@ from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
 from experiment.adaptive_loop import AdaptiveLoop, check_loop_folders, validate_setup
 from gui.loop_model_job import LoopModelJob
+from gui.loop_model_views import LoopModelViews
 import logging
 
 class MainWindow(QMainWindow):
@@ -331,6 +331,7 @@ class MainWindow(QMainWindow):
         self._adaptive_loop = None
         self._loop_model_job = None
         self._loop_recommendation = None
+        self._loop_views = LoopModelViews(self)
         self._loop_launch_timer = QTimer(self)
         self._loop_launch_timer.setInterval(100)
         self._loop_launch_timer.timeout.connect(self._launch_recommendation)
@@ -1653,23 +1654,36 @@ class MainWindow(QMainWindow):
     def _model_completed_campaign(self, manifest):
         if self._adaptive_loop is None or self.CONTROLLER.process_stop:
             return
-        if self._adaptive_loop.complete:
-            self._cancel_adaptive_loop()
-            self.execution.stop_execution()
-            self.set_buttons_enabled(True)
-            self.dashboard_page.set_monitoring_state(False)
-            self.dashboard_page.set_omni_status("Completed")
-            self.dashboard_page.set_model_status("Completed")
-            self.log_message("Automatic LOOP completed its configured follow-up experiments.", "SUCCESS")
-            return
         job = self._loop_model_job = LoopModelJob(self._adaptive_loop, manifest, self)
+        job.stage.connect(self._show_loop_model_stage)
         job.progress.connect(self._log_loop_model_progress)
         job.finished.connect(self._on_loop_model_finished)
+        operation = "collecting final observations" if job.collect_only else "starting automated modeling"
+        self.log_message(f"{self._adaptive_loop.mode.upper()} is {operation}. MODEL folder {manifest['model_path']}", "INFO")
         job.start()
+
+    @Slot(str, object)
+    def _show_loop_model_stage(self, stage, value):
+        job = self._loop_model_job
+        if job is not None and self._adaptive_loop is job.session and not self.CONTROLLER.process_stop:
+            try:
+                self._loop_views.show_stage(stage, value, job)
+            except Exception as error:
+                self._fail_adaptive_loop(f"Could not display the modeling stage: {error}")
+
+    def _complete_adaptive_loop(self):
+        self._cancel_adaptive_loop()
+        self.execution.stop_execution()
+        self.set_buttons_enabled(True)
+        self.dashboard_page.set_monitoring_state(False)
+        self.dashboard_page.set_omni_status("Completed")
+        self.dashboard_page.set_model_status("Completed")
+        self.log_message("Automatic LOOP completed its configured follow-up experiments.", "SUCCESS")
 
     @Slot(str)
     def _log_loop_model_progress(self, message):
         if self._adaptive_loop is not None:
+            self._loop_views.progress(message, self._adaptive_loop.mode)
             self.log_message(message, "INFO")
 
     @Slot()
@@ -1682,9 +1696,13 @@ class MainWindow(QMainWindow):
         if job.error is not None:
             self._fail_adaptive_loop(str(job.error))
             return
+        if job.collect_only:
+            self._complete_adaptive_loop()
+            return
         self.execution.native_model_completed()
         self._loop_recommendation = job.recommendation
-        self._launch_recommendation()
+        self.log_message(f"Recommendation ready. Preparing {job.recommendation.name} for execution.", "INFO")
+        QTimer.singleShot(1500, self._launch_recommendation)
 
     @Slot()
     def _launch_recommendation(self):
@@ -1699,6 +1717,7 @@ class MainWindow(QMainWindow):
             return
         self._loop_launch_timer.stop()
         self._loop_recommendation = None
+        self._loop_views.close()
         if dashboard is not None:
             self.end_experiment_session(automatic=True)
             if self.experiment_page.dashboard is not None:
@@ -1715,10 +1734,12 @@ class MainWindow(QMainWindow):
             return
         if self._start_loop_campaign(campaign):
             session.followups += 1
+            self.log_message(f"Launched automatic follow-up {session.followups} ({campaign.name}).", "SUCCESS")
 
     def _cancel_adaptive_loop(self):
         self._adaptive_loop = self._loop_recommendation = None
         self._loop_launch_timer.stop()
+        self._loop_views.close()
         if self._loop_model_job is not None:
             self._loop_model_job.requestInterruption()
 
@@ -1832,10 +1853,13 @@ class MainWindow(QMainWindow):
                 from app.paths import DATA_DIR
 
                 backend = environment.get("loop_backend")
+                manual = bool(panel.get("experiments"))
+                doe = bool(data.get("generated_doe"))
                 if (backend not in {"bo", "imed"} or modeling_payload is None
-                        or modeling_payload["active_workflow"] != backend or not data.get("generated_doe")
-                        or panel.get("experiments") or not all(cfg.get("simulated") is True for cfg in panel["devices"].values())):
-                    raise ValueError("Automatic preparation requires a simulated DoE and matching BO or IMED settings.")
+                        or modeling_payload["active_workflow"] != backend or manual == doe
+                        or (manual and loop_setup["manual_simulation"] is None)
+                        or not all(cfg.get("simulated") is True for cfg in panel["devices"].values())):
+                    raise ValueError("Automatic preparation requires one simulated experiment source and matching BO or IMED settings.")
                 root = DATA_DIR / "runs" / "simulated_loops" / backend
                 experiments, models = root / "experiments", root / "models"
                 for folder in (experiments, models):
@@ -1887,10 +1911,11 @@ class MainWindow(QMainWindow):
             self.bo_page.restore(bo_settings)
             self.modeling_workflow = modeling_payload["active_workflow"] if modeling_payload else "imed"
             if prepare_simulated:
-                self._prepare_loaded_simulated_doe()
+                self._prepare_loaded_simulated_campaign()
                 self.switch_page(self.stack.indexOf(self.dashboard_page))
                 self._update_archive_roots()
-                self.log_message(f"Simulated {backend.upper()} setup loaded. Dashboard Start is ready.", "SUCCESS")
+                source = "Control Panel profiles" if manual else "Settings DoE"
+                self.log_message(f"Simulated {backend.upper()} setup loaded from {source}. Dashboard Start is ready.", "SUCCESS")
                 return
             page = self.bo_page if self.modeling_workflow == "bo" else self.imed_page
             self.switch_page(self.stack.indexOf(page))
@@ -1902,7 +1927,7 @@ class MainWindow(QMainWindow):
         except Exception as error:
             QMessageBox.warning(self, "Preset load failed", str(error))
 
-    def _prepare_loaded_simulated_doe(self):
+    def _prepare_loaded_simulated_campaign(self):
         from experiment.doe_campaign import DoeCampaignService
         from hardware_devices.simulated import SimulatedDevice
 
@@ -1910,17 +1935,22 @@ class MainWindow(QMainWindow):
         if not all(isinstance(device, SimulatedDevice) for device in panel.hardware.values()):
             raise ValueError("Automatic preparation only connects simulated devices.")
         configs, _ = panel.collect_current_configuration()
-        doe = DoeCampaignService(self.create_experiments)
-        if not doe.imed_simulations:
-            raise ValueError("The preset needs simulated process telemetry for the starting DoE.")
-        campaign = doe.compile(self._doe_assignments, configs, self._saved_doe_monitors)
+        monitors = tuple(self._saved_doe_monitors or ())
+        if self.create_experiments is None:
+            campaign = self._manual_loop_campaign(configs, monitors)
+        else:
+            doe = DoeCampaignService(self.create_experiments)
+            if not doe.imed_simulations:
+                raise ValueError("The preset needs simulated process telemetry for the starting DoE.")
+            campaign = doe.compile(self._doe_assignments, configs, monitors)
         ids = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
         ids.update(campaign.monitor_device_ids)
         for key in sorted(ids):
             if not panel.device_widgets[key].connect_device():
                 raise ValueError(f"Could not connect simulated device {key}.")
         panel.update_global_status()
-        self._apply_doe_campaign(campaign, configs)
+        if self.create_experiments is not None:
+            self._apply_doe_campaign(campaign, configs)
 
 
     def log_message(self, message, level="INFO"):
@@ -2068,6 +2098,8 @@ class MainWindow(QMainWindow):
     def _choose_loop_source(self):
         if not self.control_panel.experiments:
             return "doe"
+        if self.create_experiments is None:
+            return "manual"
         dialog = QMessageBox(self)
         dialog.setWindowTitle("Start LOOP")
         dialog.setText("Choose the experiments to run before MODEL.")
@@ -2109,20 +2141,43 @@ class MainWindow(QMainWindow):
             if not all(os.path.isdir(path) for path in (self.CONTROLLER.omni_folder, self.CONTROLLER.model_folder)):
                 self.log_message('Experiment and MODEL folders must exist.', 'ERROR')
                 return
+        source_label = "Settings DoE" if source == "doe" else "Control Panel profiles"
+        self.log_message(f"Dashboard LOOP selected {source_label}.", "INFO")
         if source == "doe":
             return self._choose_doe_campaign(True)
         configs, _ = panel.collect_current_configuration()
-        try:
-            experiments = tuple(
-                ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
-                for number, frame in enumerate(panel.experiments, 1)
-            )
-        except (ValueError, TypeError) as error:
-            self.log_message(f"Cannot start Control Panel experiments: {error}", "ERROR")
-            return
         monitors = tuple(key for key, config in configs.items()
                          if is_monitor_only(config) and panel.device_widgets[key].is_connected())
-        return self._start_loop_campaign(Campaign("Control Panel experiments", experiments, monitor_device_ids=monitors))
+        try:
+            campaign = self._manual_loop_campaign(configs, monitors)
+        except (ValueError, TypeError, KeyError, StopIteration) as error:
+            self.log_message(f"Cannot start Control Panel experiments: {error}", "ERROR")
+            return
+        return self._start_loop_campaign(campaign)
+
+    def _manual_loop_campaign(self, configs, monitors):
+        experiments = tuple(ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
+                            for number, frame in enumerate(self.control_panel.experiments, 1))
+        settings = self.settings_page
+        simulation = settings.loop_setup.get("manual_simulation")
+        if simulation is not None and settings.loop_backend.currentData() != "external":
+            from imed_python.demo_campaign import CONTROL_TYPES, VERSION, compile_simulation
+
+            setup = validate_setup(settings.loop_setup)
+            controls, simulation = setup["manual_assignments"], setup["manual_simulation"]
+            if not set(CONTROL_TYPES) <= controls.keys():
+                raise ValueError("Map all PBM simulation actuator roles to Control Panel devices.")
+            prepared = []
+            for experiment in experiments:
+                profiles = {profile.device_id: profile for profile in experiment.profiles}
+                if not {controls[role] for role in CONTROL_TYPES} <= profiles.keys():
+                    raise ValueError(f"{experiment.name}: include profiles for all PBM simulation actuators.")
+                spec = {**simulation, "version": VERSION, "start_s": 0, "label": experiment.name,
+                        "seeded": profiles[controls["seed"]].points[0].target > 0}
+                compiled = compile_simulation(spec, controls, configs, monitors, None, experiment.profiles)
+                prepared.append(replace(experiment, imed_simulation=compiled))
+            experiments = tuple(prepared)
+        return Campaign("Control Panel experiments", experiments, monitor_device_ids=monitors)
 
     def stop_command(self):
         self._cancel_adaptive_loop()
@@ -2201,7 +2256,6 @@ class MainWindow(QMainWindow):
         self.experiment_page    = ExperimentPage( parent=self)    
         self.plots_page         = PlotsPage(parent=self)
         self.sentinel_page      = SentinelPage(parent=self, dark_mode=self.dark_mode)
-        self.modeling_page      = ModelingPage(parent=self)    
         self.control_panel_page = ControlPanelPage(parent=self)
         self.control_panel_page.control_panel.set_theme(
             self.dark_mode
@@ -2227,7 +2281,6 @@ class MainWindow(QMainWindow):
             self.experiment_page,
             self.plots_page,
             self.sentinel_page,
-            self.modeling_page,
             self.control_panel_page,
             self.settings_page,
             self.imed_page,
@@ -2408,18 +2461,16 @@ class MainWindow(QMainWindow):
         self.btn_experiment = QPushButton("🧪  Experiment")
         self.btn_plots = QPushButton("📊  Data & Plots")
         self.btn_sentinel = QPushButton("🛡  Sentinel")
-        self.btn_modeling = QPushButton("📐  Modeling")
         self.btn_control_panel = QPushButton("🎛  Control Panel")
         self.btn_settings = QPushButton("⚙️  Settings")
         self.btn_imed = QPushButton("🔬  IMED")
-        self.btn_bo = QPushButton("BO")
+        self.btn_bo = QPushButton("📈  BO")
 
         self.nav_buttons = [
             self.btn_dashboard,
             self.btn_experiment,
             self.btn_plots,
             self.btn_sentinel,
-            self.btn_modeling,
             self.btn_control_panel,
             self.btn_settings,
             self.btn_imed,
