@@ -87,15 +87,18 @@ def finish_chart(chart, horizontal, vertical, *, sample_count=None, show_legend=
     chart.legend().setVisible(show_legend)
 
 
-def profile_chart(channel, traces):
+def profile_chart(channel, traces, *, styles=None):
     chart = QChart()
     for index, (name, profile) in enumerate(traces):
         time, values = profile.time, profile.values
         if profile.step:
             time, values = np.repeat(time, 2)[1:], np.repeat(values, 2)[:-1]
-        chart.addSeries(line(name, time, values, (OBSERVED, "#626b89", MEAN, "#047857")[index % 4],
-                             dashed=(index == 0 and len(traces) > 1),
-                             markers=len(time) <= 12))
+        if styles is None:
+            color = (OBSERVED, "#626b89", MEAN, "#047857")[index % 4]
+            dashed = index == 0 and len(traces) > 1
+        else:
+            color, dashed = styles[index]
+        chart.addSeries(line(name, time, values, color, dashed=dashed, markers=len(time) <= 12))
     label, unit, _ = CHANNELS[channel]
     finish_chart(chart, "Time (s)", f"{label} ({unit})")
     return chart

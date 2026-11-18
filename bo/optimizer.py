@@ -417,4 +417,4 @@ def preview_channel(state, key, index, report):
     run = state["runs"][index]
     horizon = selected_horizon(state)
     channel = prepare_channel(state, runs, key, report, horizon=horizon)
-    return channel, next(i for i, peer in enumerate(runs) if peer is run)
+    return channel, runs, next(i for i, peer in enumerate(runs) if peer is run)

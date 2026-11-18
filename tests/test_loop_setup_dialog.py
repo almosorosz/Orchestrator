@@ -66,3 +66,16 @@ class LoopSetupDialogTests(unittest.TestCase):
         self.assertIn("background:#15803d", badge.styleSheet())
         badge.set_status("Inactive")
         self.assertIn("background:#64748b", badge.styleSheet())
+
+    def test_loop_error_wraps_in_settings(self):
+        from gui.pages.settings_page import SettingsPage
+
+        page = SettingsPage()
+        try:
+            error = "LOOP setup needs attention. Enable a BO target with positive weight."
+            page.set_message(error=error)
+            self.assertEqual(page.error_label.text(), error)
+            self.assertTrue(page.error_label.wordWrap())
+            self.assertGreater(page.error_label.heightForWidth(180), page.error_label.fontMetrics().height())
+        finally:
+            page.close()

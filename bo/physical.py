@@ -62,8 +62,8 @@ def validate_stages(channel, stages, horizon=None):
 
 
 def profile_stages(profile, count=8, *, channel=None):
-    """Fit up to count stages to a measured trace, keeping elapsed seconds."""
-    if not isinstance(count, int) or count < 1:
+    """Encode a trace's breakpoints, or simplify to a bounded starting template."""
+    if count is not None and (not isinstance(count, int) or count < 1):
         raise ValueError("The number of stages must be a positive integer.")
     time = np.asarray(profile.time, dtype=float)
     values = np.asarray(profile.values, dtype=float)
@@ -75,9 +75,26 @@ def profile_stages(profile, count=8, *, channel=None):
         # Merge adjacent equal-rate command intervals before simplifying.
         edges = np.r_[0, np.flatnonzero(np.diff(values[:-1]) != 0) + 1, len(time) - 1]
         time, values = time[edges], values[edges]
-        if len(time) <= count + 1:
+        if count is None or len(time) <= count + 1:
             return tuple(Stage(float(dt), float(value), float(value))
                          for dt, value in zip(np.diff(time), values))
+
+    if count is None:
+        if profile.step and channel == "temperature":
+            changes = np.flatnonzero(np.diff(values) != 0) + 1
+            ts, ys = [0.], [values[0]]
+            for index in changes:
+                before = np.nextafter(time[index], ts[-1])
+                if before > ts[-1]:
+                    ts.append(before)
+                    ys.append(values[index - 1])
+                ts.append(time[index])
+                ys.append(values[index])
+            if ts[-1] < time[-1]:
+                ts.append(time[-1])
+                ys.append(values[-1])
+            time, values = np.asarray(ts), np.asarray(ys)
+        return _stages_at_breakpoints(time, values, feed=channel == "feed")
 
     # Add knots where the current linear approximation has the largest residual.
     kept = [0, len(time) - 1]
@@ -91,6 +108,27 @@ def profile_stages(profile, count=8, *, channel=None):
         kept.sort()
     return tuple(Stage(float(time[b] - time[a]), float(values[a]), float(values[b]))
                  for a, b in zip(kept, kept[1:]))
+
+
+def _stages_at_breakpoints(time, values, *, feed):
+    intervals = np.diff(time)
+    fractions = intervals[:-1] / (intervals[:-1] + intervals[1:])
+    interpolated = values[:-2] + fractions * (values[2:] - values[:-2])
+    epsilon = 1e-12 * max(1., float(np.max(np.abs(values))))
+    bends = np.flatnonzero(np.abs(values[1:-1] - interpolated) > epsilon) + 1
+    jumps = np.flatnonzero((np.nextafter(time[:-1], time[1:]) == time[1:]) & (values[:-1] != values[1:])) if feed else []
+    edges = np.unique(np.r_[0, bends, jumps, np.asarray(jumps) + 1, len(time) - 1]).astype(int)
+    jumps = set(jumps)
+    stages = []
+    for first, last in zip(edges, edges[1:]):
+        duration = float(time[last] - time[first])
+        if stages and first in jumps and last == first + 1:
+            # Feed stages can jump at a boundary, so a one-ULP change needs no artificial ramp.
+            previous = stages[-1]
+            stages[-1] = replace(previous, duration_s=previous.duration_s + duration)
+        else:
+            stages.append(Stage(duration, float(values[first]), float(values[last])))
+    return tuple(stages)
 
 
 def physical_profile(channel, stages, horizon):

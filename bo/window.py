@@ -25,7 +25,7 @@ from .profiles import (
     CHANNELS, CONSTRAINTS, TARGETS, case_runs, constraint_values, make_profile, recipe_data,
     selected_horizon, violations,
 )
-from .proposal_view import BAND_SD, ProposalView, chart_view, profile_chart, replace_chart
+from .proposal_view import BAND_SD, COLORS, ProposalView, chart_view, profile_chart, replace_chart
 from .settings import OUTPUTS, STAGE_CHANNELS, empty_settings, validate_settings
 from .stage_editor import StageEditor
 
@@ -256,7 +256,9 @@ class BOWindow(QWidget):
         self.run_choice, self.channel_choice = QComboBox(), QComboBox()
         self.run_choice.currentIndexChanged.connect(self.refresh_channels)
         self.channel_choice.currentIndexChanged.connect(self.refresh_preview)
-        row.addWidget(QLabel("Experiment"))
+        self.channel_choice.currentIndexChanged.connect(self.sync_stage_channel)
+        self.stage_editor.tabs.currentChanged.connect(self.sync_comparison_channel)
+        row.addWidget(QLabel("Reference experiment"))
         row.addWidget(self.run_choice, 1)
         row.addWidget(self.channel_choice)
         self.preview_button = self.button("Compare recorded and fitted", self.preview)
@@ -264,6 +266,10 @@ class BOWindow(QWidget):
         self.use_trace_button = self.button("Use trace as template", self.use_trace_template)
         row.addWidget(self.use_trace_button)
         compare_layout.addLayout(row)
+        self.compare_all = QCheckBox("Compare all selected experiments")
+        self.compare_all.setChecked(True)
+        self.compare_all.toggled.connect(self.refresh_preview)
+        compare_layout.addWidget(self.compare_all)
         self.chart = chart_view()
         self.chart.setMinimumHeight(200)
         compare_layout.addWidget(self.chart, 2)
@@ -272,8 +278,15 @@ class BOWindow(QWidget):
         compare_layout.addWidget(self.metrics)
         self.variables = grid(("Vary in BO", "Physical control", "Fitted value", "Unit"))
         self.variables.itemChanged.connect(self.update_override)
-        compare_layout.addWidget(self.variables, 1)
-        compare_layout.addWidget(QLabel("Choose temperature and antisolvent controls under Edit stages."))
+        self.fit_summary = grid(("Experiment", "RMSE"))
+        self.fit_tabs = QTabWidget()
+        self.fit_tabs.addTab(self.fit_summary, "Fit by experiment")
+        self.fit_tabs.addTab(self.variables, "Decision controls")
+        compare_layout.addWidget(self.fit_tabs, 1)
+        hint = QLabel("Choose temperature and antisolvent controls under Edit stages. "
+                      "Fixed means the fitted values are the same across the selected experiments.")
+        hint.setWordWrap(True)
+        compare_layout.addWidget(hint)
         self.profile_tabs.addTab(comparison, "Compare profiles")
 
     def build_proposal_page(self):
@@ -588,10 +601,12 @@ class BOWindow(QWidget):
                     self.channel_choice.addItem(CHANNELS[key][0], key)
         self.channel_choice.setCurrentIndex(max(0, self.channel_choice.findData(active)))
         self.channel_choice.blockSignals(False)
+        self.sync_stage_channel()
         self.refresh_preview()
 
     def refresh_preview(self):
         self.variables.setRowCount(0)
+        self.fit_summary.setRowCount(0)
         replace_chart(self.chart, QChart())
         self.metrics.setText("Compare the measured trace with the stage template fitted to that run.")
         self.update_buttons()
@@ -698,7 +713,7 @@ class BOWindow(QWidget):
         self.job = BOJob(task)
         self.completed_action = callback
         self.active_revision = self.revision
-        self.active_profile = self.profile_selection() if check_profile else None
+        self.active_profile = self.comparison_selection() if check_profile else None
         self.job.signals.progress.connect(self.status.setText, Qt.ConnectionType.QueuedConnection)
         self.job.signals.completed.connect(self.work_completed, Qt.ConnectionType.QueuedConnection)
         self.job.signals.failed.connect(self.work_failed, Qt.ConnectionType.QueuedConnection)
@@ -713,7 +728,7 @@ class BOWindow(QWidget):
         if self.active_revision != self.revision:
             self.status.setText("The BO settings changed during the calculation. Run the calculation again.")
             return
-        if self.active_profile is not None and self.active_profile != self.profile_selection():
+        if self.active_profile is not None and self.active_profile != self.comparison_selection():
             self.status.setText("The selected profile changed. Compare the current profile to view its fit.")
             return
         action(result)
@@ -728,12 +743,26 @@ class BOWindow(QWidget):
     def profile_selection(self):
         return self.run_choice.currentData(), self.channel_choice.currentData()
 
+    def comparison_selection(self):
+        return (*self.profile_selection(), self.compare_all.isChecked())
+
+    def sync_stage_channel(self):
+        editor = self.stage_editor.editors.get(self.channel_choice.currentData())
+        if editor is not None:
+            self.stage_editor.tabs.setCurrentWidget(editor)
+
+    def sync_comparison_channel(self):
+        channel = self.stage_editor.tabs.currentWidget().channel
+        index = self.channel_choice.findData(channel)
+        if index >= 0:
+            self.channel_choice.setCurrentIndex(index)
+
     def use_trace_template(self):
         index, key = self.profile_selection()
         if index is None or key not in STAGE_CHANNELS:
             return
         try:
-            replacement = trace_spec(key, self.profile(self.state["runs"][index], key))
+            replacement = trace_spec(key, self.profile(self.state["runs"][index], key), exact=True)
             # Read the other editor independently so an invalid template can be replaced.
             specs = {other: spec for other, editor in self.stage_editor.editors.items() if other != key
                      and (spec := editor.spec()) is not None}
@@ -745,10 +774,11 @@ class BOWindow(QWidget):
         self.stage_editor.tabs.setCurrentWidget(self.stage_editor.editors[key])
         self.profile_tabs.setCurrentIndex(0)
         self.stage_settings_changed()
-        self.status.setText(f"Created {CHANNELS[key][0].lower()} stages from the selected trace.")
+        self.status.setText(f"Created {CHANNELS[key][0].lower()} stages from the trace’s profile changes. "
+                            "Select the controls you want BO to vary.")
 
     def preview(self):
-        index, key = self.profile_selection()
+        index, key, compare_all = self.comparison_selection()
         if index is None or key is None:
             return
         try:
@@ -760,28 +790,29 @@ class BOWindow(QWidget):
         def prepare(report):
             from .optimizer import preview_channel, run_profile, variable_activity
 
-            channel, row = preview_channel(state, key, index, report)
-            original = run_profile(state["runs"][index], key)
+            channel, runs, row = preview_channel(state, key, index, report)
             horizon = selected_horizon(state)
-            features = channel.features[row]
-            decoded, = channel.decode(features[None, :], [horizon])
-            return channel, original, decoded, features, variable_activity(channel.features)
+            rows = list(range(len(runs))) if compare_all else [row]
+            decoded = channel.decode(channel.features[rows], [horizon] * len(rows))
+            comparisons = [(runs[i]["name"], run_profile(runs[i], key), profile) for i, profile in zip(rows, decoded)]
+            return channel, comparisons, row, variable_activity(channel.features)
 
         self.run_job(prepare, self.show_fit, check_profile=True)
 
     def show_fit(self, result):
-        channel, original, decoded, features, varied = result
+        channel, comparisons, reference, varied = result
         key = channel.key
-        traces = [("Recorded", original)]
-        if channel.stages is not None:
-            template = physical_profile(key, channel.stages, selected_horizon(self.state))
-            traces.append(("Template", template))
-        traces.append(("Fitted", decoded))
-        replace_chart(self.chart, profile_chart(key, traces))
+        features = channel.features[reference]
+        self.render_comparison(key, comparisons, channel.stages)
         self.variables.blockSignals(True)
         self.variables.setRowCount(len(channel.variables))
         for row, (variable, value) in enumerate(zip(channel.variables, features)):
-            cell = item("✓" if channel.stages is not None and varied[row] else "—")
+            cell = item("Varies" if varied[row] else "Fixed")
+            if channel.stages is not None:
+                tooltip = "Selected in Edit stages. "
+                tooltip += ("Fitted values vary across the selected experiments." if varied[row]
+                            else "The fitted value is the same across the selected experiments.")
+                cell.setToolTip(tooltip)
             if channel.stages is None and varied[row]:
                 cell.setText("")
                 cell.setData(Qt.ItemDataRole.UserRole, variable.key)
@@ -792,19 +823,56 @@ class BOWindow(QWidget):
             for column, content in enumerate((variable.label, show_value(float(value)), variable.unit), 1):
                 self.variables.setItem(row, column, item(content))
         self.variables.blockSignals(False)
-        difference = original.values - decoded.sample(original.time)
-        _, unit, _ = CHANNELS[key]
-        detail = f"Recorded vs. fitted RMSE {np.sqrt(np.mean(difference**2)):.5g} {unit}"
-        if key == "feed":
-            detail += f" · total dose {original.total():.5g} → {decoded.total():.5g} g"
-        if key == "temperature":
-            _, rates = constraint_values(key, decoded)
-            detail += f" · peak fitted cooling {max(rates, default=0.):.5g} °C/min"
-            cooling = cooling_landmarks(decoded)
-            if cooling is not None:
-                detail += f" · 10–90% cooling {cooling[-1] - cooling[0]:.5g} s"
-        self.metrics.setText(detail)
         self.status.setText("Review the fit before generating a recipe.")
+
+    def render_comparison(self, key, comparisons, stages):
+        _, unit, _ = CHANNELS[key]
+        headers = ["Experiment", f"RMSE ({unit})"]
+        if key == "feed":
+            headers.extend(("Trace dose (g)", "Fitted dose (g)"))
+        self.fit_summary.setColumnCount(len(headers))
+        self.fit_summary.setHorizontalHeaderLabels(headers)
+        self.fit_summary.setRowCount(len(comparisons))
+        traces, styles, errors = [], [], []
+        multiple = len(comparisons) > 1
+        for row, (name, original, decoded) in enumerate(comparisons):
+            observed = "Commanded" if original.source.startswith("Command ·") else "Recorded"
+            prefix = f"{row + 1} · " if multiple else ""
+            traces.extend(((prefix + observed, original), (prefix + "Fitted", decoded)))
+            color = COLORS[row % len(COLORS)]
+            styles.extend(((color, True), (color, False)))
+            difference = original.values - decoded.sample(original.time)
+            rmse = float(np.sqrt(np.mean(difference**2)))
+            errors.append(rmse)
+            values = [prefix + name, show_value(rmse)]
+            if key == "feed":
+                values += [show_value(profile.total()) for profile in (original, decoded)]
+            for column, value in enumerate(values):
+                self.fit_summary.setItem(row, column, item(value))
+        if stages is not None:
+            traces.insert(0, ("Template", physical_profile(key, stages, selected_horizon(self.state))))
+            styles.insert(0, ("#626b89", False))
+        replace_chart(self.chart, profile_chart(key, traces, styles=styles))
+        if multiple:
+            detail = f"{len(comparisons)} experiments · RMSE {min(errors):.5g}–{max(errors):.5g} {unit}"
+            detail += " · Dashed traces and solid fits share a color per experiment."
+        else:
+            _, original, decoded = comparisons[0]
+            detail = f"{observed} vs. fitted RMSE {errors[0]:.5g} {unit}"
+            if key == "feed":
+                detail += f" · total dose {original.total():.5g} → {decoded.total():.5g} g"
+            if key == "temperature":
+                _, rates = constraint_values(key, decoded)
+                detail += f" · peak fitted cooling {max(rates, default=0.):.5g} °C/min"
+                cooling = cooling_landmarks(decoded)
+                if cooling is not None:
+                    detail += f" · 10–90% cooling {cooling[-1] - cooling[0]:.5g} s"
+        if self.compare_all.isChecked():
+            missing = len(self.state["selected"]) - len(comparisons)
+            if missing:
+                detail += f" · {missing} selected experiments have no {CHANNELS[key][0].lower()} trace."
+        self.metrics.setText(detail)
+        self.fit_tabs.setCurrentWidget(self.fit_summary if multiple else self.variables)
 
     def update_override(self, cell):
         if cell.column() == 0 and cell.flags() & Qt.ItemFlag.ItemIsUserCheckable:

@@ -4,14 +4,17 @@ from importlib.util import find_spec
 import json
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+import numpy as np
 
 from bo.physical import Stage, physical_profile
-from bo.physical_fit import choose_controls, read_spec
+from bo.physical_fit import choose_controls, read_spec, trace_spec
+from bo.profiles import Profile
 from bo.settings import empty_settings, validate_settings
 from bo.stage_editor import StageEditor
 
@@ -70,3 +73,64 @@ class BOControlTests(unittest.TestCase):
                 self.assertEqual(len(result.stages[channel]), 12)
         finally:
             editor.close()
+
+    def test_use_trace_preserves_long_step_profiles_and_feed_jumps(self):
+        horizon = 120.
+        step = physical_profile("feed", self.stages(0)["feed"], horizon)
+        mixed = physical_profile("feed", (Stage(10., 0., .6), Stage(5., .2, .2), Stage(5., 0., 0.)), horizon)
+        for original in (step, mixed):
+            with self.subTest(step=original.step):
+                spec = trace_spec("feed", original, exact=True)
+                stages, _ = read_spec("feed", spec, horizon)
+                fitted = physical_profile("feed", stages, horizon)
+                self.assertEqual(fitted.step, original.step)
+                np.testing.assert_allclose(fitted.sample(original.time), original.values, atol=1e-12)
+                self.assertAlmostEqual(fitted.total(), original.total())
+        self.assertGreater(len(trace_spec("feed", step, exact=True)["stages"]), 8)
+
+    @unittest.skipUnless(find_spec("sklearn"), "BO requires scikit-learn")
+    def test_imed_template_compare_syncs_channel_and_reports_fixed_selected_controls(self):
+        from bo.window import BOWindow
+        from imed_python.design import _candidate_recipe
+
+        conditions = {"batch": 50., "temperature": [25., 19.], "concentration": .1,
+                      "liquid_masses": [100., 0.], "equilibration_s": 10.}
+        experiment, process = _candidate_recipe((0., 15., .3, 12., .2), experiment={}, process={},
+                                                conditions=conditions, addition=9.6)
+        case = {"ExpData": [{**experiment, "Name": f"IMED {i}"} for i in (1, 2)], "ProcInf": [process, process]}
+        window = BOWindow(imed_case=lambda: case)
+        try:
+            window.use_imed()
+            editor = window.stage_editor.editors["feed"]
+            window.stage_editor.tabs.setCurrentWidget(editor)
+            self.assertEqual(window.channel_choice.currentData(), "feed")
+            window.use_trace_template()
+            original = window.profile(window.state["runs"][0], "feed")
+            stages, _ = read_spec("feed", editor.spec(), 60.)
+            template = physical_profile("feed", stages, 60.)
+            np.testing.assert_allclose(template.sample(original.time), original.values, atol=1e-12)
+            self.assertAlmostEqual(template.total(), original.total())
+
+            def run_preview(prepare, complete, **_):
+                complete(prepare(lambda _: None))
+
+            with patch.object(window, "run_job", side_effect=run_preview):
+                window.preview()
+                self.assertEqual(window.fit_summary.rowCount(), 2)
+                self.assertEqual(len(window.chart.chart().series()), 5)
+                self.assertIn("2 experiments", window.metrics.text())
+                for row in range(2):
+                    self.assertAlmostEqual(float(window.fit_summary.item(row, 1).text()), 0.)
+                window.compare_all.setChecked(False)
+                window.preview()
+                self.assertEqual(window.fit_summary.rowCount(), 1)
+                self.assertEqual(len(window.chart.chart().series()), 3)
+            self.assertGreater(window.variables.rowCount(), 0)
+            for row in range(window.variables.rowCount()):
+                item = window.variables.item(row, 0)
+                self.assertEqual(item.text(), "Fixed")
+                self.assertIn("Selected in Edit stages", item.toolTip())
+            window.channel_choice.setCurrentIndex(window.channel_choice.findData("temperature"))
+            self.assertIs(window.stage_editor.tabs.currentWidget(), window.stage_editor.editors["temperature"])
+        finally:
+            window.close()

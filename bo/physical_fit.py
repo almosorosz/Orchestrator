@@ -44,10 +44,10 @@ def choose_controls(channel, stages):
     return [key for key in requested if key in available]
 
 
-def trace_spec(channel, profile):
+def trace_spec(channel, profile, *, exact=False):
     """Initialize an editable recipe from the selected trace's phase changes."""
-    stages = profile_stages(profile, channel=channel)
-    if (channel == "temperature" and len(stages) > 1
+    stages = profile_stages(profile, count=None if exact else 8, channel=channel)
+    if (not exact and channel == "temperature" and len(stages) > 1
             and abs(stages[-1].end - stages[-1].start) <= .15):
         stages = stages[:-1]
     return {"stages": [asdict(stage) for stage in stages],
@@ -153,9 +153,12 @@ def fit_stage_controls(channel, rows, controls, source, horizon):
         return cost
 
     start = (nominal - lower) / ranges
+    initial_cost = evaluate(start)
+    if initial_cost <= 1e-10:
+        return nominal, evaluate(start, error_only=True)
     # A bounded derivative-free fit also handles discrete changes in feed rate.
     evaluation_budget = max(240, 60 * len(controls))
     result = minimize(evaluate, start, method="Powell", bounds=[(0., 1.)] * len(controls),
                       options={"maxfev": evaluation_budget, "xtol": .001, "ftol": .001})
-    point = result.x if evaluate(result.x) < evaluate(start) else start
+    point = result.x if evaluate(result.x) < initial_cost else start
     return lower + ranges * point, evaluate(point, error_only=True)

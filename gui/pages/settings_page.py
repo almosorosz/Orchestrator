@@ -63,6 +63,10 @@ class SettingsPage(QWidget):
 
         self.status_label = QLabel("")
         self.error_label = QLabel("")
+        for label in (self.status_label, self.error_label):
+            label.setWordWrap(True)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         self.error_label.setStyleSheet(
             "color: #ef4464;"
@@ -584,6 +588,7 @@ class SettingsPage(QWidget):
     def set_message(self, message="", error=""):
         self.status_label.setText(message)
         self.error_label.setText(error)
+        self.error_label.setToolTip(error)
 
         self.status_label.setVisible(bool(message))
         self.error_label.setVisible(bool(error))
