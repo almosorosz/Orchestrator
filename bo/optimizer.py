@@ -307,7 +307,7 @@ def propose(state, report=lambda _: None):
     horizon = selected_horizon(state)
     if violations([horizon], *state["constraints"]["duration"]):
         raise ValueError(f"The fixed batch horizon ({horizon:g} s) is outside the batch duration bounds. "
-                         "Change the bounds or select a different set of experiments.")
+                         "Change the bounds, batch horizon, or selected experiments.")
     channels, column_slices = {}, {}
     variables, columns = [], []
     for key, (label, _, _) in CHANNELS.items():

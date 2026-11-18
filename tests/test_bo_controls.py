@@ -3,6 +3,7 @@ from dataclasses import asdict
 from importlib.util import find_spec
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -12,9 +13,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 import numpy as np
 
-from bo.physical import Stage, physical_profile
-from bo.physical_fit import choose_controls, read_spec, trace_spec
-from bo.profiles import Profile
+from bo.physical import Stage, apply_controls, physical_profile
+from bo.physical_fit import choose_controls, fit_stage_controls, read_spec, trace_spec
+from bo.profiles import Profile, make_profile, selected_horizon
 from bo.settings import empty_settings, validate_settings
 from bo.stage_editor import StageEditor
 
@@ -49,6 +50,7 @@ class BOControlTests(unittest.TestCase):
                         item.setCheckState(Qt.CheckState.Checked)
                 self.assertEqual(profile_editor.control_note.text(), "12 decision controls selected.")
             settings = empty_settings()
+            settings["batch_horizon_s"] = 125.
             settings["physical_profiles"] = editor.specs()
             self.assertGreater(len(choose_controls("temperature", template["temperature"])), 4)
             settings["targets"]["d50"]["enabled"] = True
@@ -66,11 +68,13 @@ class BOControlTests(unittest.TestCase):
                 self.assertEqual(len(read_spec(channel, spec, horizon)[1]), 12)
             result = propose(restored)
             self.assertEqual(len(result.variables), 24)
+            self.assertEqual(result.horizon, 125.)
             for channel in template:
                 varied = sum(variable.key.startswith(f"{channel}:") and vary
                              for variable, vary in zip(result.variables, result.vary))
                 self.assertGreater(varied, 4)
                 self.assertEqual(len(result.stages[channel]), 12)
+                self.assertEqual(result.profiles[channel].time[-1], 125.)
         finally:
             editor.close()
 
@@ -87,6 +91,19 @@ class BOControlTests(unittest.TestCase):
                 np.testing.assert_allclose(fitted.sample(original.time), original.values, atol=1e-12)
                 self.assertAlmostEqual(fitted.total(), original.total())
         self.assertGreater(len(trace_spec("feed", step, exact=True)["stages"]), 8)
+
+    def test_fits_different_temperatures_in_five_run_imed_preset(self):
+        path = Path(__file__).resolve().parents[1] / "examples" / "configurations" / "imed_five_run_control_panel.json"
+        experiments = json.loads(path.read_text())["control_panel"]["experiments"]
+        profiles = [make_profile(np.asarray([row[:2] for row in experiment["data"] if row[0] <= 60.]).T, "Command · T1")
+                    for experiment in experiments]
+        spec = trace_spec("temperature", profiles[0], exact=True)
+        stages, controls = read_spec("temperature", spec, 60.)
+        for profile in profiles:
+            values, error = fit_stage_controls("temperature", stages, controls, profile, 60.)
+            self.assertLess(error, .01)
+            fitted = physical_profile("temperature", apply_controls("temperature", stages, controls, values), 60.)
+            self.assertAlmostEqual(fitted.values[-1], profile.values[-1], places=6)
 
     @unittest.skipUnless(find_spec("sklearn"), "BO requires scikit-learn")
     def test_imed_template_compare_syncs_channel_and_reports_fixed_selected_controls(self):
@@ -131,6 +148,23 @@ class BOControlTests(unittest.TestCase):
                 self.assertEqual(item.text(), "Fixed")
                 self.assertIn("Selected in Edit stages", item.toolTip())
             window.channel_choice.setCurrentIndex(window.channel_choice.findData("temperature"))
-            self.assertIs(window.stage_editor.tabs.currentWidget(), window.stage_editor.editors["temperature"])
+            temperature = window.stage_editor.editors["temperature"]
+            self.assertIs(window.stage_editor.tabs.currentWidget(), temperature)
+            original_temperature = temperature.spec()
+            temperature.load({"stages": [asdict(Stage(61.9692, 25., 19.))], "controls": []})
+            with self.assertRaisesRegex(ValueError, "exceed the fixed batch horizon of 60"):
+                window.settings()
+            window.batch_horizon.setText("62")
+            saved = window.settings()
+            self.assertEqual(saved["batch_horizon_s"], 62.)
+            self.assertEqual(selected_horizon(saved), 62.)
+            window.restore(saved)
+            self.assertEqual(float(window.batch_horizon.text()), 62.)
+            window.batch_horizon.setText("59")
+            with self.assertRaisesRegex(ValueError, "at least 60 s"):
+                window.settings()
+            temperature.load(original_temperature)
+            window.batch_horizon.clear()
+            self.assertEqual(selected_horizon(window.settings()), 60.)
         finally:
             window.close()

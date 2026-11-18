@@ -1,7 +1,7 @@
 """Read-only values for the selected automatic LOOP starting batch."""
 from numbers import Real
 
-from bo.profiles import CONSTRAINTS, TARGETS
+from bo.profiles import CONSTRAINTS, TARGETS, selected_horizon
 from experiment.adaptive_loop import recording_mapping
 from experiment.doe_campaign import ROLES
 from experiment.loop_process import LOOP_WEIGHT_DEFAULTS, PROCESS_DEFAULTS, VALIDATION_PE_SETTINGS, starting_process_defaults
@@ -139,6 +139,8 @@ def used_loop_values(setup, backend, context, design_labels):
     model = groups["Modeling"] = []
     if backend == "bo" and (bo := context["bo"]) is not None:
         model.append(("Selected prior observations", len(bo["selected"]), "BO page"))
+        if bo.get("batch_horizon_s") is not None:
+            model.append(("Batch horizon (s)", selected_horizon(bo), "BO Physical profiles override"))
         for key, target in bo["targets"].items():
             if target["enabled"]:
                 mode = f"Match {target['target']:g} {TARGETS[key][1]}" if target["mode"] == "match" else target["mode"]

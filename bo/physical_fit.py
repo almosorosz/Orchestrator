@@ -1,6 +1,7 @@
 """Fit a common, editable stage template to the recorded experiment profiles."""
 
 from dataclasses import asdict
+from math import fsum
 
 import numpy as np
 from scipy.optimize import minimize
@@ -35,6 +36,7 @@ def choose_controls(channel, stages):
         ramps = [i for i, stage in enumerate(stages) if stage.start != stage.end]
         requested = ["initial_delay", "final_temperature"]
         requested += [f"stage:{i}:duration" for i in ramps]
+        requested += [f"stage:{i}:end" for i in ramps[:-1]]
         requested.append("stage:0:start")
     else:
         active = [i for i, stage in enumerate(stages) if stage.start > 0 or stage.end > 0]
@@ -47,9 +49,12 @@ def choose_controls(channel, stages):
 def trace_spec(channel, profile, *, exact=False):
     """Initialize an editable recipe from the selected trace's phase changes."""
     stages = profile_stages(profile, count=None if exact else 8, channel=channel)
-    if (not exact and channel == "temperature" and len(stages) > 1
-            and abs(stages[-1].end - stages[-1].start) <= .15):
-        stages = stages[:-1]
+    if len(stages) > 1:
+        last = stages[-1]
+        implicit_tail = (abs(last.end - last.start) <= (0. if exact else .15) if channel == "temperature"
+                         else exact and last.start == last.end == 0.)
+        if implicit_tail:
+            stages = stages[:-1]
     return {"stages": [asdict(stage) for stage in stages],
             "controls": choose_controls(channel, stages)}
 
@@ -108,6 +113,48 @@ def measured_dose(profile, time):
     return np.r_[0., np.cumsum(np.diff(nodes) * weights)][np.searchsorted(nodes, time)]
 
 
+def _temperature_seed(rows, controls, source, nominal):
+    boundaries = np.r_[0., np.cumsum([stage.duration_s for stage in rows])]
+    moving = [index for index, stage in enumerate(rows) if stage.start != stage.end]
+    observed = np.flatnonzero(np.abs(np.diff(source.values)) > 1e-8)
+    vary_delay = any(control.kind == "delay" for control in controls)
+    aligned = boundaries.copy()
+    if moving and observed.size:
+        first, last = moving[0], moving[-1] + 1
+        actual_start = source.time[observed[0]]
+        start = actual_start if first or vary_delay else 0.
+        end = source.time[observed[-1] + 1]
+        if first:
+            aligned[:first] = boundaries[:first] * start / boundaries[first]
+        ramp = boundaries[first:last + 1]
+        aligned[first:last + 1] = start + (ramp - ramp[0]) / (ramp[-1] - ramp[0]) * (end - start)
+        aligned[last + 1:] += end - boundaries[last]
+        measured = profile_stages(source, count=None, channel="temperature")
+        measured_ramps = [i for i, stage in enumerate(measured) if stage.start != stage.end]
+        if measured_ramps and start == actual_start:
+            begin, stop = measured_ramps[0], measured_ramps[-1] + 1
+            if ([stage.start == stage.end for stage in rows[first:last]]
+                    == [stage.start == stage.end for stage in measured[begin:stop]]):
+                measured_times = np.r_[0., np.cumsum([stage.duration_s for stage in measured])]
+                aligned[first:last + 1] = measured_times[begin:stop + 1]
+    temperatures = source.sample(aligned)
+    seed = nominal.copy()
+    for column, control in enumerate(controls):
+        index = control.stage
+        if control.kind == "final":
+            seed[column] = source.values[-1]
+        elif control.kind == "delay" and observed.size:
+            seed[column] = source.time[observed[0]]
+        elif index is not None:
+            if control.kind == "duration":
+                seed[column] = aligned[index + 1] - aligned[index]
+            elif control.kind == "start":
+                seed[column] = temperatures[index]
+            elif control.kind == "end":
+                seed[column] = temperatures[index + 1]
+    return seed
+
+
 def fit_stage_controls(channel, rows, controls, source, horizon):
     """Estimate just the chosen controls, keeping the editor's other settings fixed."""
     source = fixed_horizon(source, horizon, stop=channel == "feed")
@@ -133,32 +180,43 @@ def fit_stage_controls(channel, rows, controls, source, horizon):
         return nominal, float(np.sqrt(np.mean((predicted.sample(time) - target)**2)))
     lower, upper = np.asarray(bounds).T
     ranges = upper - lower
+    best_cost, best_rmse, best_point = np.inf, np.inf, nominal
 
-    def evaluate(fraction, *, error_only=False):
+    def evaluate(fraction):
+        nonlocal best_cost, best_rmse, best_point
         values = lower + ranges * fraction
         try:
             stages = apply_controls(channel, rows, controls, values)
+            overage = fsum(stage.duration_s for stage in stages) - horizon
+            if overage > np.spacing(horizon) * max(8, len(stages)):
+                # Keep a slope toward shorter, feasible stages during the line search.
+                return 1e4 + overage / horizon
             decoded = physical_profile(channel, stages, horizon)
         except ValueError:
-            return np.inf if error_only else 1e5
+            return 1e5
         rmse = float(np.sqrt(np.mean((decoded.sample(time) - target)**2)))
-        if error_only:
-            return rmse
         cost = rmse / value_scale
         if dose is not None:
             difference = (measured_dose(decoded, time) - dose) / max_dose
             cost += np.mean(np.abs(difference)) + abs(difference[-1])
         else:
             cost += .15 * abs(decoded.values[-1] - source.values[-1]) / value_scale
+        if cost < best_cost:
+            best_cost, best_rmse, best_point = cost, rmse, values
         return cost
 
     start = (nominal - lower) / ranges
-    initial_cost = evaluate(start)
-    if initial_cost <= 1e-10:
-        return nominal, evaluate(start, error_only=True)
+    evaluate(start)
+    if channel == "temperature" and best_cost > 1e-10:
+        seed = np.clip((_temperature_seed(rows, controls, source, nominal) - lower) / ranges, 0., 1.)
+        for fraction in (1., .5, .25):
+            evaluate(start + fraction * (seed - start))
+    if best_cost <= 1e-10:
+        return best_point, best_rmse
     # A bounded derivative-free fit also handles discrete changes in feed rate.
     evaluation_budget = max(240, 60 * len(controls))
-    result = minimize(evaluate, start, method="Powell", bounds=[(0., 1.)] * len(controls),
-                      options={"maxfev": evaluation_budget, "xtol": .001, "ftol": .001})
-    point = result.x if evaluate(result.x) < initial_cost else start
-    return lower + ranges * point, evaluate(point, error_only=True)
+    minimize(evaluate, (best_point - lower) / ranges, method="Powell", bounds=[(0., 1.)] * len(controls),
+             options={"maxfev": evaluation_budget, "xtol": .001, "ftol": .001})
+    if not np.isfinite(best_cost):
+        raise ValueError("The selected controls could not fit a profile within the batch horizon.")
+    return best_point, best_rmse

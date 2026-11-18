@@ -133,8 +133,9 @@ searching. In **Compare profiles**, pick a reference experiment and use **Use
 trace as template** to preserve its transitions. **Compare all selected experiments**
 overlays each trace and fit and shows the RMSE for each run. The **Decision controls**
 tab shows fitted values for the reference experiment. Controls with the same fitted
-value across the selected data are marked **Fixed**. BO uses the longest selected
-experiment as the fixed batch horizon.
+value across the selected data are marked **Fixed**. Leave **Batch horizon (s)**
+blank to use the longest selected experiment, or enter a longer horizon to fit
+an extended recipe.
 Temperature holds at the final setpoint after its last stage and antisolvent
 feed stops after its last stage. Duration bounds apply to the fixed horizon.
 Seeded proposals add seed at time zero, and unseeded proposals use zero seed mass.

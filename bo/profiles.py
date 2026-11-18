@@ -247,4 +247,14 @@ def violations(values, lower, upper):
 
 
 def selected_horizon(state):
-    return max((state["runs"][index]["metrics"]["duration"] for index in state["selected"]), default=None)
+    recorded = max((state["runs"][index]["metrics"]["duration"] for index in state["selected"]), default=None)
+    override = state.get("batch_horizon_s")
+    if override is None:
+        return recorded
+    if type(override) not in (int, float) or not np.isfinite(override) or override <= 0:
+        raise ValueError("Enter a positive batch horizon in seconds or leave it blank for automatic.")
+    if recorded is not None and override < recorded:
+        if np.isclose(override, recorded, rtol=0., atol=1e-8):
+            return recorded
+        raise ValueError(f"Enter a batch horizon of at least {recorded:g} s to cover the selected experiments.")
+    return override

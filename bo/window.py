@@ -174,7 +174,7 @@ class BOWindow(QWidget):
     def build_settings_page(self):
         layout = self.page("Input bounds and targets")
         self.bound_fields = bounds_fields(layout, CONSTRAINTS)
-        note = QLabel("The batch duration is fixed to the longest selected run. Blank bounds are off. "
+        note = QLabel("Set the batch horizon under Physical profiles. Blank bounds are off. "
                       "Cooling and dosing minimums apply to active segments.")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -233,7 +233,16 @@ class BOWindow(QWidget):
         layout = self.page("Physical profiles")
         self.horizon_label = QLabel()
         self.horizon_label.setWordWrap(True)
-        layout.addWidget(self.horizon_label)
+        self.batch_horizon = QLineEdit()
+        self.batch_horizon.setPlaceholderText("Longest selected run")
+        self.batch_horizon.setMaximumWidth(190)
+        self.batch_horizon.setToolTip("Leave blank to use the longest selected experiment. Enter a longer horizon to extend the recipe.")
+        self.batch_horizon.textChanged.connect(self.horizon_changed)
+        clock = QHBoxLayout()
+        clock.addWidget(QLabel("Batch horizon (s)"))
+        clock.addWidget(self.batch_horizon)
+        clock.addWidget(self.horizon_label, 1)
+        layout.addLayout(clock)
         self.profile_tabs = QTabWidget()
         layout.addWidget(self.profile_tabs, 1)
         edit = QWidget()
@@ -327,6 +336,8 @@ class BOWindow(QWidget):
         self.state = validate_settings(settings)
         self.state.pop("loop_proposal", None)
         self.rendering = True
+        horizon = self.state["batch_horizon_s"]
+        self.batch_horizon.setText(str(horizon) if horizon is not None else "")
         for group, fields in (("constraints", self.bound_fields), ("output_bounds", self.output_fields)):
             for key, bounds in self.state[group].items():
                 for field, value in zip(fields[key], bounds):
@@ -349,6 +360,8 @@ class BOWindow(QWidget):
 
     def settings(self):
         data = dict(self.state)
+        data["batch_horizon_s"] = self.horizon_override()
+        selected_horizon(data)
         data["constraints"] = read_bounds(self.bound_fields)
         data["output_bounds"] = read_bounds(self.output_fields)
         data["exploration"] = float(self.exploration.text())
@@ -583,12 +596,34 @@ class BOWindow(QWidget):
             self.run_choice.addItem(self.state["runs"][index]["name"], index)
         self.run_choice.setCurrentIndex(max(0, self.run_choice.findData(active)))
         self.run_choice.blockSignals(False)
-        horizon = selected_horizon(self.state)
-        detail = f"Fixed batch horizon {horizon:g} s · Any seed is added at 0 s." if horizon else ""
+        self.refresh_horizon()
+        self.refresh_channels()
+
+    def horizon_override(self):
+        text = self.batch_horizon.text().strip()
+        try:
+            return float(text) if text else None
+        except ValueError as error:
+            raise ValueError("Enter the batch horizon in seconds or leave it blank for automatic.") from error
+
+    def profile_horizon(self):
+        return selected_horizon({**self.state, "batch_horizon_s": self.horizon_override()})
+
+    def refresh_horizon(self):
+        try:
+            horizon = self.profile_horizon()
+            detail = f"Effective horizon {horizon:g} s · Seed is added at 0 s." if horizon else ""
+        except ValueError as error:
+            horizon, detail = None, str(error)
         self.stage_editor.set_horizon(horizon)
         self.horizon_label.setText(detail)
         self.batch_note.setText(detail)
-        self.refresh_channels()
+
+    def horizon_changed(self):
+        if not self.rendering:
+            self.invalidate_proposal()
+            self.refresh_horizon()
+            self.refresh_preview()
 
     def refresh_channels(self):
         active = self.channel_choice.currentData()
@@ -617,7 +652,11 @@ class BOWindow(QWidget):
         for channel in STAGE_CHANNELS:
             if channel not in specs and (spec := initial_spec(channel, runs)) is not None:
                 specs[channel] = spec
-        self.stage_editor.load(specs, selected_horizon(self.state))
+        try:
+            horizon = self.profile_horizon()
+        except ValueError:
+            horizon = None  # Keep the stage editor available while the horizon is corrected.
+        self.stage_editor.load(specs, horizon)
 
     def reset_stage_templates(self):
         self.state["physical_profiles"] = {}
@@ -763,6 +802,7 @@ class BOWindow(QWidget):
             return
         try:
             replacement = trace_spec(key, self.profile(self.state["runs"][index], key), exact=True)
+            horizon = self.profile_horizon()
             # Read the other editor independently so an invalid template can be replaced.
             specs = {other: spec for other, editor in self.stage_editor.editors.items() if other != key
                      and (spec := editor.spec()) is not None}
@@ -770,7 +810,7 @@ class BOWindow(QWidget):
             self.status.setText(str(error))
             return
         specs[key] = replacement
-        self.stage_editor.load(specs, selected_horizon(self.state))
+        self.stage_editor.load(specs, horizon)
         self.stage_editor.tabs.setCurrentWidget(self.stage_editor.editors[key])
         self.profile_tabs.setCurrentIndex(0)
         self.stage_settings_changed()
@@ -850,7 +890,7 @@ class BOWindow(QWidget):
             for column, value in enumerate(values):
                 self.fit_summary.setItem(row, column, item(value))
         if stages is not None:
-            traces.insert(0, ("Template", physical_profile(key, stages, selected_horizon(self.state))))
+            traces.insert(0, ("Template", physical_profile(key, stages, self.profile_horizon())))
             styles.insert(0, ("#626b89", False))
         replace_chart(self.chart, profile_chart(key, traces, styles=styles))
         if multiple:

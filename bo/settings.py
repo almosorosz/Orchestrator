@@ -2,7 +2,7 @@
 from copy import deepcopy
 import math
 
-from .profiles import CHANNELS, CONSTRAINTS, TARGETS, pairs
+from .profiles import CHANNELS, CONSTRAINTS, TARGETS, pairs, selected_horizon
 from .physical_fit import read_spec
 
 FORMAT = "crystalloop-bo"
@@ -21,7 +21,7 @@ def empty_settings():
         "yield_basis": "theoretical", "overrides": {},
         "output_bounds": {key: [None, None] for key in OUTPUTS},
         "exploration": 1., "output_margin": 1.96, "physical_profiles": {},
-        "loop_stages": [],
+        "loop_stages": [], "batch_horizon_s": None,
         "tolerances": {key: entry[2] for key, entry in CHANNELS.items()},
     }
 
@@ -36,7 +36,7 @@ def validate_settings(value):
     # Existing component files and presets predate these optional fields.
     data = deepcopy(value)
     defaults = empty_settings()
-    for key in ("output_bounds", "exploration", "output_margin", "physical_profiles", "loop_stages"):
+    for key in ("output_bounds", "exploration", "output_margin", "physical_profiles", "loop_stages", "batch_horizon_s"):
         data.setdefault(key, defaults[key])
     data.pop("vae_checkpoints", None)
     try:
@@ -93,6 +93,7 @@ def validate_settings(value):
                     raise ValueError("A saved experiment contains an invalid profile.")
             if "temperature" not in run["profiles"]:
                 raise ValueError("A saved experiment is missing its temperature profile.")
+        selected_horizon(data)
         for key, enabled in data["overrides"].items():
             if not isinstance(key, str) or type(enabled) is not bool:
                 raise ValueError("Invalid decision-variable overrides.")

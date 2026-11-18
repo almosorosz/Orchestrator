@@ -241,7 +241,7 @@ def _set_final(stages, value):
 def _set_delay(channel, stages, value):
     count = _initial_holds(channel, stages)
     if count == len(stages):
-        if value == 0:
+        if value == 0 or channel == "temperature":
             return stages
         raise ValueError("A start delay requires an active stage.")
     if value == 0:
