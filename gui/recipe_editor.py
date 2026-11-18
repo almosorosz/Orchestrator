@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from experiment.doe_campaign import ROLES
-from experiment.recipe import PURPOSES, SYSTEM_FIELDS, parameter, validate_recipe
+from experiment.recipe import PURPOSES, SYSTEM_FIELDS, TIME_UNITS, parameter, validate_recipe
 from hardware_devices.capabilities import is_monitor_only
 
 
@@ -35,13 +35,17 @@ def number(value):
 
 
 class ParameterTable(QTableWidget):
-    def __init__(self, entries, parent=None, temperature=False):
+    def __init__(self, entries, parent=None, temperature=False, time_unit="s"):
         super().__init__(len(entries), 6 if temperature else 5, parent)
         self.setHorizontalHeaderLabels(("Parameter", "Across experiments", "Value", "Minimum", "Maximum")
                                       + (("Equal to previous",) if temperature else ()))
         self.entries = entries
         self.links = {}
+        self.scales, self.original_display, self.original_values = {}, {}, {}
         for row, (label, item) in enumerate(entries):
+            self.scales[row] = TIME_UNITS[time_unit] if label.startswith("Duration") else 1.
+            if label.startswith("Duration"):
+                label = f"Duration ({time_unit})"
             title = QTableWidgetItem(label)
             title.setFlags(title.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.setItem(row, 0, title)
@@ -50,7 +54,12 @@ class ParameterTable(QTableWidget):
             mode.setCurrentText(item["mode"])
             self.setCellWidget(row, 1, mode)
             for column, key in enumerate(("value", "min", "max"), 2):
-                field = number(item[key])
+                field = number(item[key] / self.scales[row])
+                if label.startswith("Duration"):
+                    field.setDecimals(9)
+                    field.setValue(item[key] / self.scales[row])
+                self.original_display[row, column] = field.value()
+                self.original_values[row, column] = item[key]
                 field.setMinimumWidth(65)
                 field.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                 self.setCellWidget(row, column, field)
@@ -73,7 +82,9 @@ class ParameterTable(QTableWidget):
         for row, (_, item) in enumerate(self.entries):
             item["mode"] = self.cellWidget(row, 1).currentText()
             for column, key in enumerate(("value", "min", "max"), 2):
-                item[key] = self.cellWidget(row, column).value()
+                displayed = self.cellWidget(row, column).value()
+                item[key] = (self.original_values[row, column] if displayed == self.original_display[row, column]
+                             else displayed * self.scales[row])
             if row in self.links:
                 item["equal_previous"] = self.links[row].isChecked()
 
@@ -196,6 +207,9 @@ class RecipeEditor(QWidget):
         self.notice = QLabel()
         self.notice.setWordWrap(True)
         self.notice.setText("Use shared stages, or Edit device profile for separate sections per device. Shorter profiles hold their final target; mass additions stop when finished.")
+        self.horizon = QLabel()
+        self.horizon.setWordWrap(True)
+        side.addWidget(self.horizon)
         side.addWidget(self.notice)
         left = QWidget()
         left.setLayout(side)
@@ -211,7 +225,7 @@ class RecipeEditor(QWidget):
         self.stage_list.blockSignals(True)
         self.stage_list.clear()
         for stage in self.recipe["stages"]:
-            item = QListWidgetItem(f"{stage['name']} · {stage['duration']['value']:g} s", self.stage_list)
+            item = QListWidgetItem(f"{stage['name']} · {self.time_text(stage['duration']['value'])}", self.stage_list)
             item.setData(Qt.ItemDataRole.UserRole, stage["id"])
         self.stage_list.setCurrentRow(min(max(active, 0), self.stage_list.count() - 1))
         self.stage_list.blockSignals(False)
@@ -227,7 +241,7 @@ class RecipeEditor(QWidget):
         blocks = []
         for row, stage in enumerate(self.recipe["stages"]):
             y = HEADER_HEIGHT + row * ROW_HEIGHT
-            text = self.scene.addText(f"{time:g} s\n{stage['name']}\n{stage['purpose']}")
+            text = self.scene.addText(f"{self.time_text(time)}\n{stage['name']}\n{stage['purpose']}")
             text.setDefaultTextColor(QColor("#cbd5e1"))
             text.setTextWidth(LABEL_WIDTH - 8)
             text.setPos(0, y)
@@ -247,6 +261,7 @@ class RecipeEditor(QWidget):
         # The canvas uses the shared-stage nominal time scale; generation resolves
         # sampled durations separately for each experiment.
         total = max([time] + [sum(s["duration"]["value"] for s in lane.get("profile", [])) for lane in self.recipe["lanes"]])
+        self.horizon.setText(f"Nominal experiment duration: {self.time_text(total)}")
         durations = [stage["duration"]["value"] for stage in self.recipe["stages"]]
         anchors = np.r_[0., np.cumsum(durations)]
         scale = (ROW_HEIGHT * len(durations) / max(time, 1.) if durations else
@@ -274,7 +289,7 @@ class RecipeEditor(QWidget):
                           else f"{value['mode']} {value['min']:g}–{value['max']:g}")
                 if not value.get("equal_previous"):
                     target += f" {unit}"
-                text = self.scene.addText(f"{section['name']} · {section['duration']['value']:g} s\n{section['kind']} · {target}"
+                text = self.scene.addText(f"{section['name']} · {self.time_text(section['duration']['value'])}\n{section['kind']} · {target}"
                                           + ("\nHolds to experiment end" if final_hold and until > elapsed + section["duration"]["value"] else ""))
                 text.setDefaultTextColor(QColor("#f8fafc"))
                 text.setTextWidth(COLUMN_WIDTH - 20)
@@ -299,12 +314,19 @@ class RecipeEditor(QWidget):
             for tick in ticks:
                 y = position_at(tick)
                 if y - last_y >= 22. or tick == total:
-                    label = self.scene.addText(f"{tick:g} s")
+                    label = self.scene.addText(self.time_text(tick))
                     label.setDefaultTextColor(QColor("#94a3b8"))
                     label.setPos(4, y)
                     last_y = y
         self.scene.setSceneRect(0, 0, max(width, 700), max(bottom + 40, 400))
         self.changed.emit()
+
+    @property
+    def time_unit(self):
+        return self.recipe.get("time_unit", "min")
+
+    def time_text(self, seconds):
+        return f"{seconds / TIME_UNITS[self.time_unit]:g} {self.time_unit}"
 
     def reorder(self):
         if self.stage_list.signalsBlocked():
@@ -327,7 +349,7 @@ class RecipeEditor(QWidget):
         form.addRow("Stage name", name)
         form.addRow("Purpose", purpose)
         layout.addLayout(form)
-        table = ParameterTable([("Duration (s)", stage["duration"])])
+        table = ParameterTable([("Duration (s)", stage["duration"])], time_unit=self.time_unit)
         layout.addWidget(table)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -433,7 +455,7 @@ class RecipeEditor(QWidget):
             index = names.index(chosen)
         from gui.device_profile_dialog import DeviceProfileDialog
         lane = self.recipe["lanes"][index]
-        dialog = DeviceProfileDialog(lane, self.recipe["stages"], self)
+        dialog = DeviceProfileDialog(lane, self.recipe["stages"], self, time_unit=self.time_unit)
         if dialog.exec():
             if dialog.enabled.isChecked():
                 lane["profile"] = dialog.sections
@@ -545,11 +567,24 @@ class ExperimentDefinitionDialog(QDialog):
         self.resize(1230, 800)
         self.profile = profile
         self.draft = deepcopy(profile)
+        self.limit_warnings = []
         layout = QVBoxLayout(self)
         self.source = QComboBox()
         self.source.addItems(("Device timeline", "Component design"))
         self.source.setCurrentIndex(0 if profile.timeline else 1)
-        layout.addWidget(self.source)
+        source_row = QHBoxLayout()
+        source_row.addWidget(self.source, 1)
+        source_row.addWidget(QLabel("Timeline time units"))
+        self.time_units = QComboBox()
+        for label, unit in (("Seconds (s)", "s"), ("Minutes (min)", "min"), ("Hours (h)", "h")):
+            self.time_units.addItem(label, unit)
+        self.time_units.setCurrentIndex(self.time_units.findData(profile.timeline.get("time_unit", "min")))
+        self.time_units.setToolTip("Converts displayed durations and temperature-rate limits together. Existing experiment timing stays the same.")
+        source_row.addWidget(self.time_units)
+        layout.addLayout(source_row)
+        units_help = QLabel("Durations and temperature-rate limits use the selected time unit. Drafts can be saved; rate limits are checked when generating experiments.")
+        units_help.setWordWrap(True)
+        layout.addWidget(units_help)
         tabs = QTabWidget()
         self.editor = RecipeEditor(profile.timeline, configs, profile.T_room)
         self.editor.changed.connect(lambda: self.source.setCurrentIndex(0))
@@ -563,6 +598,9 @@ class ExperimentDefinitionDialog(QDialog):
         system = QWidget()
         form = QFormLayout(system)
         self.system = {}
+        self.system_labels = {}
+        self.rate_unit = "min"
+        self.rate_original = {}
         for key in SYSTEM_FIELDS:
             field = number(getattr(profile, key))
             if key not in {"v_heat_max", "v_cool_max", "AS_add_max", "T_room", "sol_add_max"}:
@@ -573,7 +611,12 @@ class ExperimentDefinitionDialog(QDialog):
                       "sol_add_max": "Maximum solution/solvent rate (g/min)",
                       "time_to_wait_prior_exp": "Wait before experiment (h)", "aceton_boil_out_T": "Boil-out temperature (°C)",
                       "wait_after_exp": "Wait after experiment (h)", "t_before_open_valve": "Wait before discharge (h)"}
-            form.addRow(labels[key], field)
+            self.system_labels[key] = QLabel(labels[key])
+            form.addRow(self.system_labels[key], field)
+            if key in {"v_heat_max", "v_cool_max"}:
+                field.setDecimals(9)
+                field.setValue(getattr(profile, key))
+                self.rate_original[key] = (getattr(profile, key), field.value())
         tabs.addTab(system, "System settings")
         legacy_scroll = QScrollArea()
         legacy_scroll.setWidgetResizable(True)
@@ -591,6 +634,29 @@ class ExperimentDefinitionDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.time_units.currentIndexChanged.connect(self.update_time_units)
+        self.update_time_units()
+
+    def rate_value(self, key):
+        stored, displayed = self.rate_original[key]
+        value = self.system[key].value()
+        return stored if value == displayed else value * 60 / TIME_UNITS[self.rate_unit]
+
+    def update_time_units(self):
+        values = {key: self.rate_value(key) for key in ("v_heat_max", "v_cool_max")}
+        self.rate_unit = self.time_units.currentData()
+        for key, title in (("v_heat_max", "Maximum heating rate"), ("v_cool_max", "Maximum cooling rate")):
+            field = self.system[key]
+            field.setValue(values[key] * TIME_UNITS[self.rate_unit] / 60)
+            self.rate_original[key] = (values[key], field.value())
+            self.system_labels[key].setText(f"{title} (°C/{self.rate_unit})")
+            field.setToolTip(f"{values[key]:g} °C/min. This display converts with Timeline time units.")
+        self.editor.recipe["time_unit"] = self.rate_unit
+        blocked = self.editor.blockSignals(True)
+        try:
+            self.editor.refresh()
+        finally:
+            self.editor.blockSignals(blocked)
 
     def import_components(self, configs):
         from experiment.experiment_service import ExperimentService
@@ -599,13 +665,19 @@ class ExperimentDefinitionDialog(QDialog):
         try:
             self.legacy.save()
             for key, field in self.system.items():
-                field.setValue(getattr(self.draft, key))
+                if key in self.rate_original:
+                    value = getattr(self.draft, key)
+                    field.setValue(value * TIME_UNITS[self.rate_unit] / 60)
+                    self.rate_original[key] = (value, field.value())
+                else:
+                    field.setValue(getattr(self.draft, key))
             service = ExperimentService()
             service.exp_par = deepcopy(self.draft)
             service.exp_par.timeline = {}
             creator = service.generate_initial_doe(1, "LHS")
             frame = next(iter(creator.exp_storage.data.values()))
             self.editor.recipe = recipe_from_frame(frame, self.draft, configs)
+            self.editor.recipe["time_unit"] = self.rate_unit
             self.editor.refresh()
             self.error.setText("Imported one component profile. Edit stage purposes to identify charging, experiment, equilibration and cleanup.")
         except (ValueError, TypeError, KeyError) as error:
@@ -616,9 +688,11 @@ class ExperimentDefinitionDialog(QDialog):
             if self.source.currentIndex() == 0:
                 self.draft.timeline = deepcopy(validate_recipe(self.editor.recipe))
                 for key, field in self.system.items():
-                    setattr(self.draft, key, field.value())
+                    setattr(self.draft, key, self.rate_value(key) if key in self.rate_original else field.value())
                 from experiment.recipe import compile_recipe, recipe_parameters
-                compile_recipe(self.draft.timeline, {key: value["value"] for key, value in recipe_parameters(self.draft.timeline)}, self.draft)
+                self.limit_warnings = []
+                compile_recipe(self.draft.timeline, {key: value["value"] for key, value in recipe_parameters(self.draft.timeline)},
+                               self.draft, check_limits=False, limit_warnings=self.limit_warnings)
             else:
                 self.legacy.save()
                 self.draft.timeline = {}

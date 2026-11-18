@@ -546,6 +546,14 @@ parallel. Reuse the same pump line during charging, antisolvent addition, cleani
 and rinsing. An empty pump or valve cell is off. An empty temperature or stirring
 cell holds the preceding target.
 
+**Timeline time units** defaults to minutes and also offers seconds and hours.
+Stage/device-profile durations, the displayed experiment horizon and heating/cooling
+rate limits use matching units (°C/min, °C/s or °C/h). Switching units converts the
+display and preserves existing timing and limits, including saved presets. Drafts
+can be saved with rates above the configured limits; their warnings appear in the
+application log. Generating the DoE checks those limits and reports the requested
+temperature change, actual rate and minimum required duration.
+
 Temperature Start/End fields have **Equal to previous** checkboxes. Each linked
 value resolves from the preceding section's final target separately for each
 generated experiment (the first section uses the line's Initial target). For

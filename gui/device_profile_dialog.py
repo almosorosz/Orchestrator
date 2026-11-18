@@ -5,16 +5,17 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QPushButton, QVBoxLayout, QWidget)
 
 from experiment.doe_campaign import ROLES
-from experiment.recipe import parameter
+from experiment.recipe import TIME_UNITS, parameter
 from gui.recipe_editor import ParameterTable, identifier
 
 
 class DeviceProfileDialog(QDialog):
-    def __init__(self, lane, stages, parent=None):
+    def __init__(self, lane, stages, parent=None, *, time_unit="min"):
         super().__init__(parent)
         self.setWindowTitle(f"Device profile · {lane['name']}")
         self.resize(1100, 560)
         self.lane = lane
+        self.time_unit = time_unit
         self.sections = deepcopy(lane.get("profile", []))
         self.current = -1
         self.table = None
@@ -87,14 +88,17 @@ class DeviceProfileDialog(QDialog):
             self.sections[self.current].update(name=self.name.text().strip(), kind=self.kind.currentData(),
                                                 control_mode=self.control_mode.currentData())
             section = self.sections[self.current]
-            self.section_list.item(self.current).setText(f"{section['name']} · {section['duration']['value']:g} s")
+            self.section_list.item(self.current).setText(self.section_text(section))
+
+    def section_text(self, section):
+        return f"{section['name']} · {section['duration']['value'] / TIME_UNITS[self.time_unit]:g} {self.time_unit}"
 
     def refresh(self, row):
         self.current = -1
         self.section_list.blockSignals(True)
         self.section_list.clear()
         for section in self.sections:
-            self.section_list.addItem(f"{section['name']} · {section['duration']['value']:g} s")
+            self.section_list.addItem(self.section_text(section))
         self.section_list.setCurrentRow(row)
         self.section_list.blockSignals(False)
         self.select(row)
@@ -123,7 +127,7 @@ class DeviceProfileDialog(QDialog):
         if section["kind"] == "Ramp":
             entries.append((f"Start ({unit})", section["start"]))
         entries.append((f"End ({unit})", section["end"]))
-        self.table = ParameterTable(entries, temperature=self.lane["role"] == "T")
+        self.table = ParameterTable(entries, temperature=self.lane["role"] == "T", time_unit=self.time_unit)
         self.details.addWidget(self.table, 1)
         self.summary.setText("Profile duration uses the sum of its section durations in each generated experiment. "
                              "For temperature, Equal to previous uses the preceding section's final temperature; the first uses Initial target.")

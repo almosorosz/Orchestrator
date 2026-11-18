@@ -10,6 +10,7 @@ from experiment.doe_campaign import ROLES, ProfileRole
 
 
 PURPOSES = ("Charging", "Experiment", "Equilibration", "Cleaning", "Rinse", "Discharge", "Wait")
+TIME_UNITS = {"s": 1., "min": 60., "h": 3600.}
 SYSTEM_FIELDS = ("v_heat_max", "v_cool_max", "AS_add_max", "T_room", "sol_add_max",
                  "time_to_wait_prior_exp", "aceton_boil_out_T", "wait_after_exp", "t_before_open_valve")
 
@@ -44,6 +45,8 @@ def sampled_parameter(item):
 def validate_recipe(recipe):
     if not isinstance(recipe, dict) or recipe.get("version") != 1:
         raise ValueError("Choose an Experiment Definition recipe.")
+    if recipe.get("time_unit", "min") not in TIME_UNITS:
+        raise ValueError("Choose seconds, minutes or hours for the time display.")
     lanes, stages = recipe["lanes"], recipe["stages"]
     for entries, label in ((lanes, "device lines"), (stages, "stages")):
         independent = label == "stages" and any(lane.get("profile") for lane in lanes)
@@ -112,7 +115,13 @@ def validate_recipe(recipe):
     return recipe
 
 
-def compile_recipe(recipe, values, system):
+def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=None):
+    def check_limit(message):
+        if check_limits:
+            raise ValueError(message)
+        if limit_warnings is not None:
+            limit_warnings.append(message)
+
     lanes = recipe["lanes"]
     times = np.r_[0., np.cumsum([values[f"{stage['id']}.duration"] for stage in recipe["stages"]])]
     if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
@@ -167,7 +176,7 @@ def compile_recipe(recipe, values, system):
             if ROLES[lane["role"]].unit == "g/h":
                 limit = 60 * (system.AS_add_max if lane["role"] == "AS" else system.sol_add_max)
                 if max(start, finish) > limit + 1e-10:
-                    raise ValueError(f"{name} exceeds the System Settings pump addition limit.")
+                    check_limit(f"{name}: pump rate {max(start, finish) / 60:g} g/min exceeds the System settings limit {limit / 60:g} g/min.")
             if start != current and begin:
                 before = begin - min(1e-6, (begin - x[-2]) / 2) if len(x) > 1 else np.nextafter(begin, 0.)
                 if len(x) > 1 and before <= x[-2]:
@@ -181,7 +190,12 @@ def compile_recipe(recipe, values, system):
                 rate = 60 * abs(finish - start) / (end - begin)
                 limit = system.v_heat_max if finish > start else system.v_cool_max
                 if rate > limit + 1e-10:
-                    raise ValueError(f"{name} exceeds the System Settings temperature ramp limit.")
+                    unit = recipe.get("time_unit", "min")
+                    scale = TIME_UNITS[unit]
+                    minimum = 60 * abs(finish - start) / limit if limit > 0 else float("inf")
+                    check_limit(f"{name}: {start:g} → {finish:g} °C in {(end - begin) / scale:g} {unit} "
+                                f"requires {rate * scale / 60:g} °C/{unit}; the System settings limit is {limit * scale / 60:g} °C/{unit}. "
+                                f"Minimum duration: {minimum / scale:g} {unit} ({minimum:g} s).")
                 mode = action["control_mode"]
                 if mode != last_mode:
                     modes.append({"time_s": float(begin), "lane": lane["id"], "mode": mode})

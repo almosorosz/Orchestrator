@@ -1435,6 +1435,8 @@ class MainWindow(QMainWindow):
                 "Experiment Definition saved. Generate the DoE and apply device assignments.",
                 "INFO"
             )
+            for warning in dlg.limit_warnings:
+                self.log_message(f"Saved draft needs attention before DoE generation: {warning}", "WARNING")
 
     def define_doe(self):
         if self.control_panel.experiment_running() or (self.execution.timer.isActive() and not self.execution.awaiting_campaign):
