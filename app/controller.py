@@ -3,18 +3,18 @@
 import os
 from enum import Enum
 from typing import Optional
-from utilities.data_utils import counter
-
-from PySide6.QtCore import QObject, QTimer
-
-import subprocess
+from utilities.data_utils import StableResultTracker, result_files
+from imed_python.size_data import FINAL_SIZE_TERM, SIZE_SAMPLE_OPTIONS
 
 class Stage(Enum):
     OMNI = "OMNI"
     MODEL = "MODEL"
 
 class Controller:
-    def __init__(self, omni_folder: str, model_folder: str , initial_exp_count: int, omni_filename: str="expttsd", model_filename: str="model"):
+    def __init__(self, omni_folder: str, model_folder: str , initial_exp_count: int, omni_filename: str="expttsd", model_filename: str="model", *, pbm_size_term=FINAL_SIZE_TERM):
+        if pbm_size_term not in {value for _, value in SIZE_SAMPLE_OPTIONS}:
+            raise ValueError("Choose final sizes or all recorded size trends for LOOP PBM fitting.")
+        self.pbm_size_term = pbm_size_term
         
         self.omni_filename       = omni_filename
         self.model_filename      = model_filename
@@ -29,6 +29,7 @@ class Controller:
         self.process_stop = False
         
         self.current_stage: Optional[Stage] = None
+        self.result_tracker = StableResultTracker()
     
     def exp_num(self,n):
         self.initial_exp_count = n
@@ -38,6 +39,7 @@ class Controller:
         self.process_stop = False
 
     def reset(self):
+        self.result_tracker = StableResultTracker()
         self.process_stop = False
         self.current_stage = None
         self.initial_exp_count = 0
@@ -49,10 +51,19 @@ class Controller:
         self.process_stop = True  
 
     def if_omni_finished(self,path,num): 
-        return counter(path, self.omni_filename) >= num
+        return self.completed_count(path, self.omni_filename) >= num
         
     def if_model_finished(self,path): 
-        return counter(path, self.model_filename) >= 1
+        return self.completed_count(path, self.model_filename) >= 1
+
+    def completed_count(self, path, filename):
+        files = self.result_tracker.files(path, filename)
+        if filename == self.omni_filename:
+            files = [p for p in files if p.suffix.lower() == ".csv"]
+        return len(files)
+
+    def detected_omni_files(self, path):
+        return [p for p in result_files(path, self.omni_filename) if p.suffix.lower() == ".csv"]
     
     def pathcreator_model(self, counter_val, path_orig):
 

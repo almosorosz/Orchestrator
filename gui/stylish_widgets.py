@@ -77,6 +77,8 @@ class LogViewer(QTextEdit):
 
     def __init__(self,style='dark'):
         super().__init__()
+        self.setReadOnly(True)
+        self.document().setMaximumBlockCount(2000)
 
         #self.setReadOnly(True)
     def set_theme(self, dark=True):
@@ -110,6 +112,8 @@ class LogViewer(QTextEdit):
         
 
     def add_log(self, message, level="INFO"):
+        from html import escape
+        message = escape(str(message))
 
         colors = {
             "INFO": "#60a5fa",

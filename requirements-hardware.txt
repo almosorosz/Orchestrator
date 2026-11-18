@@ -1,0 +1,3 @@
+-r requirements.txt
+# Optional Python wrapper; physical NI hardware also needs NI's native runtime.
+nidaqmx==1.5.0

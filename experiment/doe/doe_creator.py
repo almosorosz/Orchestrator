@@ -11,7 +11,7 @@ import experiment.profiles.profile_gen_helper_funcs as profile_gen_helper_funcs
 
 from pathlib           import Path
 from scipy.interpolate import interp1d
-from dataclasses       import dataclass, field, fields
+from dataclasses       import asdict, dataclass, field, fields
 from itertools         import accumulate, chain
 from openpyxl          import load_workbook, Workbook
 from matplotlib.figure import Figure
@@ -42,6 +42,7 @@ class ExperimentCreator():
         self.plotting_axes = []
         self.plotting_figs = []
         self.actually_sampled_experiments = 0
+        self.parameter_snapshots = {}
         
     def set_doe_settings(self, exp_par, sampless, Type = 'GREEDY', Fract = 0):    
 
@@ -103,7 +104,9 @@ class ExperimentCreator():
 
                     if self.exp_par.if_ARR:
                         self.exp_par.ARR = self.exp_par.ARR_types[i%len(self.exp_par.ARR_types)]
-            self.exp_storage.add_experiment(f'exp{i+1}', self.profiles.generate_profiles()[0],self.profiles.generate_profiles()[1])
+            self.parameter_snapshots[f'exp{i+1}'] = asdict(self.exp_par)
+            generated, omni_profile = self.profiles.generate_profiles()
+            self.exp_storage.add_experiment(f'exp{i+1}', generated, omni_profile)
             
             # Store the changed parameters of the DoE
             self.exp_storage.add_doe_stage( f'exp{i+1}', pd.DataFrame(self.DoE_val)) # this is empty when only one sample is taken
@@ -130,16 +133,14 @@ class ExperimentCreator():
         return fig_2D, fig_3D
         
     def export_generated_expts(self,loc_to_save_expts):
-
-        for i in range(self.actually_sampled_experiments):
-            DAT = pd.DataFrame(self.exp_storage.profile_omni[f'exp{i+1}'])
-
-            try:
-                with pd.ExcelWriter(loc_to_save_expts, engine="openpyxl", mode="a") as writer:
-                    DAT.to_excel(writer, sheet_name=f"exp{i+1}", index=False)
-            except:
-                with pd.ExcelWriter(loc_to_save_expts, engine="openpyxl", mode="w") as writer:
-                    DAT.to_excel(writer, sheet_name=f"exp{i+1}", index=False)
+        if self.actually_sampled_experiments < 1:
+            raise ValueError("Generate at least one experiment before exporting")
+        exists = Path(loc_to_save_expts).exists()
+        options = {"if_sheet_exists": "replace"} if exists else {}
+        with pd.ExcelWriter(loc_to_save_expts, engine="openpyxl", mode="a" if exists else "w", **options) as writer:
+            for i in range(self.actually_sampled_experiments):
+                DAT = pd.DataFrame(self.exp_storage.profile_omni[f'exp{i+1}'])
+                DAT.to_excel(writer, sheet_name=f"exp{i+1}", index=False)
 
     def export_OMNI_expts(self,loc_to_save_expts):
         mapping = {'T': 'MAIN-TEMP', 'AS': 'AS','stirring_rate': 'MAIN-STR','solution': 'SOLUTION','solvent': 'SOLVENT', 'seed': 'SEED', 
@@ -164,18 +165,21 @@ class ExperimentCreator():
 
         name_to_save_expts = ( Path(loc_to_save_expts) / "agrprofiles.xlsx")
 
-        try:
+        if self.actually_sampled_experiments < 1:
+            raise ValueError("Generate at least one experiment before exporting")
+        if name_to_save_expts.exists():
             wb = load_workbook(name_to_save_expts)
-            for sheet in wb.worksheets[1:]:
-                wb.remove(ws)
-                wb.create_sheet(title=f"subexp{1}")
-                wb.save(name_to_save_expts)
-        except:
+            # Replace generated sheets only; preserve user-added sheets.
+            for sheet in list(wb.worksheets):
+                if sheet.title.startswith("subexp") and sheet.title[6:].isdigit():
+                    wb.remove(sheet)
+        else:
             wb = Workbook()
-            default_sheet = wb.active
-            wb.remove(default_sheet)
-            wb.create_sheet(title=f"subexp{1}")
-            wb.save(name_to_save_expts)
+            wb.remove(wb.active)
+        for i in range(self.actually_sampled_experiments):
+            wb.create_sheet(title=f"subexp{i+1}", index=i)
+        wb.save(name_to_save_expts)
+        wb.close()
 
         for i in range(self.actually_sampled_experiments):
 

@@ -1,13 +1,17 @@
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from utilities.data_utils import counter
-
 from app.controller import Stage
+from pathlib import Path
+import json
+import logging
+
+logger = logging.getLogger("orchestrator.execution")
 
 class ExperimentCoordinator(QObject):
 
     omni_completed = Signal(dict)
     model_completed = Signal(dict)
+    next_experiment_required = Signal(dict)
     stage_changed = Signal(object)
     experiment_progress = Signal(dict)
     error_occurred = Signal(dict)
@@ -22,6 +26,14 @@ class ExperimentCoordinator(QObject):
         self.controller = None
         self.data_processor = None
         self.experiment_creator = None
+        # An optimizer adapter must explicitly provide the next experiment.
+        self.next_experiment_provider = None
+        self.campaign_mode = False
+        self.awaiting_campaign = False
+        self.campaign_id = None
+        self.expected_experiments = set()
+        self.completed_experiments = set()
+        self._waiting_files = set()
 
         # ------------------------------------------------------
         # MONITORING STATE
@@ -37,6 +49,7 @@ class ExperimentCoordinator(QObject):
 
         self.conducted_experiments_count = 0
         self.previous_exp_count = 0
+        self._seen_omni_files = set()
 
         self.model_run_count = 0
         self.omni_run_count = 0
@@ -48,6 +61,26 @@ class ExperimentCoordinator(QObject):
         self.timer = QTimer(self)
 
         self.timer.timeout.connect(self.monitoring_tick)
+
+    def _defer_file(self, path, error):
+        path = str(path)
+        if path not in self._waiting_files:
+            logger.warning("Monitoring is waiting for a recording file to become readable; retrying automatically: %s (%s). "
+                           "If it is open in another application, close it. Experiments continue.", path, error)
+            self._waiting_files.add(path)
+
+    def _read_campaign_json(self, path):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (PermissionError, FileNotFoundError, json.JSONDecodeError) as error:
+            # Atomic publication and cloud synchronization can briefly hide,
+            # lock or expose an incomplete marker. Retry on the next timer tick.
+            self._defer_file(path, error)
+            return None
+        if str(path) in self._waiting_files:
+            self._waiting_files.discard(str(path))
+            logger.info("Monitoring file readable again: %s", path)
+        return payload
 
 
     def set_controller(self, controller):
@@ -126,6 +159,13 @@ class ExperimentCoordinator(QObject):
     
         # Stop Controller + timer first.
         self.stop_execution()
+        self.next_experiment_provider = None
+        self.campaign_mode = False
+        self.awaiting_campaign = False
+        self.campaign_id = None
+        self.expected_experiments.clear()
+        self.completed_experiments.clear()
+        self._waiting_files.clear()
     
         # ------------------------------------------------------
         # EXECUTION OBJECTS
@@ -157,8 +197,8 @@ class ExperimentCoordinator(QObject):
         """
         Poll the active execution directory.
     
-        Unexpected monitoring failures stop execution and
-        are reported through error_occurred.
+        Temporary filesystem locks/disappearances wait for the next tick.
+        Unexpected failures stop execution and emit error_occurred.
         """
     
         if self.controller is None:
@@ -176,17 +216,19 @@ class ExperimentCoordinator(QObject):
             # --------------------------------------------------
     
             if self.monitor_mode == Stage.OMNI:
+
+                if self.campaign_mode:
+                    self.poll_campaign()
+                    return
     
-                current_count = counter(
-                    self.monitor_path,
-                    self.controller.omni_filename,
-                )
-    
-                new_experiments = (
-                    self.record_omni_file_count(
-                        current_count
-                    )
-                )
+                # Visible experiment count means detected CSV files, as in
+                # the original workflow. Stability gates stage completion only.
+                detected = set(self.controller.detected_omni_files(self.monitor_path))
+                current_count = len(detected)
+                new_experiments = len(detected - self._seen_omni_files)
+                self._seen_omni_files.update(detected)
+                self.conducted_experiments_count += new_experiments
+                self.previous_exp_count = current_count
     
                 if new_experiments > 0:
     
@@ -212,6 +254,8 @@ class ExperimentCoordinator(QObject):
                     self.controller.omni_folder
                 )
     
+        except (PermissionError, FileNotFoundError) as error:
+            self._defer_file(error.filename or self.monitor_path, error)
         except Exception as error:
     
             self.handle_monitoring_error(error)
@@ -240,6 +284,95 @@ class ExperimentCoordinator(QObject):
         self.previous_exp_count = current_count
     
         return new_experiments
+
+    def begin_campaign(self, campaign):
+        if self.controller is None:
+            raise RuntimeError("Define experiment and MODEL folders first")
+        self.campaign_mode = True
+        self.awaiting_campaign = False
+        self.campaign_id = campaign.campaign_id
+        self.expected_experiments = {e.experiment_id for e in campaign.experiments}
+        if not self.expected_experiments or len(self.expected_experiments) != len(campaign.experiments):
+            raise ValueError("Campaign experiments must have distinct identities")
+        self.completed_experiments = set()
+        self._waiting_files.clear()
+        self.conducted_experiments_count = 0
+        self.controller.exp_num(len(self.expected_experiments))
+        self.monitor_path = None
+        self.monitor_mode = Stage.OMNI
+        self.controller.start()
+        self.stage_changed.emit(Stage.OMNI)
+        self.start_timer(500)
+
+    def set_campaign_folder(self, folder):
+        if not self.campaign_mode or self.controller.process_stop:
+            return
+        path = Path(folder).resolve()
+        if path.parent != Path(self.controller.omni_folder).resolve():
+            raise ValueError("Campaign recording folder is outside the selected experiment folder")
+        self.monitor_path = str(path)
+        self.controller.current_omni_folder = str(path)
+
+    def poll_campaign(self):
+        if self.monitor_path is None:
+            return
+        folder = Path(self.monitor_path)
+        if not (folder / "definition.json").exists():
+            return  # The recording writer may still be committing startup metadata.
+        definition = self._read_campaign_json(folder / "definition.json")
+        if definition is None:
+            return
+        if definition["campaign"]["campaign_id"] != self.campaign_id:
+            raise ValueError("Campaign recording identity does not match the active loop")
+        completed = set()
+        skipped = set()
+        for directory in folder.iterdir():
+            marker = directory / "run.json"
+            if not directory.is_dir() or not marker.exists():
+                continue
+            run = self._read_campaign_json(marker)
+            if run is None:
+                continue
+            if run.get("run_id") == directory.name and run.get("experiment_id") in self.expected_experiments:
+                if run.get("recording_complete"):
+                    if run.get("status") == "completed":
+                        completed.add(run["experiment_id"])
+                    elif run.get("status") == "skipped":
+                        skipped.add(run["experiment_id"])
+        new = completed - self.completed_experiments
+        self.completed_experiments.update(new)
+        self.conducted_experiments_count = len(self.completed_experiments)
+        if new:
+            self.experiment_progress.emit({"new_experiments": len(new), "total_experiments": self.conducted_experiments_count,
+                                           "current_batch_count": self.conducted_experiments_count})
+        summary_path = folder / "summary.json"
+        if not summary_path.exists():
+            return
+        summary = self._read_campaign_json(summary_path)
+        if summary is None:
+            return
+        if summary["status"] == "stopped":
+            self.stop_execution()
+            return
+        if summary["status"] == "failed":
+            raise RuntimeError(f"Campaign {summary['status']}; MODEL transition cancelled")
+        if completed | skipped != self.expected_experiments or not summary.get("recording_complete"):
+            return
+        model_path = Path(self.controller.model_folder) / f"_model_{self.controller.omni_count}_{self.campaign_id[:12]}"
+        # A lock while publishing campaign_input.json must allow this same
+        # transition to retry without failing on the directory already created.
+        model_path.mkdir(exist_ok=True)
+        (model_path / "campaign_input.json").write_text(json.dumps({"campaign_id": self.campaign_id,
+            "campaign_folder": str(folder), "experiments": sorted(completed),
+            "skipped_experiments": sorted(skipped),
+            "pbm_fitting": {"size_term": self.controller.pbm_size_term}}, indent=2), encoding="utf-8")
+        self.controller.current_model_folder = str(model_path)
+        self.controller.omni_count += 1
+        self.omni_run_count = self.controller.omni_count
+        self.begin_model_monitor(str(model_path))
+        self.controller.current_stage = Stage.MODEL
+        self.omni_completed.emit({"omni_run_count": self.omni_run_count, "model_path": str(model_path)})
+        self.stage_changed.emit(Stage.MODEL)
     
     
     def begin_omni_monitor(
@@ -252,6 +385,7 @@ class ExperimentCoordinator(QObject):
         """
     
         self.previous_exp_count = 0
+        self._seen_omni_files = set()
     
         self.set_monitor(
             mode=Stage.OMNI,
@@ -306,6 +440,8 @@ class ExperimentCoordinator(QObject):
                 model_root,
             )
         )
+        (Path(model_path) / "pbm_fitting.json").write_text(
+            json.dumps({"size_term": self.controller.pbm_size_term}, indent=2), encoding="utf-8")
     
         self.controller.current_model_folder = (
             model_path
@@ -371,6 +507,31 @@ class ExperimentCoordinator(QObject):
         self.model_run_count = (
             self.controller.model_count
         )
+
+        if self.campaign_mode:
+            completed_model_path = self.monitor_path
+            # MODEL has completed. Keep the loop active in the OMNI phase,
+            # ready for an explicitly supplied next campaign. Never re-read
+            # the previous campaign's completion markers or replay it silently.
+            self.awaiting_campaign = True
+            self.monitor_mode = Stage.OMNI
+            self.monitor_path = None
+            self.controller.current_stage = Stage.OMNI
+            self.start_timer(500)
+            result = {"model_run_count": self.model_run_count, "model_path": completed_model_path,
+                      "awaiting_recommendation": True, "awaiting_campaign": True}
+            self.model_completed.emit(result)
+            self.stage_changed.emit(Stage.OMNI)
+            self.next_experiment_required.emit(result)
+            return result
+
+        # Preserve the original external/manual loop when no optimizer adapter
+        # is installed: the external producer supplies the next batch's files.
+        creator = None
+        if self.next_experiment_provider is not None:
+            creator = self.next_experiment_provider(self.controller.current_model_folder)
+            if creator is None or creator.actually_sampled_experiments < 1:
+                raise ValueError("Next experiment provider returned no experiments")
     
         omni_path, exp_count = (
             self.controller.pathcreator_omni(
@@ -382,6 +543,10 @@ class ExperimentCoordinator(QObject):
         self.controller.current_omni_folder = (
             omni_path
         )
+
+        if creator is not None:
+            creator.export_OMNI_expts(omni_path)
+            exp_count = creator.actually_sampled_experiments
     
         self.begin_omni_monitor(
             path=omni_path,
@@ -396,6 +561,7 @@ class ExperimentCoordinator(QObject):
             "model_run_count": self.model_run_count,
             "omni_path": omni_path,
             "exp_count": exp_count,
+            "external_experiment_required": creator is None,
         }
         
         self.model_completed.emit(result)
@@ -446,9 +612,11 @@ class ExperimentCoordinator(QObject):
         self.begin_omni_monitor(path=omni_path,num=initial_exp_count)
     
         # Export the experiment definitions.
-        self.experiment_creator.export_OMNI_expts(
-            omni_path
-        )
+        try:
+            self.experiment_creator.export_OMNI_expts(omni_path)
+        except Exception as error:
+            self.handle_monitoring_error(error)
+            raise
     
         # Start Controller execution.
         self.controller.start()
@@ -461,7 +629,7 @@ class ExperimentCoordinator(QObject):
         
         return {
             "omni_path": omni_path,
-            "exp_count": exp_count,
+            "exp_count": initial_exp_count,
         }
     
     

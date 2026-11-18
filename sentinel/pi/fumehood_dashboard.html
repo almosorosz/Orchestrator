@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Sentinel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --bg:#223c34;--bg-2:#1a2f29;--panel:#2b473f;--panel-hi:#345349;--input:#244039;
+  --ink:#f3f8f5;--muted:#adc1ba;--faint:#728881;--line:#3d574e;--line-hi:#4d6b61;
+  --signal:#63e6d2;--signal-dim:#31857a;--amber:#f0b757;--coral:#f07a6c;
+  --r:16px;--gap:clamp(10px,1.6vmin,22px);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--ink);
+  background:radial-gradient(120% 90% at 50% 0%, #2c4a41 0%, var(--bg) 46%, var(--bg-2) 100%);
+  overflow:hidden;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:46px 46px;opacity:.12;mask-image:radial-gradient(120% 100% at 50% 40%,#000 30%,transparent 90%)}
+.mono{font-family:"Space Mono",ui-monospace,monospace}
+.eyebrow{font-size:clamp(10px,1.3vmin,13px);letter-spacing:.22em;text-transform:uppercase;color:var(--muted);font-weight:500}
+
+/* ---------- Dashboard grid ---------- */
+.dashboard{position:relative;z-index:1;height:100dvh;width:100%;display:grid;
+  grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:var(--gap);padding:var(--gap)}
+.quad{position:relative;border:1px solid var(--line);border-radius:var(--r);
+  background:linear-gradient(180deg,var(--panel-hi),var(--panel));
+  padding:clamp(16px,2.6vmin,32px);display:flex;flex-direction:column;cursor:pointer;
+  transition:border-color .25s,transform .25s,box-shadow .25s;overflow:hidden;min-height:0}
+.quad:focus-visible{outline:2px solid var(--signal);outline-offset:3px}
+.quad::after{content:"";position:absolute;width:10px;height:10px;border-color:var(--faint);transition:border-color .25s}
+.quad:hover,.quad:active{border-color:var(--line-hi);box-shadow:0 0 0 1px var(--line-hi),0 18px 46px -30px #000;transform:translateY(-2px)}
+.quad:hover::after{border-color:var(--signal)}
+.q-tl{align-items:flex-start;text-align:left}
+.q-tr{align-items:flex-end;text-align:right}
+.q-bl{align-items:flex-start;justify-content:flex-end;text-align:left}
+.q-br{align-items:flex-end;justify-content:flex-end;text-align:right}
+.q-tl::after{right:13px;bottom:13px;border-right:2px solid;border-bottom:2px solid}
+.q-tr::after{left:13px;bottom:13px;border-left:2px solid;border-bottom:2px solid}
+.q-bl::after{right:13px;top:13px;border-right:2px solid;border-top:2px solid}
+.q-br::after{left:13px;top:13px;border-left:2px solid;border-top:2px solid}
+.q-list{align-items:stretch;text-align:left}
+.q-list .q-head{flex-direction:row}
+.q-head{display:flex;align-items:center;gap:12px;flex:none}
+.q-tr .q-head,.q-br .q-head{flex-direction:row-reverse}
+.q-ico{width:clamp(38px,5.2vmin,54px);height:clamp(38px,5.2vmin,54px);border:1px solid var(--line-hi);
+  border-radius:12px;display:grid;place-items:center;color:var(--signal);flex:none;background:var(--input)}
+.q-ico svg{width:58%;height:58%;stroke:currentColor;stroke-width:1.6;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.q-title{font-size:clamp(18px,2.8vmin,28px);font-weight:700;letter-spacing:-.01em;line-height:1.1;color:#fff}
+.q-body{margin-top:auto;display:flex;flex-direction:column;gap:7px}
+.placeholder-tag{margin-top:9px;font-size:clamp(11px,1.5vmin,14px);color:var(--faint);
+  border:1px dashed var(--line-hi);border-radius:999px;padding:5px 13px;letter-spacing:.05em}
+
+/* info tile (top-left) */
+.info-list{display:grid;grid-template-columns:auto 1fr;column-gap:16px;row-gap:clamp(7px,1.3vmin,11px);
+  width:100%;margin-top:clamp(12px,2vmin,20px);flex:1;min-height:0;overflow:auto;align-content:start}
+.info-list dt{font-size:clamp(10px,1.4vmin,13px);letter-spacing:.12em;text-transform:uppercase;
+  color:var(--muted);white-space:nowrap;padding-top:3px;font-weight:500}
+.info-list dd{margin:0;color:#fff;font-size:clamp(15px,2vmin,19px);line-height:1.3;word-break:break-word}
+.info-list dd.empty-val{color:var(--faint)}
+.info-empty{color:var(--muted);font-size:clamp(14px,1.9vmin,17px);margin-top:14px}
+
+/* sensor tile (top-right) */
+.s-list{display:flex;flex-direction:column;gap:clamp(9px,1.7vmin,16px);margin-top:clamp(12px,2vmin,18px);
+  flex:1;min-height:0;justify-content:flex-start;overflow:auto}
+.s-row{display:flex;flex-direction:column;gap:5px}
+.s-row-top{display:flex;align-items:center;gap:9px}
+.s-name{font-size:clamp(13px,1.9vmin,17px);color:#fff;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+.s-val{font-family:"Space Mono",monospace;font-size:clamp(14px,2vmin,18px);color:#fff;white-space:nowrap;font-weight:700}
+.s-val.warn{color:var(--amber)}.s-val.alert{color:var(--coral)}
+.s-val.stale,.sensor-val.stale,.probe-current .big.stale{opacity:.5}
+.s-spark{height:clamp(16px,2.6vmin,24px);width:100%;display:block}
+.s-pages{display:flex;gap:6px;justify-content:center;margin-top:10px;min-height:7px;flex:none}
+.s-pages i{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+.s-pages i.on{background:var(--signal)}
+
+/* ---------- Center core ---------- */
+.core{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;
+  width:clamp(210px,37vmin,400px);height:clamp(210px,37vmin,400px);border-radius:50%;display:grid;place-items:center}
+.core-bezel{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+.core-bezel circle{fill:none}
+.cb-base{stroke:var(--line);stroke-width:1;opacity:.6}
+.cb-ticks{stroke:var(--line-hi);stroke-width:2.4;stroke-dasharray:.6 5;opacity:.7}
+.cb-arc{stroke:var(--signal);stroke-width:1.8;stroke-linecap:round;stroke-dasharray:42 100.9;opacity:.8}
+.core-face{position:absolute;inset:9%;border-radius:50%;
+  background:radial-gradient(circle at 50% 35%,#2a463e,#1c332c 72%);border:1px solid var(--line);
+  box-shadow:inset 0 0 44px -16px #000,0 22px 50px -26px #000;display:grid;place-items:center;text-align:center}
+.core-slide{position:absolute;inset:0;display:grid;place-items:center;align-content:center;opacity:0;transition:opacity .7s;padding:8% 5%}
+.core-slide.on{opacity:1}
+#clockTime{font-size:clamp(26px,4.9vmin,46px);font-weight:700;letter-spacing:0;line-height:1;white-space:nowrap;color:#fff}
+#clockDate{margin-top:9px;font-size:clamp(12px,1.9vmin,16px);color:var(--muted);letter-spacing:.06em}
+#clockDay{font-size:clamp(11px,1.6vmin,14px);color:var(--signal);letter-spacing:.24em;text-transform:uppercase;margin-bottom:6px}
+.wx-glyph{width:clamp(30px,5.4vmin,44px);height:clamp(30px,5.4vmin,44px);stroke:var(--signal);stroke-width:1.6;
+  fill:none;stroke-linecap:round;stroke-linejoin:round;margin-bottom:4px}
+#wxTemp{font-size:clamp(28px,5.6vmin,48px);font-weight:700;line-height:1;color:#fff}
+#wxCond{font-size:clamp(12px,1.7vmin,15px);color:var(--muted);margin-top:5px}
+#wxMeta{font-size:clamp(10px,1.35vmin,12px);color:var(--faint);margin-top:6px;letter-spacing:.04em}
+.core-dots{position:absolute;bottom:13%;left:0;right:0;display:flex;gap:7px;justify-content:center;z-index:2}
+.core-dots i{width:6px;height:6px;border-radius:50%;background:var(--faint);transition:background .3s}
+.core-dots i.on{background:var(--signal)}
+
+/* ---------- Detail overlay ---------- */
+.detail{position:fixed;inset:0;z-index:20;background:radial-gradient(120% 90% at 50% 0%, #2c4a41 0%, var(--bg) 55%, var(--bg-2) 100%);
+  transform:translateY(2%);opacity:0;pointer-events:none;
+  transition:transform .34s cubic-bezier(.2,.7,.2,1),opacity .28s;display:flex;flex-direction:column}
+.detail.open{transform:none;opacity:1;pointer-events:auto}
+.detail-bar{display:flex;align-items:center;gap:16px;padding:clamp(15px,2.6vmin,28px);border-bottom:1px solid var(--line)}
+.back{display:inline-flex;align-items:center;gap:9px;cursor:pointer;border:1px solid var(--line-hi);
+  background:var(--input);color:var(--ink);border-radius:11px;padding:10px 16px;font:inherit;font-size:15px;font-weight:500;
+  transition:border-color .2s,background .2s}
+.back:hover{border-color:var(--signal)}
+.back:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.back svg{width:16px;height:16px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.detail-title{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.detail-title h2{margin:0;font-size:clamp(22px,3.2vmin,32px);font-weight:700;letter-spacing:-.01em;color:#fff}
+.detail-body{flex:1;overflow:auto;padding:clamp(18px,3vmin,42px)}
+.detail-inner{max-width:940px;margin:0 auto;width:100%}
+
+/* form */
+.field{margin-bottom:22px}
+.field label{display:block;font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:9px;font-weight:500}
+.field input,.field textarea{width:100%;background:var(--input);border:1px solid var(--line);border-radius:12px;
+  color:#fff;font:inherit;font-size:16px;padding:14px 16px;transition:border-color .2s,box-shadow .2s;resize:vertical}
+.field input::placeholder,.field textarea::placeholder{color:var(--faint)}
+.field input:focus,.field textarea:focus{outline:none;border-color:var(--signal);box-shadow:0 0 0 3px #63e6d222}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:640px){.grid-2{grid-template-columns:1fr}}
+.save-row{display:flex;align-items:center;gap:14px;margin-top:6px}
+.btn{border:1px solid var(--signal-dim);background:var(--signal);color:#06110f;border-radius:12px;
+  padding:13px 24px;font:inherit;font-weight:600;font-size:16px;cursor:pointer;transition:filter .2s,transform .1s}
+.btn:hover{filter:brightness(1.08)}.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.saved-note{font-size:14px;color:var(--signal);opacity:0;transition:opacity .3s}
+.saved-note.show{opacity:1}
+
+/* sensor detail cards */
+.sensor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:18px}
+.sensor-card{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,var(--panel-hi),var(--panel));
+  padding:20px;position:relative;overflow:hidden;cursor:pointer;transition:border-color .2s,transform .2s,box-shadow .2s}
+.sensor-card:hover{border-color:var(--signal);transform:translateY(-2px);box-shadow:0 16px 40px -28px #000}
+.sensor-card:focus-visible{outline:2px solid var(--signal);outline-offset:2px}
+.sensor-card .status{position:absolute;top:16px;right:16px;display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.sensor-name{font-size:20px;font-weight:600;letter-spacing:-.01em;padding-right:84px;line-height:1.2;color:#fff}
+.sensor-name.unnamed{color:var(--muted);font-weight:500}
+.sensor-id{font-family:"Space Mono",monospace;font-size:12px;color:var(--faint);letter-spacing:.02em;word-break:break-all;margin-top:4px}
+.sensor-val{font-size:clamp(38px,7vmin,54px);font-weight:700;line-height:1;margin-top:16px;letter-spacing:-.02em;color:#fff}
+.sensor-val.warn{color:var(--amber)}.sensor-val.alert{color:var(--coral)}
+.sensor-val .unit{font-size:.42em;color:var(--muted);font-weight:500;margin-left:.14em}
+.spark{margin-top:14px;height:36px;width:100%;display:block}
+.sensor-foot{margin-top:14px;font-size:12px;color:var(--faint);display:flex;justify-content:space-between;
+  align-items:center;border-top:1px solid var(--line);padding-top:11px}
+.sensor-foot .cfg{color:var(--signal);display:inline-flex;align-items:center;gap:4px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex:none}
+.dot.live{background:var(--signal);animation:pulse 2.4s infinite}
+.dot.warn{background:var(--amber)}.dot.alert{background:var(--coral)}.dot.off{background:var(--coral)}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 2px #63e6d244}50%{box-shadow:0 0 0 7px #63e6d200}}
+.cam-card{cursor:pointer}
+.cam-thumb{margin-top:16px;height:132px;border-radius:10px;overflow:hidden;background:#000;display:grid;place-items:center}
+.cam-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.cam-wrap{position:relative;width:100%;aspect-ratio:4/3;background:#000;display:grid;place-items:center;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+.cam-wrap.big{max-height:64vh}
+.cam-wrap img{width:100%;height:100%;object-fit:contain;display:block}
+.cam-fallback{color:var(--muted);font-size:15px;padding:40px;text-align:center}
+.cam-name-field{margin-top:24px}
+.probe-current{display:flex;align-items:baseline;gap:16px;margin-bottom:28px;padding-bottom:24px;border-bottom:1px solid var(--line)}
+.probe-current .big{font-size:clamp(44px,8.5vmin,68px);font-weight:700;line-height:1;color:#fff}
+.probe-current .big.warn{color:var(--amber)}.probe-current .big.alert{color:var(--coral)}
+.probe-current .lbl{color:var(--muted);font-size:15px}
+.empty{text-align:center;color:var(--muted);padding:11vh 20px}
+.empty .ico{width:58px;height:58px;margin:0 auto 20px;border:1px solid var(--line-hi);border-radius:16px;display:grid;place-items:center;color:var(--faint)}
+.empty .ico svg{width:28px;height:28px;stroke:currentColor;stroke-width:1.5;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.empty h3{margin:0 0 9px;font-size:21px;font-weight:600;color:#fff}
+.empty p{margin:0;font-size:15px;max-width:380px;margin-inline:auto;line-height:1.55}
+.empty code{background:var(--input);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-family:"Space Mono",monospace;font-size:.9em;color:var(--signal)}
+.badge-demo{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:30;font-size:12px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--amber);border:1px solid #f0b75744;background:#3a2f14;
+  border-radius:999px;padding:6px 15px;opacity:0;transition:opacity .3s;pointer-events:none}
+.badge-demo.show{opacity:.95}
+/* ---------- History / event log ---------- */
+.log-note{color:var(--muted);font-size:13px;margin-bottom:18px}
+.log-note .log-dl{color:var(--signal);text-decoration:none;margin-left:6px;white-space:nowrap}
+.log-note .log-dl:hover{text-decoration:underline}
+.log-list{display:flex;flex-direction:column;gap:2px}
+.log-row{display:flex;align-items:baseline;gap:14px;padding:11px 4px;border-bottom:1px solid var(--line)}
+.log-time{font-family:"Space Mono",monospace;font-size:12.5px;color:var(--faint);flex:none;width:104px}
+.log-dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none;margin-top:5px}
+.log-dot.warn{background:var(--amber)}.log-dot.alert{background:var(--coral)}.log-dot.off{background:var(--coral)}
+.log-body{flex:1;min-width:0}
+.log-name{font-weight:600;color:#fff;font-size:14.5px}
+.log-detail{font-size:13px;color:var(--muted);margin-top:2px}
+.log-row.warn .log-detail{color:var(--amber)}
+.log-row.alert .log-detail,.log-row.alert .log-name{color:var(--coral)}
+.log-row.warn .log-name{color:var(--amber)}
+.log-tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;padding:2px 8px;border-radius:999px;
+  border:1px solid var(--line-hi);color:var(--muted);flex:none}
+.log-row.warn .log-tag{color:var(--amber);border-color:#f0b75766}
+.log-row.alert .log-tag{color:var(--coral);border-color:#f07a6c66}
+.history-toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:16px}
+.history-toolbar button,.history-toolbar select,.history-toolbar a,.history-toolbar input,.history-settings input{
+  border:1px solid var(--line-hi);border-radius:9px;background:var(--input);color:var(--ink);font:inherit;font-size:13px;padding:9px 12px;text-decoration:none;cursor:pointer}
+.history-toolbar button.active{border-color:var(--signal);color:var(--signal)}
+.history-toolbar select option{background:var(--bg)}
+.history-toolbar .push{margin-left:auto}
+.history-status{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:18px}
+.history-status>div{border:1px solid var(--line);border-radius:12px;background:var(--input);padding:13px;min-width:0}
+.history-status strong{font-size:12px;letter-spacing:.1em;color:var(--muted);text-transform:uppercase}
+.history-status p{margin:7px 0;font-size:14px;color:var(--ink);overflow-wrap:anywhere}
+.history-status a{font-size:12px;color:var(--signal);text-decoration:none}
+.history-status .bad{color:var(--coral)}
+.history-error{font-size:13px;color:var(--coral);margin:12px 0;overflow-wrap:anywhere}
+.history-settings{padding:16px;border:1px solid var(--line-hi);border-radius:12px;margin-bottom:18px}
+.history-settings label{display:block;margin-bottom:10px;font-size:13px;color:var(--muted)}
+.history-settings input{width:95px;margin:0 8px}
+.history-settings p{font-size:12px;color:var(--muted)}
+.history-more{display:block;margin:20px auto}
+.history-count{font-size:12px;color:var(--muted);margin:12px 0}
+.desktop-only{display:none}
+[hidden]{display:none!important}
+@media(max-width:600px){.history-status{grid-template-columns:1fr}.history-toolbar .push{margin-left:0}.log-row{gap:8px}.log-time{width:90px;font-size:11px}}
+@media (prefers-reduced-motion:reduce){.core-ring{animation:none}.dot.live{animation:none}*{transition-duration:.001ms !important}}
+</style>
+</head>
+<body>
+
+<main class="dashboard" id="home">
+  <button class="quad q-tl" data-view="user" aria-label="Open fume hood information">
+    <div class="q-head">
+      <span class="q-ico"><svg viewBox="0 0 24 24"><path d="M4 21V8l8-5 8 5v13"/><path d="M9 21v-6h6v6"/><path d="M4 12h16"/></svg></span>
+      <span class="q-title">Fume Hood Information</span>
+    </div>
+    <dl class="info-list" id="hoodInfo"></dl>
+  </button>
+
+  <button class="quad q-tr q-list" data-view="sensors" aria-label="Open sensors">
+    <div class="q-head">
+      <span class="q-ico"><svg viewBox="0 0 24 24"><path d="M3 12h3.5l2-6 3.5 12 2.5-8 1.4 2H21"/></svg></span>
+      <span class="q-title">Sensors</span>
+    </div>
+    <div class="s-list" id="sensorTile"></div>
+    <div class="s-pages" id="sensorPages"></div>
+  </button>
+
+  <button class="quad q-bl" data-view="mod3" aria-label="Open history">
+    <div class="q-head">
+      <span class="q-ico"><svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg></span>
+      <span class="q-title">History</span>
+    </div>
+    <div class="q-body"><span class="placeholder-tag">Events &amp; readings</span></div>
+  </button>
+
+  <button class="quad q-br" data-view="mod4" aria-label="Open tools">
+    <div class="q-head">
+      <span class="q-ico"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4L21 6l-3-3z"/></svg></span>
+      <span class="q-title">Tools</span>
+    </div>
+    <div class="q-body"><span class="placeholder-tag">Not configured</span></div>
+  </button>
+
+  <div class="core" aria-hidden="true">
+    <svg class="core-bezel" viewBox="0 0 100 100">
+      <circle class="cb-base" cx="50" cy="50" r="45.5"/>
+      <circle class="cb-ticks" cx="50" cy="50" r="41"/>
+      <circle class="cb-arc" cx="50" cy="50" r="45.5">
+        <animateTransform attributeName="transform" type="rotate" from="0 50 50" to="360 50 50" dur="9s" repeatCount="indefinite"/>
+      </circle>
+    </svg>
+    <div class="core-face">
+      <div class="core-slide on" id="slideClock">
+        <div id="clockDay">—</div>
+        <div id="clockTime" class="mono">--:--</div>
+        <div id="clockDate" class="mono">—</div>
+      </div>
+      <div class="core-slide" id="slideWx">
+        <svg class="wx-glyph" id="wxGlyph" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/></svg>
+        <div id="wxTemp" class="mono">—°</div>
+        <div id="wxCond">Loading weather</div>
+        <div id="wxMeta" class="mono">—</div>
+      </div>
+      <div class="core-dots"><i class="on"></i><i></i></div>
+    </div>
+  </div>
+</main>
+
+<section class="detail" id="detail" aria-hidden="true">
+  <div class="detail-bar">
+    <button class="back" id="backBtn"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>Back</button>
+    <div class="detail-title"><h2 id="detailTitle">—</h2><span class="eyebrow" id="detailEyebrow"></span></div>
+  </div>
+  <div class="detail-body"><div class="detail-inner" id="detailBody"></div></div>
+</section>
+
+<div class="badge-demo" id="connectionBadge" role="status" aria-live="polite"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const CONFIG = {
+  fallbackLat: 40.434, fallbackLon: -84.978, fallbackLabel: "Local",
+  weatherRefreshMin: 15, sensorRefreshSec: 3, carouselSec: 7,
+  tilePageSec: 5, tilePerPage: 3, graceReads: 3,
+  defaultUnit: "°C", warnLevel: 26, alertLevel: 30   // defaults when a probe has none set
+};
+
+/* ================= STATE ================= */
+let hoodInfo = { hood:"", student:"", pi:"", description:"", hazard:"" };
+let sensors = [];               // [{id, temp_c|value, unit?, status}]
+let probeConfig = {};           // { id: {name, unit, caution, alert} }
+const history = {};
+const probeState = {};          // { id: {lastGood, fails} } — for offline grace period
+let connectionLost = false;
+let lastSensorUpdate = null;
+let sensorPollPending = false;
+let cameraAvailable = false;
+
+const esc = s => String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ================= CLOCK ================= */
+const dayFmt = new Intl.DateTimeFormat("en-US",{weekday:"long"});
+function tickClock(){
+  const now=new Date(),p=n=>String(n).padStart(2,"0");
+  document.getElementById("clockTime").textContent=`${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+  document.getElementById("clockDay").textContent=dayFmt.format(now);
+  document.getElementById("clockDate").textContent=now.toLocaleDateString("en-US",{month:"short",day:"2-digit",year:"numeric"});
+}
+setInterval(tickClock,1000); tickClock();
+
+/* ================= WEATHER ================= */
+const WMO={0:["Clear","sun"],1:["Mainly clear","sun"],2:["Partly cloudy","cloud"],3:["Overcast","cloud"],
+  45:["Fog","fog"],48:["Rime fog","fog"],51:["Light drizzle","rain"],53:["Drizzle","rain"],55:["Dense drizzle","rain"],
+  61:["Light rain","rain"],63:["Rain","rain"],65:["Heavy rain","rain"],71:["Light snow","snow"],73:["Snow","snow"],
+  75:["Heavy snow","snow"],77:["Snow grains","snow"],80:["Showers","rain"],81:["Showers","rain"],82:["Violent showers","rain"],
+  85:["Snow showers","snow"],86:["Snow showers","snow"],95:["Thunderstorm","storm"],96:["Thunderstorm","storm"],99:["Thunderstorm","storm"]};
+const GLYPHS={
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M6 6l1.4 1.4M16.6 16.6 18 18M18 6l-1.4 1.4M7.4 16.6 6 18"/>',
+  cloud:'<path d="M7 18a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.3A3.5 3.5 0 0 1 17 18Z"/>',
+  rain:'<path d="M7 15a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.3A3.5 3.5 0 0 1 17 15"/><path d="M8 19l-1 2M12 19l-1 2M16 19l-1 2"/>',
+  snow:'<path d="M7 14a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.3A3.5 3.5 0 0 1 17 14"/><path d="M9 18h.01M12 20h.01M15 18h.01"/>',
+  fog:'<path d="M4 9h16M6 13h12M5 17h14"/>',
+  storm:'<path d="M7 14a4 4 0 0 1 0-8 5 5 0 0 1 9.6-1.3A3.5 3.5 0 0 1 17 14"/><path d="M13 13l-3 4h3l-2 4"/>'};
+async function loadWeather(lat,lon,label){
+  try{
+    const u=`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`;
+    const d=await (await fetch(u)).json(),c=d.current,[cond,glyph]=WMO[c.weather_code]||["—","cloud"];
+    document.getElementById("wxTemp").textContent=Math.round(c.temperature_2m)+"°";
+    document.getElementById("wxCond").textContent=cond;
+    document.getElementById("wxMeta").textContent=`${label} · ${c.relative_humidity_2m}% RH · ${Math.round(c.wind_speed_10m)} km/h`;
+    document.getElementById("wxGlyph").innerHTML=GLYPHS[glyph];
+  }catch(e){document.getElementById("wxCond").textContent="Weather unavailable";document.getElementById("wxMeta").textContent="—";}
+}
+function initWeather(){
+  const fb=()=>loadWeather(CONFIG.fallbackLat,CONFIG.fallbackLon,CONFIG.fallbackLabel);
+  if(navigator.geolocation)navigator.geolocation.getCurrentPosition(
+    p=>loadWeather(p.coords.latitude.toFixed(3),p.coords.longitude.toFixed(3),"Current"),fb,{timeout:4000});
+  else fb();
+}
+initWeather(); setInterval(initWeather,CONFIG.weatherRefreshMin*60000);
+
+/* ================= CAROUSEL ================= */
+let slide=0;
+const slides=[document.getElementById("slideClock"),document.getElementById("slideWx")];
+const dots=document.querySelectorAll(".core-dots i");
+setInterval(()=>{slide=(slide+1)%slides.length;
+  slides.forEach((s,i)=>s.classList.toggle("on",i===slide));
+  dots.forEach((d,i)=>d.classList.toggle("on",i===slide));},CONFIG.carouselSec*1000);
+
+/* ================= SENSOR HELPERS (unit-agnostic) ================= */
+function readingVal(s){return s.value!=null?s.value:(s.temp_c!=null?s.temp_c:null);}
+function unitOf(id,s){return id==="thermal:tc001"?"°C":((probeConfig[id]&&probeConfig[id].unit)||(s&&s.unit)||CONFIG.defaultUnit);}
+function fmtVal(v){return typeof v==="number"?v.toFixed(2):String(v);}
+function fmtDuration(sec){
+  sec=Math.max(0,Math.round(sec||0));
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60,pad=n=>String(n).padStart(2,"0");
+  return h>0?`${h}:${pad(m)}:${pad(s)}`:`${m}:${pad(s)}`;
+}
+function isDoorSensor(s,id){return (s&&s.type==="door")||(!s&&String(id||"").startsWith("door-"));}
+function shortId(id){return id.length>12?id.slice(0,5)+"…"+id.slice(-4):id;}
+function thresholds(id){const c=probeConfig[id]||{};
+  return {caution:(c.caution!=null?c.caution:CONFIG.warnLevel),alert:(c.alert!=null?c.alert:CONFIG.alertLevel)};}
+function classify(v,id){const t=thresholds(id);
+  if(v>=t.alert)return"alert"; if(v>=t.caution)return"warn"; return"ok";}
+function statusLabel(cls){return {ok:"Live",warn:"Caution",alert:"Alert"}[cls]||"Offline";}
+function probeName(id){return (probeConfig[id]&&probeConfig[id].name)||(id==="thermal:tc001"?"TOPDON TC001":null);}
+// Offline grace: keep showing the last good reading until several reads in a row fail.
+function effective(id){
+  const st=probeState[id]||{lastGood:null,fails:0};
+  const offline = connectionLost || st.lastGood==null || st.fails>CONFIG.graceReads;
+  return {value: offline?null:st.lastGood, stale: st.fails>0 && !offline, offline};
+}
+
+function thermalLive(s){return !connectionLost&&s&&s.status==="ok"&&s.max_c!=null;}
+function thermalSummary(s){
+  const value=key=>thermalLive(s)&&s[key]!=null?fmtVal(s[key])+" °C":"—";
+  return "Min "+value("min_c")+" · Mean "+value("mean_c")+" · Center "+value("center_c");
+}
+function thermalImage(img,s){
+  if(!img)return;
+  if(!thermalLive(s)){img.onerror=null;img.removeAttribute("src");img.alt="Thermal camera offline";return;}
+  if(!img.getAttribute("src")){
+    img.alt="TC001 thermal view";
+    img.onerror=()=>{img.onerror=null;img.removeAttribute("src");img.alt="Thermal stream unavailable";};
+    img.src="/thermal_feed?ts="+Date.now();
+  }
+}
+function updateThermalDetail(){
+  const s=sensors.find(s=>s.id===probeView);
+  const summary=document.getElementById("thermalSummary");
+  if(summary)summary.textContent=thermalSummary(s);
+  thermalImage(document.getElementById("thermalBig"),s);
+}
+
+async function loadProbeConfig(){
+  try{const r=await fetch("/api/probeconfig",{cache:"no-store"});if(r.ok)probeConfig=await r.json();}catch(e){}
+}
+loadProbeConfig();
+async function loadCamera(){
+  try{const r=await fetch("/api/camera",{cache:"no-store"});if(r.ok){cameraAvailable=!!(await r.json()).available;}}
+  catch(e){cameraAvailable=false;}
+  if(currentView==="sensors"&&!probeView) renderSensorDetail();
+}
+loadCamera();
+
+function sparkline(vals,cls){
+  cls=cls||"spark";
+  if(!vals||vals.length<2)return`<svg class="${cls}"></svg>`;
+  const w=200,h=36,min=Math.min(...vals),max=Math.max(...vals),rng=(max-min)||1;
+  const pts=vals.map((v,i)=>`${(i/(vals.length-1)*w).toFixed(1)},${(h-3-((v-min)/rng)*(h-6)).toFixed(1)}`).join(" ");
+  return `<svg class="${cls}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="var(--signal)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/></svg>`;
+}
+
+/* ================= SENSORS POLL ================= */
+async function pollSensors(){
+  if(sensorPollPending)return;
+  sensorPollPending=true;
+  const wasDisconnected=connectionLost;
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),4000);
+  try{
+    const r=await fetch("/api/sensors",{cache:"no-store",signal:controller.signal});
+    if(!r.ok)throw new Error("Sensor API unavailable");
+    const next=await r.json();
+    if(!Array.isArray(next)||next.some(s=>!s||typeof s.id!=="string"))throw new Error("Invalid sensor data");
+    // A probe disappearing from the response must not leave a live-looking reading.
+    const ids=new Set(next.map(s=>s.id));
+    const missing=sensors.filter(s=>!ids.has(s.id)).map(s=>({...s,status:"offline",temp_c:null,value:null}));
+    sensors=next.concat(missing);
+    connectionLost=false;
+    lastSensorUpdate=new Date();
+    if(wasDisconnected){loadProbeConfig();loadHoodInfo();loadCamera();}
+  }catch(e){
+    connectionLost=true;
+    sensors=sensors.map(s=>({...s,status:"offline",temp_c:null,value:null}));
+    cameraAvailable=false;
+    document.querySelectorAll("#camThumb,#camBig,#thermalThumb,#thermalBig").forEach(img=>{img.onerror=null;img.removeAttribute("src");img.alt="Offline";});
+  }finally{
+    clearTimeout(timeout);
+    sensorPollPending=false;
+  }
+  const badge=document.getElementById("connectionBadge");
+  badge.textContent=connectionLost?"Sentinel offline · Last update: "+(lastSensorUpdate?lastSensorUpdate.toLocaleString("en-US",{hour12:false}):"never"):"";
+  badge.classList.toggle("show",connectionLost);
+  sensors.forEach(s=>{
+    if(isDoorSensor(s))return;   // Door states are classified by the backend, without numeric history or grace periods.
+    const id=s.id,v=readingVal(s);
+    const st=probeState[id]||(probeState[id]={lastGood:null,fails:0});
+    if(v!=null){st.fails=0;st.lastGood=v;
+      (history[id]=history[id]||[]).push(v);if(history[id].length>30)history[id].shift();}
+    else st.fails=CONFIG.graceReads+1;
+  });
+  if(currentView==="mod3") renderHistoryLog();   // Refresh persistent events while History is open.
+  renderSensorTile();
+  if(currentView==="sensors"&&!probeView&&!camOpen) updateSensorCards();
+  if(currentView==="sensors"&&probeView){
+    const el=document.getElementById("pCur"),s=sensors.find(x=>x.id===probeView);
+    if(el&&isDoorSensor(s,probeView)){
+      const open=s&&s.state==="open",st=connectionLost?"offline":((s&&s.status)||"offline");
+      el.textContent=st==="offline"?"—":(open?"OPEN":"CLOSED");
+      el.className="big "+(st==="warning"?"warn":"");
+      const lbl=document.querySelector(".probe-current .lbl");
+      if(lbl)lbl.textContent=(open&&st!=="offline")?"Open "+fmtDuration(s.seconds_in_state):"Current state";
+    }else if(el){
+      const e=effective(probeView),v=e.value;
+      el.textContent=v!=null?fmtVal(v)+" "+unitOf(probeView,s):"—";
+      el.className="big "+(v!=null?({ok:"",warn:"warn",alert:"alert"})[classify(v,probeView)]:"")+(e.stale?" stale":"");
+    }
+    updateThermalDetail();
+  }
+}
+setInterval(pollSensors,CONFIG.sensorRefreshSec*1000); pollSensors();
+
+/* ---- top-right tile: per-sensor curves + readings, paged 3 at a time ---- */
+let sensorPage=0;
+function renderSensorTile(){
+  const el=document.getElementById("sensorTile"),pg=document.getElementById("sensorPages");
+  if(!sensors.length){el.innerHTML=`<div class="info-empty">${connectionLost?"Offline":"No sensors detected"}</div>`;pg.innerHTML="";return;}
+  const per=CONFIG.tilePerPage, pages=Math.ceil(sensors.length/per);
+  if(sensorPage>=pages)sensorPage=0;
+  const slice=sensors.slice(sensorPage*per,sensorPage*per+per);
+  el.innerHTML=slice.map(s=>{
+    const nm=probeName(s.id)||shortId(s.id);
+    if(isDoorSensor(s)){
+      const st=s.status||"offline",open=s.state==="open";
+      const dotCls=st==="offline"?"off":st==="warning"?"warn":"live";
+      const valCls=st==="warning"?"warn":"";
+      const label=st==="offline"?"—":(open?"Open"+(s.seconds_in_state!=null?" "+fmtDuration(s.seconds_in_state):""):"Closed");
+      return `<div class="s-row">
+        <div class="s-row-top"><span class="dot ${dotCls}"></span>
+          <span class="s-name">${esc(nm)}</span>
+          <span class="s-val ${valCls}">${label}</span></div>
+      </div>`;
+    }
+    const u=unitOf(s.id,s), e=effective(s.id), v=e.value;
+    const cls=v!=null?classify(v,s.id):null;
+    const dotCls=v==null?"off":cls==="ok"?"live":cls;
+    const valCls=(cls==="warn"?"warn":cls==="alert"?"alert":"")+(e.stale?" stale":"");
+    return `<div class="s-row">
+      <div class="s-row-top"><span class="dot ${dotCls}"></span>
+        <span class="s-name">${esc(nm)}</span>
+        <span class="s-val ${valCls}">${v!=null?fmtVal(v)+" "+u:"—"}</span></div>
+      ${sparkline(history[s.id],"s-spark")}
+    </div>`;}).join("");
+  pg.innerHTML = pages>1 ? Array.from({length:pages},(_,i)=>`<i class="${i===sensorPage?"on":""}"></i>`).join("") : "";
+}
+setInterval(()=>{const pages=Math.ceil(sensors.length/CONFIG.tilePerPage);
+  if(pages>1){sensorPage=(sensorPage+1)%pages;renderSensorTile();}},CONFIG.tilePageSec*1000);
+
+/* ================= FUME HOOD INFO ================= */
+async function loadHoodInfo(){
+  try{const r=await fetch("/api/userinfo",{cache:"no-store"});if(r.ok)hoodInfo=Object.assign(hoodInfo,await r.json());}catch(e){}
+  renderHoodSummary();
+}
+function renderHoodSummary(){
+  const rows=[["Fume hood",hoodInfo.hood],["Student",hoodInfo.student],["PI",hoodInfo.pi],
+    ["Description",hoodInfo.description],["Hazard",hoodInfo.hazard]];
+  const el=document.getElementById("hoodInfo"),has=rows.some(r=>(r[1]||"").trim());
+  if(!has){el.innerHTML=`<div class="info-empty">Tap to add fume hood details</div>`;return;}
+  el.innerHTML=rows.map(([k,v])=>{const val=(v||"").trim();
+    return `<dt>${k}</dt><dd class="${val?"":"empty-val"}">${val?esc(val):"—"}</dd>`;}).join("");
+}
+loadHoodInfo();
+async function saveHoodInfo(){
+  const note=document.getElementById("savedNote");
+  try{const r=await fetch("/api/userinfo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(hoodInfo)});
+    if(!r.ok)throw 0;note.textContent="Saved to device";}
+  catch(e){note.textContent="Saved (session only — no backend)";}
+  note.classList.add("show");setTimeout(()=>note.classList.remove("show"),2600);
+  renderHoodSummary();
+}
+
+/* ================= VIEW ROUTER ================= */
+let currentView="home", probeView=null, camOpen=false;
+const detail=document.getElementById("detail");
+const titleEl=document.getElementById("detailTitle");
+const eyebrowEl=document.getElementById("detailEyebrow");
+const bodyEl=document.getElementById("detailBody");
+const VIEWS={
+  user:{title:"Fume Hood Information",eyebrow:"Hood identity",render:renderHoodForm},
+  sensors:{title:"Sensors",eyebrow:"Live readings",render:renderSensorDetail},
+  mod3:{title:"History",eyebrow:"Logs & backups",render:renderHistoryLog},
+  mod4:{title:"Tools",eyebrow:"Placeholder module",render:()=>placeholderView("Tools",'<path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 1 5.4-5.4L21 6l-3-3z"/>',"Not built yet — this space is reserved for whatever utilities end up living here.")}
+};
+function openView(name){const v=VIEWS[name];if(!v)return;
+  currentView=name;probeView=null;camOpen=false;titleEl.textContent=v.title;eyebrowEl.textContent=v.eyebrow;v.render();
+  detail.classList.add("open");detail.setAttribute("aria-hidden","false");}
+function closeView(){currentView="home";probeView=null;camOpen=false;
+  detail.classList.remove("open");detail.setAttribute("aria-hidden","true");
+  // clear content after the fade so any camera stream stops (frees the camera + CPU)
+  setTimeout(()=>{if(currentView==="home")bodyEl.innerHTML="";},350);}
+function goBack(){
+  if(currentView==="sensors"&&(probeView||camOpen)){probeView=null;camOpen=false;
+    titleEl.textContent="Sensors";eyebrowEl.textContent="Live readings";renderSensorDetail();}
+  else closeView();
+}
+document.querySelectorAll(".quad").forEach(q=>q.addEventListener("click",()=>openView(q.dataset.view)));
+document.getElementById("backBtn").addEventListener("click",goBack);
+document.addEventListener("keydown",e=>{if(e.key==="Escape"&&currentView!=="home")goBack();});
+
+/* ---- renderers ---- */
+function field(key,label,ph,textarea){
+  const val=(hoodInfo[key]||"").replace(/"/g,"&quot;");
+  return textarea
+    ? `<div class="field"><label for="f_${key}">${label}</label><textarea id="f_${key}" rows="3" placeholder="${ph}">${hoodInfo[key]||""}</textarea></div>`
+    : `<div class="field"><label for="f_${key}">${label}</label><input id="f_${key}" value="${val}" placeholder="${ph}"></div>`;
+}
+function renderHoodForm(){
+  bodyEl.innerHTML=`
+    ${field("hood","Fume hood #","e.g. Hood B-2")}
+    ${field("student","Student","e.g. A. Chen, M. Ruiz")}
+    ${field("pi","PI","e.g. Dr. Jane Okafor")}
+    ${field("description","Description","What's running in this hood right now?",true)}
+    ${field("hazard","Hazard","e.g. acetone, HCl — corrosive, flammable",true)}
+    <div class="save-row"><button class="btn" id="saveBtn">Save changes</button><span class="saved-note" id="savedNote"></span></div>`;
+  ["hood","student","pi","description","hazard"].forEach(k=>{
+    const el=document.getElementById("f_"+k);el.addEventListener("input",()=>hoodInfo[k]=el.value);});
+  document.getElementById("saveBtn").addEventListener("click",saveHoodInfo);
+}
+const CAM_KEY="camera:0";   // camera settings stored alongside probe config
+function camNameGet(){return (probeConfig[CAM_KEY]&&probeConfig[CAM_KEY].name)||"";}
+
+function renderSensorDetail(){
+  if(!cameraAvailable && !sensors.length){
+    bodyEl.innerHTML=emptyBlock('<path d="M3 12h3.5l2-6 3.5 12 2.5-8 1.4 2H21"/>',"No sensors detected",
+      "Check the wiring and that the interface is enabled (for 1-Wire probes, <code>dtoverlay=w1-gpio</code>), then reboot the Pi.");
+    return;
+  }
+  bodyEl.innerHTML=`<div class="sensor-grid" id="sensorGrid"></div>`;
+  const grid=document.getElementById("sensorGrid");
+  if(cameraAvailable){
+    const nm=camNameGet();
+    const card=document.createElement("div");
+    card.className="sensor-card cam-card"; card.tabIndex=0;
+    card.innerHTML=`<div class="status"><span class="dot live"></span>Live</div>
+      <div class="sensor-name ${nm?"":"unnamed"}">${nm?esc(nm):"Camera"}</div>
+      <div class="sensor-id">GC0307 · USB</div>
+      <div class="cam-thumb"><img id="camThumb" alt="Camera"></div>
+      <div class="sensor-foot"><span>Camera</span><span class="cfg">Configure ›</span></div>`;
+    grid.appendChild(card);
+    const img=card.querySelector("#camThumb");
+    img.onerror=()=>{img.style.display="none";};
+    img.src="/video_feed?ts="+Date.now();
+    card.addEventListener("click",openCamera);
+    card.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openCamera();}});
+  }
+  updateSensorCards();
+}
+function updateSensorCards(){
+  const grid=document.getElementById("sensorGrid");
+  if(!grid){if(sensors.length||cameraAvailable)renderSensorDetail();return;}
+  grid.querySelectorAll(".sensor-card:not(.cam-card):not(.thermal-card)").forEach(n=>n.remove());
+  updateThermalCard(grid);
+  if(!sensors.length) return;
+  const html=sensors.filter(s=>s.type!=="thermal").map(s=>{
+    const nm=probeName(s.id);
+    if(isDoorSensor(s)){
+      const st=s.status||"offline";
+      if(st==="offline"){return `<div class="sensor-card" tabindex="0" data-id="${s.id}">
+        <div class="status"><span class="dot off"></span>Offline</div>
+        <div class="sensor-name ${nm?"":"unnamed"}">${nm?esc(nm):"Unnamed door"}</div>
+        <div class="sensor-id">${s.id}</div>
+        <div class="sensor-val">—</div>
+        <div class="sensor-foot"><span>No signal</span><span class="cfg">Configure ›</span></div></div>`;}
+      const open=s.state==="open",valCls=st==="warning"?"warn":"";
+      const thr=s.alert_threshold_seconds!=null?s.alert_threshold_seconds:180;
+      const label=st==="warning"?"Alert":"Live";
+      return `<div class="sensor-card" tabindex="0" data-id="${s.id}">
+        <div class="status"><span class="dot ${st==="warning"?"warn":"live"}"></span>${label}</div>
+        <div class="sensor-name ${nm?"":"unnamed"}">${nm?esc(nm):"Unnamed door"}</div>
+        <div class="sensor-id">${s.id}</div>
+        <div class="sensor-val ${valCls}">${open?"OPEN":"CLOSED"}</div>
+        <div class="sensor-foot"><span>${open?"Open "+fmtDuration(s.seconds_in_state):"Closed"} · Alert after ${fmtDuration(thr)}</span><span class="cfg">Configure ›</span></div>
+      </div>`;
+    }
+    const t=thresholds(s.id),u=unitOf(s.id,s),e=effective(s.id),v=e.value;
+    if(v==null){return `<div class="sensor-card" tabindex="0" data-id="${s.id}">
+      <div class="status"><span class="dot off"></span>Offline</div>
+      <div class="sensor-name ${nm?"":"unnamed"}">${nm?esc(nm):"Unnamed sensor"}</div>
+      <div class="sensor-id">${s.id}</div>
+      <div class="sensor-val">—</div>
+      <div class="sensor-foot"><span>Read error</span><span class="cfg">Configure ›</span></div></div>`;}
+    const cls=classify(v,s.id),dotCls=cls==="ok"?"live":cls;
+    return `<div class="sensor-card" tabindex="0" data-id="${s.id}">
+      <div class="status"><span class="dot ${dotCls}"></span>${statusLabel(cls)}</div>
+      <div class="sensor-name ${nm?"":"unnamed"}">${nm?esc(nm):"Unnamed sensor"}</div>
+      <div class="sensor-id">${s.id}</div>
+      <div class="sensor-val ${cls==="ok"?"":cls}${e.stale?" stale":""}">${fmtVal(v)}<span class="unit">${u}</span></div>
+      ${sparkline(history[s.id])}
+      <div class="sensor-foot"><span>Caution ${t.caution}${u} · Alert ${t.alert}${u}</span><span class="cfg">Configure ›</span></div>
+    </div>`;}).join("");
+  grid.insertAdjacentHTML("beforeend",html);
+  grid.querySelectorAll(".sensor-card:not(.cam-card):not(.thermal-card)").forEach(c=>{
+    c.addEventListener("click",()=>openProbe(c.dataset.id));
+    c.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openProbe(c.dataset.id);}});});
+}
+function updateThermalCard(grid){
+  const s=sensors.find(s=>s.type==="thermal");
+  let card=grid.querySelector(".thermal-card");
+  if(!s){if(card)card.remove();return;}
+  if(!card){
+    card=document.createElement("div");card.className="sensor-card thermal-card";card.tabIndex=0;
+    card.innerHTML=`<div class="status"><span class="dot off"></span><span class="thermal-state">Offline</span></div>
+      <div class="sensor-name thermal-name"></div><div class="sensor-id">TC001 · Thermal</div>
+      <div class="cam-thumb"><img id="thermalThumb" alt="Thermal camera offline"></div>
+      <div class="sensor-val thermal-value">—</div>
+      <div class="sensor-foot"><span>Maximum</span><span class="cfg">Details ›</span></div>`;
+    card.addEventListener("click",()=>openProbe("thermal:tc001"));
+    card.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();openProbe("thermal:tc001");}});
+    grid.appendChild(card);
+  }
+  const live=thermalLive(s),level=live?classify(s.max_c,s.id):null;
+  card.querySelector(".thermal-name").textContent=probeName(s.id)||"TOPDON TC001";
+  card.querySelector(".dot").className="dot "+(live?(level==="ok"?"live":level):"off");
+  card.querySelector(".thermal-state").textContent=live?statusLabel(level):"Offline";
+  const value=card.querySelector(".thermal-value");
+  value.className="sensor-val thermal-value "+(live&&level!=="ok"?level:"");
+  value.textContent=live?fmtVal(s.max_c)+" °C":"—";
+  thermalImage(card.querySelector("#thermalThumb"),s);
+}
+function openCamera(){
+  camOpen=true;
+  const nm=camNameGet();
+  titleEl.textContent=nm||"Camera"; eyebrowEl.textContent="Live video";
+  bodyEl.innerHTML=`
+    <div class="cam-wrap big"><img id="camBig" alt="Camera feed"></div>
+    <div class="field cam-name-field"><label for="c_name">Camera name</label>
+      <input id="c_name" placeholder="e.g. Hood interior" value="${esc(nm)}"></div>
+    <div class="save-row"><button class="btn" id="c_save">Save camera</button><span class="saved-note" id="c_note"></span></div>`;
+  const big=document.getElementById("camBig");
+  big.onerror=()=>{const w=big.parentElement;if(w)w.innerHTML='<div class="cam-fallback">Camera stream unavailable</div>';};
+  big.src="/video_feed?ts="+Date.now();
+  document.getElementById("c_save").addEventListener("click",saveCamera);
+}
+async function saveCamera(){
+  const name=document.getElementById("c_name").value.trim();
+  probeConfig[CAM_KEY]=name?{name}:{};
+  const note=document.getElementById("c_note");
+  try{const r=await fetch("/api/probeconfig",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(probeConfig)});
+    if(!r.ok)throw 0;note.textContent="Saved to device";}
+  catch(e){note.textContent="Saved (session only — no backend)";}
+  note.classList.add("show");setTimeout(()=>note.classList.remove("show"),2600);
+  titleEl.textContent=name||"Camera";
+}
+function openProbe(id){
+  probeView=id;
+  const cfg=probeConfig[id]||{},s=sensors.find(x=>x.id===id);
+  titleEl.textContent=probeName(id)||"Sensor settings";eyebrowEl.textContent=id;
+
+  if(isDoorSensor(s,id)){
+    const open=s&&s.state==="open",st=(s&&s.status)||"offline";
+    const curCls=st==="warning"?"warn":"";
+    const curText=st==="offline"?"—":(open?"OPEN":"CLOSED");
+    const defThr=180;
+    bodyEl.innerHTML=`
+      <div class="probe-current"><span class="big ${curCls}" id="pCur">${curText}</span><span class="lbl">${open&&st!=="offline"?"Open "+fmtDuration(s.seconds_in_state):"Current state"}</span></div>
+      <div class="field"><label for="p_name">Door name</label>
+        <input id="p_name" placeholder="e.g. Sash door" value="${(cfg.name||"").replace(/"/g,"&quot;")}"></div>
+      <div class="field"><label for="p_door_sec">Alert after door is open for (seconds)</label>
+        <input id="p_door_sec" type="number" step="1" min="1" placeholder="Default ${defThr}" value="${cfg.door_alert_seconds!=null?cfg.door_alert_seconds:""}"></div>
+      <div class="save-row"><button class="btn" id="p_save">Save door</button><span class="saved-note" id="p_note"></span></div>`;
+    document.getElementById("p_save").addEventListener("click",()=>saveDoorProbe(id));
+    return;
+  }
+
+  const thermal=s&&s.type==="thermal";
+  const v=s?readingVal(s):null,u=unitOf(id,s);
+  const curCls=v!=null?({ok:"",warn:"warn",alert:"alert"})[classify(v,id)]:"";
+  bodyEl.innerHTML=`
+    ${thermal?'<div class="cam-wrap big"><img id="thermalBig" alt="Thermal camera offline"></div><p class="log-note" id="thermalSummary"></p>':""}
+    <div class="probe-current"><span class="big ${curCls}" id="pCur">${v!=null?fmtVal(v)+" "+u:"—"}</span><span class="lbl">${thermal?"Maximum temperature":"Current reading"}</span></div>
+    <div class="grid-2">
+      <div class="field"><label for="p_name">Sensor name</label>
+        <input id="p_name" placeholder="e.g. Left inlet" value="${(cfg.name||"").replace(/"/g,"&quot;")}"></div>
+      <div class="field"><label for="p_unit">Unit</label>
+        <input id="p_unit" placeholder="${CONFIG.defaultUnit}" value="${thermal?"°C":(cfg.unit||"").replace(/"/g,"&quot;")}" ${thermal?"disabled":""}></div>
+    </div>
+    <div class="grid-2">
+      <div class="field"><label for="p_caution">Caution level</label>
+        <input id="p_caution" type="number" step="0.5" placeholder="Default ${CONFIG.warnLevel}" value="${cfg.caution!=null?cfg.caution:""}"></div>
+      <div class="field"><label for="p_alert">Alert level</label>
+        <input id="p_alert" type="number" step="0.5" placeholder="Default ${CONFIG.alertLevel}" value="${cfg.alert!=null?cfg.alert:""}"></div>
+    </div>
+    <div class="save-row"><button class="btn" id="p_save">Save sensor</button><span class="saved-note" id="p_note"></span></div>`;
+  document.getElementById("p_save").addEventListener("click",()=>saveProbe(id));
+  if(thermal)updateThermalDetail();
+}
+async function saveDoorProbe(id){
+  const name=document.getElementById("p_name").value.trim();
+  const doorSecInput=document.getElementById("p_door_sec").value;
+  const doorSec=parseInt(doorSecInput,10);
+  const cfg={};if(name)cfg.name=name;if(!isNaN(doorSec)&&doorSec>0)cfg.door_alert_seconds=doorSec;
+  probeConfig[id]=cfg;
+  const note=document.getElementById("p_note");
+  try{const r=await fetch("/api/probeconfig",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(probeConfig)});
+    if(!r.ok)throw 0;note.textContent="Saved to device";}
+  catch(e){note.textContent="Saved (session only — no backend)";}
+  note.classList.add("show");setTimeout(()=>note.classList.remove("show"),2600);
+  titleEl.textContent=name||"Sensor settings";renderSensorTile();
+}
+async function saveProbe(id){
+  const name=document.getElementById("p_name").value.trim();
+  const unit=document.getElementById("p_unit").value.trim();
+  const caution=parseFloat(document.getElementById("p_caution").value);
+  const alert=parseFloat(document.getElementById("p_alert").value);
+  const cfg={};if(name)cfg.name=name;if(unit)cfg.unit=unit;
+  if(!isNaN(caution))cfg.caution=caution;if(!isNaN(alert))cfg.alert=alert;
+  probeConfig[id]=cfg;
+  const note=document.getElementById("p_note");
+  try{const r=await fetch("/api/probeconfig",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(probeConfig)});
+    if(!r.ok)throw 0;note.textContent="Saved to device";}
+  catch(e){note.textContent="Saved (session only — no backend)";}
+  note.classList.add("show");setTimeout(()=>note.classList.remove("show"),2600);
+  titleEl.textContent=name||"Sensor settings";renderSensorTile();
+}
+function emptyBlock(icoPath,h,p){return `<div class="empty"><div class="ico"><svg viewBox="0 0 24 24">${icoPath}</svg></div><h3>${h}</h3><p>${p}</p></div>`;}
+function placeholderView(name,icoPath,desc){bodyEl.innerHTML=emptyBlock(icoPath,name+" — coming soon",desc);}
+
+function fmtLogTs(ts){
+  const date=new Date(ts);
+  return Number.isNaN(date.getTime())?String(ts):date.toLocaleString("en-US",{month:"short",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+}
+const logState={kind:"events",rows:[],next:null,older:false,controller:null,pi:null,desktop:null};
+window.updateDesktopArchive=function(state){logState.desktop=state;updateHistoryStatus();};
+function updateHistoryStatus(){
+  const pi=document.getElementById("logPiStatus");if(!pi)return;
+  const data=logState.pi,desktop=logState.desktop;
+  pi.textContent=data?(data.error?"Recording failed":data.recording?`Recording · every ${data.settings.record_interval_seconds}s`:"Recording stopped"):"Unavailable";
+  pi.classList.toggle("bad",!data||!data.recording||!!data.error);
+  pi.title=data?.error||data?.last_recorded_at||"";
+  const pc=document.getElementById("logPcStatus"),cloud=document.getElementById("logCloudStatus");
+  pc.textContent=desktop?desktop.pc+(desktop.saved_at&&desktop.pc==="Saved"?" · "+desktop.saved_at:""):"Open in Orchestrator";
+  pc.title=desktop?.error||desktop?.pc_directory||"Automatic PC backup requires the updated Orchestrator";
+  cloud.textContent=desktop?desktop.cloud:"Not configured";
+  cloud.title=desktop?.cloud_note||"Cloud-folder backup is configured in Orchestrator";
+  document.getElementById("logBackupNote").textContent=desktop?(desktop.error||desktop.warning||
+    (desktop.cloud!=="Off"?"Cloud-folder copies require your sync app to upload. Remote upload is not verified.":"PC backup runs while Orchestrator stays open and connected.")):"Use Orchestrator for automatic PC and cloud-folder backups.";
+  document.querySelectorAll("#logRoot .desktop-only").forEach(el=>el.style.display=desktop?"inline-flex":"none");
+}
+function logParameters(){
+  const params=new URLSearchParams({kind:logState.kind,limit:"200"});
+  const sensor=document.getElementById("logSensor").value;if(sensor)params.set("sensor_id",sensor);
+  const range=document.getElementById("logRange").value;
+  let start=null,end=null;
+  if(range==="today"||range==="week"){
+    start=new Date();start.setHours(0,0,0,0);if(range==="week")start.setDate(start.getDate()-6);
+    end=new Date();end.setHours(0,0,0,0);end.setDate(end.getDate()+1);
+  }else if(range==="custom"){
+    const from=document.getElementById("logFrom").value,to=document.getElementById("logTo").value;
+    if(from)start=new Date(from+"T00:00:00");if(to){end=new Date(to+"T00:00:00");end.setDate(end.getDate()+1);}
+  }
+  if(start)params.set("start",start.toISOString());if(end)params.set("end",end.toISOString());
+  return params;
+}
+async function historyJson(path,options={}){
+  const response=await fetch(path,{cache:"no-store",...options});
+  const data=await response.json();if(!response.ok)throw new Error(data.error||"History request failed");return data;
+}
+function buildHistory(){
+  bodyEl.innerHTML=`<div id="logRoot">
+    <div class="history-toolbar">
+      <button id="logEvents" class="active">Events</button><button id="logReadings">Readings</button>
+      <select id="logRange" aria-label="Date range"><option value="today">Today</option><option value="week">Last 7 days</option><option value="all">All time</option><option value="custom">Custom dates</option></select>
+      <select id="logSensor" aria-label="Sensor"><option value="">All sensors</option></select>
+      <a id="logExport" class="push" download>Export CSV</a><button id="logSettingsButton">Settings</button>
+    </div>
+    <div id="logDates" class="history-toolbar" hidden><label>From <input id="logFrom" type="date"></label><label>To <input id="logTo" type="date"></label></div>
+    <div class="history-status">
+      <div><strong>Pi</strong><p id="logPiStatus">Loading…</p></div>
+      <div><strong>PC</strong><p id="logPcStatus">Open in Orchestrator</p><a class="desktop-only" href="/__sentinel_desktop__/settings">Configure</a></div>
+      <div><strong>Cloud folder</strong><p id="logCloudStatus">Not configured</p><a class="desktop-only" href="/__sentinel_desktop__/sync">Sync now</a></div>
+    </div>
+    <div id="logSettings" class="history-settings" hidden>
+      <label>Record every <input id="logInterval" type="number" min="1" max="3600" value="5"> seconds</label>
+      <label>Keep on Pi <input id="logRetention" type="number" min="0" max="3650" value="0"> days · 0 keeps all</label>
+      <div class="history-toolbar"><button id="logSaveSettings">Save recording settings</button><a class="desktop-only" href="/__sentinel_desktop__/settings">PC &amp; cloud folder…</a></div>
+      <p id="logSettingsNote" role="status"></p>
+    </div>
+    <p class="log-note" id="logBackupNote"></p><div class="history-error" id="logError" role="status"></div>
+    <div class="history-count" id="logCount"></div><div class="log-list" id="logRows"></div>
+    <div class="history-toolbar"><button id="logRefresh">Refresh latest</button><button id="logMore" hidden>Load more</button></div>
+  </div>`;
+  logState.rows=[];logState.next=null;logState.older=false;
+  document.getElementById("logEvents").classList.toggle("active",logState.kind==="events");
+  document.getElementById("logReadings").classList.toggle("active",logState.kind==="readings");
+  for(const kind of ["events","readings"])document.getElementById(kind==="events"?"logEvents":"logReadings").onclick=()=>{
+    logState.kind=kind;
+    document.getElementById("logEvents").classList.toggle("active",kind==="events");
+    document.getElementById("logReadings").classList.toggle("active",kind==="readings");loadHistory(false,true);
+  };
+  document.getElementById("logRange").onchange=()=>{document.getElementById("logDates").hidden=document.getElementById("logRange").value!=="custom";loadHistory(false,true);};
+  for(const id of ["logSensor","logFrom","logTo"])document.getElementById(id).onchange=()=>loadHistory(false,true);
+  document.getElementById("logRefresh").onclick=()=>loadHistory(false,true);
+  document.getElementById("logMore").onclick=()=>loadHistory(true);
+  document.getElementById("logSettingsButton").onclick=()=>{
+    const panel=document.getElementById("logSettings");panel.hidden=!panel.hidden;
+    if(!panel.hidden&&logState.pi){document.getElementById("logInterval").value=logState.pi.settings.record_interval_seconds;document.getElementById("logRetention").value=logState.pi.settings.retention_days;}
+  };
+  document.getElementById("logSaveSettings").onclick=async()=>{
+    const note=document.getElementById("logSettingsNote");
+    const values={record_interval_seconds:Number(document.getElementById("logInterval").value),retention_days:Number(document.getElementById("logRetention").value)};
+    if(!Number.isInteger(values.record_interval_seconds)||values.record_interval_seconds<1||values.record_interval_seconds>3600||!Number.isInteger(values.retention_days)||values.retention_days<0||values.retention_days>3650){note.textContent="Enter a valid interval (1–3600) and retention (0–3650).";return;}
+    if(values.retention_days>0&&values.retention_days!==logState.pi?.settings.retention_days&&!window.confirm(`Remove Pi history older than ${values.retention_days} days during recording? Existing PC copies are kept.`))return;
+    try{await historyJson("/api/history/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(values)});note.textContent="Saved to Pi";await loadHistory(false,true);}catch(e){note.textContent=e.message;}
+  };
+  updateHistoryStatus();
+}
+function renderLogRows(){
+  const tags={ok:"Normal",warn:"Caution",alert:"Alert",offline:"Offline"};
+  document.getElementById("logRows").innerHTML=logState.rows.map(ev=>{
+    const lvl=["warn","alert","offline"].includes(ev.level)?(ev.level==="offline"?"off":ev.level):"";
+    let detail=ev.detail||"";
+    if(logState.kind==="readings")detail=ev.level==="offline"?"Offline":ev.type==="door"?"Door "+(ev.state||"unknown"):
+      (ev.value==null?"—":Number(ev.value).toFixed(2)+" "+(ev.unit||""))+(ev.type==="thermal"?` · Min ${ev.min_c??"—"} · Mean ${ev.mean_c??"—"} · Center ${ev.center_c??"—"}`:"");
+    return `<div class="log-row ${lvl}"><span class="log-time" title="${esc(ev.timestamp)}">${esc(fmtLogTs(ev.timestamp))}</span><span class="log-dot ${lvl}"></span><div class="log-body"><div class="log-name">${esc(ev.sensor_name||ev.sensor_id)}</div><div class="log-detail">${esc(detail)}</div></div><span class="log-tag">${tags[ev.level]||"—"}</span></div>`;
+  }).join("")||'<p class="log-note">No records in this selection.</p>';
+  document.getElementById("logCount").textContent=`${logState.rows.length} ${logState.rows.length===1?"record":"records"} · Times shown locally; CSV timestamps are UTC`+(logState.older?" · Refresh latest to resume live updates":"");
+  document.getElementById("logMore").hidden=!logState.next;
+}
+async function loadHistory(more=false,reset=false){
+  const root=document.getElementById("logRoot");if(!root)return;
+  if(logState.controller){if(!reset)return;logState.controller.abort();}
+  if(reset){logState.older=false;logState.next=null;}
+  const controller=new AbortController();logState.controller=controller;
+  const timeout=setTimeout(()=>controller.abort(),6000);
+  try{
+    const params=logParameters();document.getElementById("logExport").href="/api/history/export.csv?"+params;
+    if(more&&logState.next)params.set("before_seq",logState.next);
+    const [status,data]=await Promise.all([
+      historyJson("/api/history/status",{signal:controller.signal}),
+      logState.older&&!more?Promise.resolve(null):historyJson("/api/history?"+params,{signal:controller.signal})
+    ]);
+    if(document.getElementById("logRoot")!==root||currentView!=="mod3")return;
+    if(!status.settings||!Array.isArray(status.sensors)||(data&&!Array.isArray(data.records)))throw new Error("Invalid history response. Update the Pi files.");
+    logState.pi=status;
+    const select=document.getElementById("logSensor"),selected=select.value;
+    select.innerHTML='<option value="">All sensors</option>'+status.sensors.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+    select.value=selected;if(selected&&select.value!==selected){select.add(new Option(selected,selected));select.value=selected;}
+    if(data){logState.rows=more?logState.rows.concat(data.records):data.records;logState.next=data.before_seq;if(more)logState.older=true;renderLogRows();}
+    document.getElementById("logError").textContent=status.error|| (status.legacy_skipped?`${status.legacy_skipped} invalid legacy rows were skipped; the original CSV is unchanged.`:"");
+    updateHistoryStatus();
+  }catch(e){
+    if(document.getElementById("logRoot")===root&&logState.controller===controller){
+      document.getElementById("logError").textContent=e.name==="AbortError"?"History request timed out. Retrying…":"History unavailable: "+e.message;
+      logState.pi=null;updateHistoryStatus();
+    }
+  }finally{clearTimeout(timeout);if(logState.controller===controller)logState.controller=null;}
+}
+async function renderHistoryLog(){
+  if(!document.getElementById("logRoot"))buildHistory();
+  await loadHistory();
+}
+</script>
+</body>
+</html>

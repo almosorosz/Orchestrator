@@ -1,0 +1,2 @@
+# Install in the same Python environment used to launch MAIN_WINDOW.py.
+PySide6>=6.5,<7

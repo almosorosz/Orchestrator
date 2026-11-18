@@ -4,8 +4,7 @@
 # In[2]:
 
 
-import pytest
-from app_control.Controller import Controller
+from app.controller import Controller
 
 def test_stage_start():
     c = Controller(r"C:\Users\user\Desktop\OMNI\1. OMNI",r"C:\Users\user\Desktop\OMNI\2. IMED", 3)
