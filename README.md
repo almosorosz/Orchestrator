@@ -534,6 +534,33 @@ or extensionless completion marker. After it stabilizes, end the session and use
 Dashboard/sidebar Start to launch the next batch. Regeneration requires applying
 assignments again.
 
+### Experiment Definition timeline
+
+Open **Experiment Profile** in Settings and choose **Device timeline**. Add device
+lines with custom names and compatible assignments, then add named stages. Time
+runs downward and device lines run across the page. Drag Hold, Ramp, Mass addition,
+Equilibration, or valve actions onto cells. Double-click an action to edit its
+values, or a column header to edit its device line. Drag actions to move them and
+drag stages in the list to change their order. Several actions in one row run in
+parallel. Reuse the same pump line during charging, antisolvent addition, cleaning,
+and rinsing. An empty pump or valve cell is off. An empty temperature or stirring
+cell holds the preceding target.
+
+Set each duration and target to **Fixed**, **DoE** with bounds, or **Alternate**
+between its bounds. Mass additions specify grams and derive the calibrated flow
+from the stage duration. Temperature actions select **Jacket** or **Internal vessel
+(Process)** control, including mode changes between stages. **System settings**
+retains the existing ramp and addition limits. **Import current component profile**
+creates an editable timeline from the existing component design. Set the imported
+stage purposes before using it for modeling. **Component design** remains available
+in the definition source selector for existing setups.
+
+Save, generate the DoE with the existing sampling choices, then apply device
+assignments. Presets retain the recipe and exact generated profiles. CSV export,
+the native runner and recorded campaign viewer use the same compiled profiles.
+Keep Experiment and Equilibration stages together to define the modeling window.
+Native modeling follow-ups retain the timeline's charging and cleanup profiles.
+
 ### Automatic BO and IMED
 
 Choose **Bayesian optimization** or **IMED** under **Dashboard LOOP modeling**.

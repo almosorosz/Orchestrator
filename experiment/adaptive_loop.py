@@ -236,6 +236,8 @@ class RecipeCompiler:
         self.setup, self.template, self.mode = setup, template, mode
         self.calibration_storage = calibration_storage
         self.assignments = {item.role: item for item in assignments}
+        self.line_roles = template.line_roles if template else {}
+        self.role_specs = {role: ROLES[self.line_roles.get(role, {}).get("role", role)] for role in self.assignments}
         self.roles = {role: item.device_id for role, item in self.assignments.items()}
         self.monitors = tuple(monitors)
         self.demo = template.experiments[0].imed_simulation if template else None
@@ -245,8 +247,8 @@ class RecipeCompiler:
             raise ValueError("Assign a reactor temperature controller in the DoE or Automatic loop setup → Devices.")
         for role, device in self.roles.items():
             cfg = configs.get(device, {})
-            if cfg.get("type") not in ROLES[role].compatible_types or is_monitor_only(cfg):
-                raise ValueError(f"Assign a compatible controlled device for {ROLES[role].label}.")
+            if cfg.get("type") not in self.role_specs[role].compatible_types or is_monitor_only(cfg):
+                raise ValueError(f"Assign a compatible controlled device for {self.role_specs[role].label}.")
 
     def process_defaults(self, case):
         return starting_process_defaults(self.setup, case, self.demo)
@@ -273,6 +275,8 @@ class RecipeCompiler:
             raise ValueError("Support profiles need distinct assigned DoE roles: " + ", ".join(sorted(bad_roles)))
         for role, profile in support.items():
             self._support_profile(role, profile)
+        if self.line_roles:
+            return  # Timeline charging and support stages are carried into follow-up recipes.
         required = {role for role in self.roles if role not in {"T", "AS", "seed"}
                     and _role_active(campaign, self.roles[role])}
         if self.demo:
@@ -313,11 +317,14 @@ class RecipeCompiler:
                 density = _number(process.get("AntiSolventDensity"), "antisolvent density (g/mL)", 1e-12)
             values, unit = values * 60 / density, "mL/min"
         else:
-            mass_flow = ROLES[role].unit == "g/h"
+            mass_flow = self.role_specs[role].unit == "g/h"
             if role == "AS":
                 values = values * 3600
             if mass_flow:
-                values, unit, _ = convert_profile(self.calibration_storage, assignment, config, values)
+                from experiment.doe_campaign import ProfileAssignment
+                semantic = self.line_roles.get(role, {}).get("role", role)
+                conversion = ProfileAssignment(semantic, assignment.device_id, assignment.density_g_ml)
+                values, unit, _ = convert_profile(self.calibration_storage, conversion, config, values)
             else:
                 unit = target_limits(config)["unit"]
         return DeviceProfile(assignment.device_id, tuple(ProfilePoint(float(t), float(v))
@@ -348,9 +355,11 @@ class RecipeCompiler:
         if stirring is not None and "stirring_rate" in self.roles:
             device_profiles["stirring_rate"] = self.device_profile("stirring_rate", stirring)
         if ("stirring_rate" in self.roles and _role_active(self.template, self.roles["stirring_rate"])
-                and "stirring_rate" not in device_profiles and "stirring_rate" not in support):
+                and "stirring_rate" not in device_profiles and "stirring_rate" not in support and not self.line_roles):
             raise ValueError("Provide a recorded or configured main stirrer profile for the follow-up.")
         seed_mass = _number(process.get("SeedMass", default_seed), "seed mass")
+        if self.line_roles and not self.demo:
+            return self._timeline_followup(device_profiles, process, name, source, default_seed, duration)
         if self.demo:
             for role, profile in support.items():
                 device_profiles[role] = self._support_profile(role, profile)
@@ -387,6 +396,38 @@ class RecipeCompiler:
         ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
         start = 0. if self.demo else self.setup["followup_start_s"]
         return Campaign(experiment.name, (experiment,), monitor_device_ids=self.monitors), (start, start + duration)
+
+    def _timeline_followup(self, modeled, process, name, source, default_seed, duration):
+        from dataclasses import replace
+
+        original = self.template.experiments[0]
+        if original.model_window is None:
+            raise ValueError("Mark the Experiment and Equilibration stages in Experiment Definition before running a modeling loop.")
+        if process.get("SeedMass", default_seed) != default_seed:
+            raise ValueError("Keep the timeline's fixed seed mass for follow-ups, or define calibrated seed delivery.")
+        begin, end = original.model_window
+        shift = begin + duration - end
+        by_device = {profile.device_id: profile for profile in modeled.values()}
+        profiles = []
+        for profile in original.profiles:
+            replacement = by_device.get(profile.device_id)
+            if replacement is None:
+                if any(begin + duration < point.time_s < end for point in profile.points):
+                    raise ValueError(f"The recommended duration is shorter than {profile.device_id}'s support sequence.")
+                points = tuple(ProfilePoint(p.time_s + shift if p.time_s >= end else p.time_s, p.target)
+                               for p in profile.points)
+            else:
+                before = tuple(p for p in profile.points if p.time_s < begin)
+                middle = tuple(ProfilePoint(begin + p.time_s, p.target) for p in replacement.points)
+                after = tuple(ProfilePoint(p.time_s + shift, p.target) for p in profile.points if p.time_s > end)
+                points = (*before, *middle, *after)
+            profiles.append(DeviceProfile(profile.device_id, points, profile.interpolation, profile.unit))
+        modes = tuple(replace(mode, time_s=mode.time_s + shift if mode.time_s >= end else mode.time_s)
+                      for mode in original.control_modes)
+        experiment = ExperimentDefinition(name, tuple(profiles), source=source, control_modes=modes,
+                                          model_window=(begin, begin + duration))
+        ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
+        return Campaign(name, (experiment,), monitor_device_ids=self.monitors, line_roles=self.line_roles), experiment.model_window
 
     def _append_demo_profiles(self, profiles, duration, seed_mass, temp, feed):
         _, _, seeded_process, _, _ = model_inputs(True)
@@ -490,6 +531,8 @@ class AdaptiveLoop:
             if process["SeedMass"] and not self.setup["recording"]["seed_percentiles"]:
                 raise ValueError("Enter the seed D10/D50/D90 for seeded measurements.")
             self.process_by_id[experiment.experiment_id] = process
+            if experiment.model_window is not None:
+                self.windows[experiment.experiment_id] = experiment.model_window
         self.mapping = recording_mapping(self.setup, self.roles, self.configs)
         self._require_channels("Temperature")
         recording = self.setup["recording"]

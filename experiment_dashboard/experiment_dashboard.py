@@ -1,4 +1,5 @@
 import time
+from dataclasses import asdict
 import threading
 import pandas as pd
 import numpy as np
@@ -79,6 +80,10 @@ class ExperimentWorker(QObject):
         # Validate typed definitions too, using the currently assigned devices.
         for frame in self.experiments:
             ExperimentDefinition.from_frame(frame, device_configs)
+        for definition in self.definitions:
+            for mode in definition.control_modes:
+                if device_configs.get(mode.device_id, {}).get("type") != "huber":
+                    raise ValueError("A temperature control-mode event must target a Huber controller.")
         for frame in self.experiments:
             for device_id in frame.columns.drop("time_s"):
                 if device_id not in devices:
@@ -407,6 +412,8 @@ class ExperimentWorker(QObject):
                     except InterruptedError:
                         break
                 self._active_profiles = {p.device_id: p for p in definition.profiles}
+                self._mode_cursor = 0
+                control_modes = sorted(definition.control_modes, key=lambda point: point.time_s)
                 run.status = RunStatus.RUNNING
                 if self.recorder:
                     self.recorder.submit("run_start", run.run_id, {
@@ -486,6 +493,16 @@ class ExperimentWorker(QObject):
                         # switching at this exact simulated-time boundary.
                         update_simulated_process(self.devices, self.device_configs, elapsed - self._process_time)
                         self._process_time = elapsed
+                    while self._mode_cursor < len(control_modes) and control_modes[self._mode_cursor].time_s <= elapsed:
+                        event = control_modes[self._mode_cursor]
+                        device = self.devices[event.device_id]
+                        operation = device.set_jacket_control if event.mode == "Jacket" else device.set_process_control
+                        if not self.executor.submit(operation).result(timeout=5):
+                            raise RuntimeError(f"{event.device_id} rejected {event.mode} temperature control.")
+                        if self.recorder:
+                            self.recorder.submit("control_mode", run.run_id, asdict(event))
+                        logger.info("%s changed to %s temperature control", event.device_id, event.mode)
+                        self._mode_cursor += 1
                     self._apply_profile_step(interpolated_row)
                     if self.recorder:
                         self.recorder.submit("command_accepted", run.run_id, interpolated_row.to_dict())

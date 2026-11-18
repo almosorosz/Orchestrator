@@ -30,13 +30,13 @@ class DoeAssignmentDialog(QDialog):
         )
         description.setWordWrap(True)
         layout.addWidget(description)
-        self.table = QTableWidget(len(ROLES), 3)
+        self.table = QTableWidget(len(self.service.roles), 3)
         self.table.setHorizontalHeaderLabels(["Generated profile", "Device", "Conversion"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.rows = {}
         self.imed_rows = {}
         required = self.service.required_roles()
-        for row, (role, spec) in enumerate(ROLES.items()):
+        for row, (role, spec) in enumerate(self.service.roles.items()):
             label = spec.label + (" *" if role in required else " (inactive)")
             self.table.setItem(row, 0, QTableWidgetItem(label))
             combo = QComboBox()
@@ -49,7 +49,8 @@ class DoeAssignmentDialog(QDialog):
                     combo.addItem(f"{key}: {config['name']} [{mode}, {state}]", key)
             self.rows[role] = (combo, row)
             self.table.setCellWidget(row, 1, combo)
-            preferred = existing[role].device_id if role in existing else DEFAULT_ASSIGNMENTS.get(role)
+            preferred = (existing[role].device_id if role in existing else
+                         self.service.recipe_lanes.get(role, {}).get("device_id") or DEFAULT_ASSIGNMENTS.get(role))
             index = combo.findData(preferred)
             if index >= 0 and (role in required or role in existing):
                 combo.setCurrentIndex(index)
@@ -124,10 +125,10 @@ class DoeAssignmentDialog(QDialog):
         text = "Not assigned"
         if device_id is not None:
             custom = self.configs[device_id].get("pump_calibration")
-            text = (f"Loaded calibration: {custom.get('source_name', 'CSV')}" if custom and ROLES[role].unit == "g/h" else
-                    "g/h ÷ 60 → mL/min (1 g/mL)" if kind == "ismatec" and ROLES[role].unit == "g/h" else
-                    f"{role} calibration: g/h → RPM" if ROLES[role].unit == "g/h" else
-                    f"Direct ({ROLES[role].unit})")
+            unit = self.service.roles[role].unit
+            text = (f"Loaded calibration: {custom.get('source_name', 'CSV')}" if custom and unit == "g/h" else
+                    "g/h ÷ 60 → mL/min (1 g/mL)" if kind == "ismatec" and unit == "g/h" else
+                    f"{role} calibration: g/h → RPM" if unit == "g/h" else f"Direct ({unit})")
         self.table.setItem(row, 2, QTableWidgetItem(text))
         self.invalidate()
 

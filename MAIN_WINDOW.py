@@ -1421,15 +1421,18 @@ class MainWindow(QMainWindow):
         self.doe_plot_dialog.show()
 
     def open_profile_dialog(self):
-
-        dlg = ExperimentProfileDialog(
-            self.experiment_service.exp_par,
-            self
-        )
+        from gui.recipe_editor import ExperimentDefinitionDialog
+        configs, _ = self.control_panel.collect_current_configuration()
+        dlg = ExperimentDefinitionDialog(self.experiment_service.exp_par, configs, self)
 
         if dlg.exec():
+            self._assigned_doe_campaign = None
+            self.settings_page.set_assignment_available(False)
+            self.settings_page.set_doe_available(False)
+            self.create_experiments = None
+            self.execution.set_experiment_creator(None)
             self.log_message(
-                "Experiment profile dialog opened/updated.",
+                "Experiment Definition saved. Generate the DoE and apply device assignments.",
                 "INFO"
             )
 

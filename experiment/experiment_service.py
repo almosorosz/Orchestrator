@@ -85,6 +85,9 @@ class ExperimentService:
         experiment-profile configuration.
         """
 
+        if self.exp_par.timeline:
+            from experiment.recipe import RecipeCreator
+            return RecipeCreator(self)
         return ExperimentCreator(
             self.doe_sampler,
             self.component_gen,

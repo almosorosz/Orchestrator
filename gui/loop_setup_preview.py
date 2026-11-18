@@ -47,7 +47,7 @@ def used_loop_values(setup, backend, context, design_labels):
     for role, device in [*roles.items(), *(("Monitor", device) for device in monitors)]:
         config = configs.get(device, {})
         status = "connected" if device in connected else "disconnected" if config else "missing"
-        caption = ROLES[role].label if role in ROLES else role
+        caption = campaign.line_roles[role]["name"] if campaign and role in campaign.line_roles else ROLES[role].label if role in ROLES else role
         name = config.get("name", device)
         assignments.append((caption, f"{device} · {name} · {status}", label))
         if calibration := config.get("pump_calibration"):
@@ -129,6 +129,8 @@ def used_loop_values(setup, backend, context, design_labels):
         recorded.append(("Seed D10 / D50 / D90 (µm)", recording["seed_percentiles"], "Process inputs"))
 
     support = groups["Follow-up support"] = []
+    if campaign and campaign.line_roles:
+        support.append(("Charging and cleanup", "Inherited from the starting timeline", "Experiment Definition"))
     for role, profile in setup["support_profiles"].items():
         times, targets = profile["points"]
         support.append((ROLES[role].label, f"{len(times)} points · {min(targets):g}–{max(targets):g} {ROLES[role].unit}",

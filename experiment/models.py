@@ -48,17 +48,37 @@ class DeviceProfile:
 
 
 @dataclass(frozen=True)
+class ControlModePoint:
+    time_s: float
+    device_id: str
+    mode: str
+
+    def __post_init__(self):
+        if not math.isfinite(self.time_s) or self.time_s < 0 or self.mode not in {"Jacket", "Process"} or not self.device_id:
+            raise ValueError("Temperature control mode needs a device, a valid time, and Jacket or Process control.")
+
+
+@dataclass(frozen=True)
 class ExperimentDefinition:
     name: str
     profiles: tuple[DeviceProfile, ...]
     source: str = "manual"
     experiment_id: str = field(default_factory=lambda: uuid4().hex)
     imed_simulation: dict | None = None
+    control_modes: tuple[ControlModePoint, ...] = ()
+    model_window: tuple[float, float] | None = None
 
     def __post_init__(self):
         ids = [profile.device_id for profile in self.profiles]
         if not self.name or not ids or len(ids) != len(set(ids)):
             raise ValueError("An experiment needs a name and unique device profiles")
+        duration = max(profile.points[-1].time_s for profile in self.profiles)
+        if any(point.device_id not in ids or point.time_s > duration for point in self.control_modes):
+            raise ValueError("Control-mode events must refer to assigned devices within the experiment timeline.")
+        if self.model_window is not None:
+            begin, end = self.model_window
+            if not 0 <= begin < end <= duration:
+                raise ValueError("The modeling window must lie inside the experiment timeline.")
 
     @classmethod
     def from_frame(cls, frame, device_configs, name="Experiment", source="manual"):
@@ -86,7 +106,8 @@ class ExperimentDefinition:
 
     def to_frame(self):
         import numpy as np
-        times = sorted({p.time_s for profile in self.profiles for p in profile.points})
+        times = sorted({p.time_s for profile in self.profiles for p in profile.points}
+                       | {point.time_s for point in self.control_modes})
         result = {"time_s": times}
         for profile in self.profiles:
             x = [p.time_s for p in profile.points]
@@ -106,6 +127,7 @@ class Campaign:
     campaign_id: str = field(default_factory=lambda: uuid4().hex)
     monitor_device_ids: tuple[str, ...] = ()
     doe_factors: tuple[str, ...] | None = None
+    line_roles: dict = field(default_factory=dict)
 
 
 @dataclass

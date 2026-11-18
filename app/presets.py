@@ -78,6 +78,12 @@ def read_preset(filename):
         elif isinstance(default, bool):
             if not isinstance(value, bool):
                 raise ValueError(f"{field.name} must be true or false")
+        elif isinstance(default, dict):
+            if not isinstance(value, dict):
+                raise ValueError(f"Invalid {field.name} settings")
+            if value:
+                from experiment.recipe import validate_recipe
+                validate_recipe(value)
         elif isinstance(default, str):
             if not isinstance(value, str):
                 raise ValueError(f"Invalid text for {field.name}")
@@ -94,10 +100,14 @@ def read_preset(filename):
             raise ValueError(f"Invalid value for {field.name}")
         setattr(parameters, field.name, value)
     assignments = tuple(ProfileAssignment(**row) for row in data.get("assignments", []))
+    role_specs = ROLES
+    if parameters.timeline:
+        from experiment.recipe import recipe_roles
+        role_specs = recipe_roles(parameters.timeline)
     if len({a.role for a in assignments}) != len(assignments) or len({a.device_id for a in assignments}) != len(assignments):
         raise ValueError("Duplicate profile roles or devices in preset")
     for assignment in assignments:
-        if assignment.role not in ROLES or assignment.device_id not in devices or devices[assignment.device_id]["type"] not in ROLES[assignment.role].compatible_types:
+        if assignment.role not in role_specs or assignment.device_id not in devices or devices[assignment.device_id]["type"] not in role_specs[assignment.role].compatible_types:
             raise ValueError(f"Invalid assignment: {assignment.role}")
     monitors = data.get("monitor_device_ids", [])
     if not isinstance(monitors, list) or any(not isinstance(key, str) for key in monitors) or len(set(monitors)) != len(monitors):

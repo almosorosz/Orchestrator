@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pandas as pd
 
-from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
+from experiment.models import Campaign, ControlModePoint, DeviceProfile, ExperimentDefinition, ProfilePoint
 from hardware_devices.capabilities import is_monitor_only
 
 
@@ -81,6 +81,8 @@ def sampled_doe_factors(creator):
 class DoeCampaignService:
     def __init__(self, creator):
         self.creator = creator
+        self.roles = getattr(creator, "line_roles", ROLES)
+        self.recipe_lanes = {lane["id"]: lane for lane in getattr(creator, "recipe", {}).get("lanes", [])}
         self.frames = {key: frame.copy(deep=True) for key, frame in creator.exp_storage.data.items()}
         if not self.frames:
             raise ValueError("Generate a DoE first")
@@ -93,7 +95,7 @@ class DoeCampaignService:
             raise ValueError("Keep IMED validation runs in a separate DoE preset.")
         # Match the generated DoE plots/export's existing return-pump segments,
         # but keep source flow units until the assigned driver is known.
-        self.return_ramps_applied = (not self.imed_simulations
+        self.return_ramps_applied = (not self.imed_simulations and not self.recipe_lanes
                                      and hasattr(creator.exp_storage, "add_backwards_ramp"))
         if self.return_ramps_applied:
             self.frames = {key: creator.exp_storage.add_backwards_ramp(
@@ -101,7 +103,9 @@ class DoeCampaignService:
             ) for key, frame in self.frames.items()}
 
     def required_roles(self):
-        return {role for role in ROLES if any(
+        if self.recipe_lanes:
+            return set(self.recipe_lanes)
+        return {role for role in self.roles if any(
             role in frame and (role == "T" or np.any(frame[role].to_numpy(dtype=float) != 0))
             for frame in self.frames.values()
         )}
@@ -112,11 +116,11 @@ class DoeCampaignService:
         device_ids = [item.device_id for item in assignments]
         if len(roles) != len(set(roles)) or len(device_ids) != len(set(device_ids)):
             raise ValueError("Assign each profile once and use a different device for each profile")
-        if any(role not in ROLES for role in roles):
+        if any(role not in self.roles for role in roles):
             raise ValueError("Unknown generated profile role")
         missing = self.required_roles() - set(roles)
         if missing:
-            raise ValueError("Assign active profiles: " + ", ".join(ROLES[key].label for key in sorted(missing)))
+            raise ValueError("Assign active profiles: " + ", ".join(self.roles[key].label for key in sorted(missing)))
         if not assignments:
             raise ValueError("Assign at least one generated profile")
         for device_id in device_ids:
@@ -142,7 +146,9 @@ class DoeCampaignService:
                 if assignment.role not in frame:
                     raise ValueError(f"{name}: missing {assignment.role} profile")
                 values = frame[assignment.role].to_numpy(dtype=float)
-                converted, unit, _ = convert_profile(self.creator.exp_storage, assignment, configs[assignment.device_id], values)
+                semantic = self.recipe_lanes.get(assignment.role, {}).get("role", assignment.role)
+                conversion = ProfileAssignment(semantic, assignment.device_id, assignment.density_g_ml)
+                converted, unit, _ = convert_profile(self.creator.exp_storage, conversion, configs[assignment.device_id], values)
                 profile_times = times
                 if times[0] > 0:
                     profile_times = np.insert(times, 0, 0.)
@@ -150,36 +156,42 @@ class DoeCampaignService:
                 profiles.append(DeviceProfile(
                     assignment.device_id,
                     tuple(ProfilePoint(float(t), float(v)) for t, v in zip(profile_times, converted)),
-                    "step" if assignment.role == "valve_state" else "linear", unit,
+                    "step" if semantic == "valve_state" else "linear", unit,
                 ))
             simulation = self.imed_simulations.get(name)
             if simulation is not None:
                 from imed_python.demo_campaign import compile_simulation
                 simulation = compile_simulation(simulation, role_devices, configs,
                                                 monitor_device_ids, imed_monitors, profiles)
-            definition = ExperimentDefinition(name, tuple(profiles), source="doe",
-                                              imed_simulation=simulation)
+            snapshot = self.creator.parameter_snapshots.get(name, {})
+            modes = tuple(ControlModePoint(item["time_s"], role_devices[item["lane"]], item["mode"])
+                          for item in snapshot.get("control_modes", []) if item["lane"] in role_devices)
+            definition = ExperimentDefinition(name, tuple(profiles), source="doe", imed_simulation=simulation,
+                                              control_modes=modes, model_window=snapshot.get("model_window"))
             # The shared validator applies the currently configured device limits.
             ExperimentDefinition.from_frame(definition.to_frame(), configs)
             experiments.append(definition)
         factors = sampled_doe_factors(self.creator)
         return Campaign("Generated DoE", tuple(experiments), monitor_device_ids=tuple(monitor_device_ids),
-                        doe_factors=(factors or None) if self.imed_simulations else factors)
+                        doe_factors=(factors or None) if self.imed_simulations else factors,
+                        line_roles={key: {**lane, "device_id": role_devices[key]} for key, lane in self.recipe_lanes.items()})
 
     def assignment_details(self, assignments, configs):
         result = []
         for assignment in assignments:
-            _, unit, conversion = convert_profile(self.creator.exp_storage, assignment, configs[assignment.device_id], np.array([0.]))
+            semantic = self.recipe_lanes.get(assignment.role, {}).get("role", assignment.role)
+            original = ProfileAssignment(semantic, assignment.device_id, assignment.density_g_ml)
+            _, unit, conversion = convert_profile(self.creator.exp_storage, original, configs[assignment.device_id], np.array([0.]))
             result.append({"role": assignment.role, "device_id": assignment.device_id,
-                           "source_unit": ROLES[assignment.role].unit, "target_unit": unit,
+                           "source_unit": self.roles[assignment.role].unit, "target_unit": unit,
                            "density_g_ml": 1.0 if configs[assignment.device_id]["type"] == "ismatec" else None, "conversion": conversion})
             custom = configs[assignment.device_id].get("pump_calibration")
-            if ROLES[assignment.role].unit == "g/h" and custom:
+            if self.roles[assignment.role].unit == "g/h" and custom:
                 result[-1].update(calibration_file=custom["source_name"], calibration_sha256=custom["sha256"],
                                   calibration_points=custom["points"], density_g_ml=None)
-            elif ROLES[assignment.role].unit == "g/h" and configs[assignment.device_id]["type"] == "masterflex":
+            elif self.roles[assignment.role].unit == "g/h" and configs[assignment.device_id]["type"] == "masterflex":
                 converter_name = {"AS": "as_rate_converter", "solution": "solution_rate_converter",
-                                  "solvent": "solvent_rate_converter", "clean_sol": "cleaning_sol_rate_converter"}[assignment.role]
+                                  "solvent": "solvent_rate_converter", "clean_sol": "cleaning_sol_rate_converter"}[semantic]
                 converter = getattr(self.creator.exp_storage, converter_name)
                 result[-1]["calibration_coefficients"] = list(map(float, converter.res.x))
                 result[-1]["calibration_file"] = Path(converter.folder_loc).name
@@ -210,7 +222,7 @@ class DoeCampaignService:
             self.parameter_table().to_csv(directory / "parameters.csv", index=False)
             raw_rows = []
             for name, frame in self.frames.items():
-                for role, spec in ROLES.items():
+                for role, spec in self.roles.items():
                     if role in frame:
                         raw_rows.extend({"experiment": name, "time_s": float(t) * 3600,
                                          "profile_role": role, "target": float(value), "unit": spec.unit}

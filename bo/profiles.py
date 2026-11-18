@@ -104,7 +104,9 @@ def campaign_profiles(experiment, process, definition, controls=None):
                  if entry.get("experiment_id") == experiment_id), {})
     demo = spec.get("imed_simulation") or {}
     devices = definition.get("devices", {})
-    controls = {**(controls or {}), **demo.get("controls", {})}
+    lanes = definition.get("campaign", {}).get("line_roles", {})
+    inherited = {key: lane["device_id"] for key, lane in lanes.items() if key in {"T", "AS", "stirring_rate"}}
+    controls = {**inherited, **(controls or {}), **demo.get("controls", {})}
     recorded_temp = pairs(experiment.get("TemperatureData"))
     duration = float(recorded_temp[0, -1]) if recorded_temp is not None else 0.
     start = scalar(experiment.get("RecordingStart_s")) or 0.
@@ -174,8 +176,14 @@ def case_runs(case, folder=None, *, controls=None):
                         if (value := scalar(process.get(key))) is not None and value >= 0), None)
             if rpm is not None:
                 profiles["stirring"] = Profile(np.array([0., end]), np.array([rpm, rpm]), "Process setting")
-        if folder:
-            profiles.update(campaign_profiles(exp, process, definition, controls))
+        command_folder = folder
+        if command_folder is None and isinstance(exp.get("RecordingFile"), str):
+            candidate = Path(exp["RecordingFile"]).parent.parent
+            if (candidate / "definition.json").is_file():
+                command_folder = candidate
+        if command_folder:
+            command_definition = definition if folder else read_json(Path(command_folder) / "definition.json")
+            profiles.update(campaign_profiles(exp, process, command_definition, controls))
         conc = pairs(exp.get("ConcentrationData"))
         initial = scalar(exp.get("InitialConcentration"))
         if initial is None and conc is not None and conc[0, 0] == 0:

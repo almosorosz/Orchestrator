@@ -65,6 +65,7 @@ class ExperimentProfileParameters():
     # ---------------------------------------
 
     # System defaults
+    timeline              : dict = field(default_factory=dict)
     v_heat_max             : float = 2      # Celsius / min
     v_cool_max             : float = 2      # Celsius / min
     AS_add_max             : float = 1.8    # g/min
