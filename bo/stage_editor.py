@@ -12,7 +12,6 @@ from .physical import Stage, control_values, grouped_controls, physical_controls
 from .profiles import CHANNELS
 
 
-CONTROL_LIMIT = 4
 STAGE_FIELDS = ("duration_s", "start", "end")
 
 
@@ -98,8 +97,6 @@ class ProfileStageEditor(QWidget):
         stages = validate_stages(self.channel, stages, self.horizon)
         controls = [item.key for item in available_controls(self.channel, stages)
                     if item.key in self.selected_controls]
-        if len(controls) > CONTROL_LIMIT:
-            raise ValueError(f"Select at most {CONTROL_LIMIT} {self.label.lower()} decision controls.")
         return {"stages": [asdict(stage) for stage in stages], "controls": controls}
 
     def set_horizon(self, horizon):
@@ -202,24 +199,15 @@ class ProfileStageEditor(QWidget):
             ending = "Hold the final temperature" if self.channel == "temperature" else "Keep feed off"
             self.time_note.setText(f"{ending} for the remaining {remaining:g} s.")
 
-    def update_control_note(self, text=None):
-        count = sum(self.controls.item(row, 0).checkState() == Qt.CheckState.Checked
-                    for row in range(self.controls.rowCount()))
-        self.control_note.setText(text or f"{count} of {CONTROL_LIMIT} decision controls selected.")
+    def update_control_note(self):
+        count = len(self.selected_controls)
+        self.control_note.setText(f"{count} decision controls selected.")
 
     def toggle_control(self, cell):
         if cell.column() != 0:
             return
         key = cell.data(Qt.ItemDataRole.UserRole)
         if cell.checkState() == Qt.CheckState.Checked:
-            count = sum(self.controls.item(row, 0).checkState() == Qt.CheckState.Checked
-                        for row in range(self.controls.rowCount()))
-            if count > CONTROL_LIMIT:
-                self.controls.blockSignals(True)
-                cell.setCheckState(Qt.CheckState.Unchecked)
-                self.controls.blockSignals(False)
-                self.update_control_note(f"Select at most {CONTROL_LIMIT} decision controls.")
-                return
             self.selected_controls.add(key)
         else:
             self.selected_controls.discard(key)

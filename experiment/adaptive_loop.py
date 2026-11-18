@@ -12,6 +12,7 @@ import numpy as np
 from bo.profiles import Profile, case_runs, make_profile, recipe_data
 from experiment.doe_campaign import ROLES, convert_profile
 from experiment import loop_outputs
+from experiment.loop_process import LOOP_WEIGHT_DEFAULTS, VALIDATION_PE_SETTINGS, starting_process_defaults
 from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
 from experiment.recording import atomic_json
 from hardware_devices.capabilities import is_monitor_only
@@ -248,10 +249,7 @@ class RecipeCompiler:
                 raise ValueError(f"Assign a compatible controlled device for {ROLES[role].label}.")
 
     def process_defaults(self, case):
-        if self.demo:
-            return model_inputs(self.demo["seeded"])[2]
-        template = next(iter(case.get("ProcInf", [])), {})
-        return {"SeedMass": 0., "AntiSolvMass": 0., "PowerRatio": 1., **template, **self.setup["process"]}
+        return starting_process_defaults(self.setup, case, self.demo)
 
     def check_devices(self, campaign, configs, connected, *, require_all=False):
         actuators = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
@@ -527,9 +525,7 @@ class AdaptiveLoop:
     def _prepare_imed(self):
         if not self.case.get("ModelParameter") and self.demo:
             self.case["ModelParameter"] = [validation_model()]
-            self.case.setdefault(PYFIT_SETTINGS_KEY, {
-                "global_iterations": 0, "population_size": 5, "local_evaluations": 40,
-            })
+            self.case.setdefault(PYFIT_SETTINGS_KEY, dict(VALIDATION_PE_SETTINGS))
         if not self.case.get("Solubility") or not self.case.get("ModelParameter"):
             raise ValueError("Load an IMED case with solubility and candidate kinetic models.")
         for index, model in enumerate(self.case["ModelParameter"], 1):
@@ -541,7 +537,7 @@ class AdaptiveLoop:
                     or np.isposinf(table).any() or np.any(active[:, 1] > active[:, 2])):
                 raise ValueError(f"Set valid parameter bounds and enable estimation in IMED model {index}.")
         weights = self.case.get(PE_WEIGHTS_KEY, self.case.get("objweightfactor", {}))
-        self.weights = [float(weights.get(f"W{i}", default)) for i, default in enumerate((0, 1, 1), 1)]
+        self.weights = [float(weights.get(f"W{i}", default)) for i, default in enumerate(LOOP_WEIGHT_DEFAULTS, 1)]
         if not np.isfinite(self.weights).all() or min(self.weights) < 0 or sum(w > 0 for w in self.weights) < 2:
             raise ValueError("Enable at least two IMED response weights so the loop can reach D-optimal design.")
         if self.weights[0]:

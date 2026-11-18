@@ -377,6 +377,46 @@ class AdaptiveLoopTests(unittest.TestCase):
             finally:
                 self.doCleanups()
 
+    def test_loop_setup_shows_applied_and_draft_values_for_each_source(self):
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            window, _, _, _ = self.setup_dashboard(Path(directory))
+            try:
+                window.control_panel.experiments = [pd.DataFrame({"time_s": [0., 10.], "T1": [18., 18.]})]
+                window.imed_page.panel.restore_setup_settings({"ProcInf": [{"SolvMass": 75.}]})
+                settings = window.settings_page
+                settings.loop_setup["manual_assignments"] = {"T": "T1"}
+                settings.loop_setup["channels"]["Temperature"] = "T1.temp_internal"
+
+                def inspect_preview(dialog):
+                    def rows(section):
+                        tree = dialog.used_values
+                        group = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                                     if tree.topLevelItem(i).text(0) == section)
+                        return {group.child(i).text(0): (group.child(i).text(1), group.child(i).text(2))
+                                for i in range(group.childCount())}
+
+                    self.assertIs(dialog.tabs.currentWidget(), dialog.used_values_tab)
+                    self.assertEqual(dialog.preview_source.currentData(), "doe")
+                    self.assertEqual(rows("Device assignments")["Reactor temperature"][1], "Applied DoE assignments")
+                    self.assertEqual(rows("Recording")["Temperature"], ("T1.temp_external", "PBM simulation"))
+                    dialog.preview_source.setCurrentIndex(dialog.preview_source.findData("manual"))
+                    self.assertEqual(rows("Device assignments")["Reactor temperature"][1], "Control Panel assignments")
+                    self.assertEqual(rows("Recording")["Temperature"], ("T1.temp_internal", "Recording override"))
+                    self.assertIn("18 °C · Shared profile", rows("Starting profiles")["T1"][0])
+                    self.assertIn(("75", "First IMED process record"), rows("Starting process inputs").values())
+                    edit_tab = dialog.tabs.indexOf(dialog.used_values_tab) + 1
+                    dialog.tabs.setCurrentIndex(edit_tab)
+                    dialog.process["SolvMass"].setText("80")
+                    dialog.tabs.setCurrentWidget(dialog.used_values_tab)
+                    self.assertIn(("80", "Process inputs override"), rows("Starting process inputs").values())
+                    return dialog.result()
+
+                with patch.object(LoopSetupDialog, "exec", inspect_preview):
+                    settings.loop_setup_button.click()
+                self.assertNotIn("SolvMass", settings.loop_setup["process"])
+            finally:
+                self.doCleanups()
+
     def test_dashboard_runs_imed_model_discrimination_and_d_optimal_design(self):
         for count, method in ((2, "Model discrimination"), (1, "D-optimal design")):
             with self.subTest(method=method), TemporaryDirectory(dir=Path.cwd()) as directory:

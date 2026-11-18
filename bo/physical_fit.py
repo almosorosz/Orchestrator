@@ -19,8 +19,8 @@ def read_spec(channel, spec, horizon=None):
     available = {control.key: control for control in (*grouped_controls(channel, rows),
                                                        *physical_controls(channel, rows))}
     keys = spec["controls"]
-    if not isinstance(keys, list) or len(keys) > 4 or len(set(keys)) != len(keys):
-        raise ValueError("Choose up to four distinct physical controls per profile.")
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
+        raise ValueError("Choose distinct physical controls per profile.")
     if any(key not in available for key in keys):
         raise ValueError("A selected physical control no longer applies to the stage list.")
     controls = tuple(available[key] for key in keys)
@@ -34,14 +34,14 @@ def choose_controls(channel, stages):
     if channel == "temperature":
         ramps = [i for i, stage in enumerate(stages) if stage.start != stage.end]
         requested = ["initial_delay", "final_temperature"]
-        requested += [f"stage:{i}:duration" for i in ramps[:2]]
+        requested += [f"stage:{i}:duration" for i in ramps]
         requested.append("stage:0:start")
     else:
         active = [i for i, stage in enumerate(stages) if stage.start > 0 or stage.end > 0]
         requested = ["initial_delay", "on_time", "total_dose"]
         requested += [f"stage:{i}:duration" for i, stage in enumerate(stages)
                       if active and min(active) < i < max(active) and stage.start == stage.end == 0.]
-    return [key for key in requested if key in available][:4]
+    return [key for key in requested if key in available]
 
 
 def trace_spec(channel, profile):
@@ -112,7 +112,7 @@ def fit_stage_controls(channel, rows, controls, source, horizon):
     """Estimate just the chosen controls, keeping the editor's other settings fixed."""
     source = fixed_horizon(source, horizon, stop=channel == "feed")
     nominal = control_values(rows, controls)
-    time = np.linspace(0., horizon, 181)
+    time = np.linspace(0., horizon, max(181, 8 * len(rows) + 1))
     target = source.sample(time)
     value_scale = max(float(np.ptp(source.values)), 1. if channel == "temperature" else 1e-6)
     max_rate = max(float(np.max(source.values)), *(stage.start for stage in rows), *(stage.end for stage in rows))
@@ -154,7 +154,8 @@ def fit_stage_controls(channel, rows, controls, source, horizon):
 
     start = (nominal - lower) / ranges
     # A bounded derivative-free fit also handles discrete changes in feed rate.
+    evaluation_budget = max(240, 60 * len(controls))
     result = minimize(evaluate, start, method="Powell", bounds=[(0., 1.)] * len(controls),
-                      options={"maxfev": 240, "xtol": .001, "ftol": .001})
+                      options={"maxfev": evaluation_budget, "xtol": .001, "ftol": .001})
     point = result.x if evaluate(result.x) < evaluate(start) else start
     return lower + ranges * point, evaluate(point, error_only=True)

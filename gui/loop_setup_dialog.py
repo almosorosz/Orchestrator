@@ -2,12 +2,12 @@
 from copy import deepcopy
 from math import isfinite
 
-from PySide6.QtCore import QLocale, Qt
+from PySide6.QtCore import QLocale, QSignalBlocker, Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QVBoxLayout, QWidget,
+    QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from experiment.adaptive_loop import DEVICE_RECORDING_COLUMNS, validate_setup
@@ -17,6 +17,7 @@ from bo.profiles import make_profile
 from imed_python.campaign_dialog import PROCESS_FIELDS
 from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
+from gui.loop_setup_preview import used_loop_values, value_text
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
@@ -170,7 +171,7 @@ class SupportProfiles(QWidget):
 
 
 class LoopSetupDialog(QDialog):
-    def __init__(self, setup, backend, device_configs=None, parent=None):
+    def __init__(self, setup, backend, device_configs=None, parent=None, *, preview=None):
         super().__init__(parent)
         self.setWindowTitle("Automatic loop setup")
         self.resize(730, 610)
@@ -178,6 +179,7 @@ class LoopSetupDialog(QDialog):
         self.setup = deepcopy(validate_setup(setup))
         self.configs = device_configs or {}
         self.backend = backend
+        self.preview = preview
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
@@ -198,6 +200,12 @@ class LoopSetupDialog(QDialog):
         self.tabs.addTab(self.support, "Support profiles")
         if backend == "imed":
             self.tabs.addTab(self.design_page(), "IMED design")
+        if self.preview is not None:
+            self.used_values_tab = self.preview_page()
+            self.tabs.insertTab(0, self.used_values_tab, "Used values")
+            self.tabs.setCurrentWidget(self.used_values_tab)
+            self.tabs.currentChanged.connect(self._tab_changed)
+            self.refresh_preview()
         layout.addWidget(self.tabs, 1)
         self.error = QLabel()
         self.error.setTextFormat(Qt.TextFormat.PlainText)
@@ -209,6 +217,64 @@ class LoopSetupDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def preview_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        row = QHBoxLayout()
+        self.preview_source = QComboBox()
+        self.preview_source.addItem("Settings DoE", "doe")
+        self.preview_source.addItem("Control Panel profiles", "manual")
+        self.preview_source.setCurrentIndex(-1)
+        self.preview_source.currentIndexChanged.connect(self.refresh_preview)
+        row.addWidget(QLabel("Starting batch"))
+        row.addWidget(self.preview_source, 1)
+        refresh = QPushButton("Refresh values")
+        refresh.clicked.connect(self.refresh_preview)
+        row.addWidget(refresh)
+        layout.addLayout(row)
+        self.preview_note = QLabel()
+        self.preview_note.setTextFormat(Qt.TextFormat.PlainText)
+        self.preview_note.setWordWrap(True)
+        layout.addWidget(self.preview_note)
+        self.used_values = QTreeWidget()
+        self.used_values.setHeaderLabels(["Setting", "Used value", "Source"])
+        self.used_values.setUniformRowHeights(True)
+        self.used_values.setColumnWidth(0, 210)
+        self.used_values.setColumnWidth(1, 220)
+        layout.addWidget(self.used_values, 1)
+        return page
+
+    def _tab_changed(self, index):
+        if self.tabs.widget(index) is self.used_values_tab:
+            self.refresh_preview()
+
+    def refresh_preview(self):
+        try:
+            context = self.preview(self.backend, draft := self.collect(), self.preview_source.currentData())
+            labels = {**DESIGN_VALUES, **{key: values[0] for key, values in DESIGN_PAIRS.items()}}
+            groups = used_loop_values(draft, self.backend, context, labels)
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            self.preview_note.setText(f"Used values could not be refreshed. {error}")
+            self.preview_note.show()
+            return
+        with QSignalBlocker(self.preview_source):
+            self.preview_source.setCurrentIndex(self.preview_source.findData(context["source"]))
+        self.preview_note.setText("\n".join(context["messages"]))
+        self.preview_note.setVisible(bool(context["messages"]))
+        expanded = {self.used_values.topLevelItem(i).text(0): self.used_values.topLevelItem(i).isExpanded()
+                    for i in range(self.used_values.topLevelItemCount())}
+        self.used_values.clear()
+        for title, settings in groups.items():
+            if not settings:
+                continue
+            group = QTreeWidgetItem(self.used_values, [title])
+            group.setFirstColumnSpanned(True)
+            for name, value, origin in settings:
+                row = QTreeWidgetItem(group, [name, value_text(value), origin])
+                for column in range(3):
+                    row.setToolTip(column, row.text(column))
+            group.setExpanded(expanded.get(title, title in {"Device assignments", "Starting process inputs"}))
 
     @staticmethod
     def scroll_form():

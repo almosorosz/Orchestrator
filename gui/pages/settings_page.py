@@ -35,12 +35,13 @@ class SettingsPage(QWidget):
     save_preset_requested = Signal()
     load_preset_requested = Signal()
 
-    def __init__(self, parent=None, *, loop_devices=None):
+    def __init__(self, parent=None, *, loop_devices=None, loop_preview=None):
         super().__init__(parent)
         from experiment.adaptive_loop import default_setup
 
         self.loop_setup = default_setup()
         self.loop_devices = loop_devices
+        self.loop_preview = loop_preview
         self._build_ui()
 
     def _build_ui(self):
@@ -598,7 +599,8 @@ class SettingsPage(QWidget):
 
         try:
             configs = self.loop_devices() if self.loop_devices is not None else {}
-            dialog = LoopSetupDialog(self.loop_setup, self.loop_backend.currentData(), configs, self)
+            dialog = LoopSetupDialog(self.loop_setup, self.loop_backend.currentData(), configs, self,
+                                     preview=self.loop_preview)
         except (TypeError, ValueError) as error:
             QMessageBox.warning(self, "Check loop setup", str(error))
             return

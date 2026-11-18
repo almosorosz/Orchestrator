@@ -1623,6 +1623,51 @@ class MainWindow(QMainWindow):
     def _connected_loop_devices(self):
         return {key for key, widget in self.control_panel.device_widgets.items() if widget.is_connected()}
 
+    def _loop_setup_context(self, backend, setup, source):
+        panel = self.control_panel
+        configs, _ = panel.collect_current_configuration()
+        connected = self._connected_loop_devices()
+        doe = self._assigned_doe_campaign
+        if source is None:
+            source = "doe" if doe is not None or not panel.experiments else "manual"
+        messages = []
+        if doe is not None and panel.experiments:
+            messages.append("Choose the starting batch on Dashboard Start. This selector only changes the preview.")
+        if source == "doe":
+            campaign = doe
+            roles = {item.role: item.device_id for item in self._doe_assignments} if doe else {}
+            monitors = doe.monitor_device_ids if doe else ()
+            label = "Applied DoE assignments"
+            if doe is None:
+                messages.append("Generate a DoE and apply its device assignments in Settings.")
+            elif self._doe_devices_changed(configs):
+                messages.append("Device configuration changed. Apply the DoE assignments again before starting.")
+        else:
+            roles = setup["manual_assignments"]
+            monitors = tuple(key for key in configs if key in connected and is_monitor_only(configs[key]))
+            label = "Control Panel assignments"
+            campaign = None
+            if panel.experiments:
+                try:
+                    campaign = self._manual_loop_campaign(configs, monitors, simulation=setup["manual_simulation"],
+                                                          setup=setup)
+                except (ValueError, TypeError, KeyError, StopIteration) as error:
+                    messages.append(f"Control Panel profiles need attention. {error}")
+            else:
+                messages.append("No starting experiments are loaded in the Control Panel.")
+        bo_settings = None
+        if backend == "bo":
+            try:
+                bo_settings = self.bo_page.settings()
+            except (ValueError, TypeError) as error:
+                messages.append(f"BO settings need attention. {error}")
+        imed = self.imed_page.panel
+        experiment_folder, model_folder, _ = self.settings_page.get_environment_inputs()
+        return {"source": source, "label": label, "campaign": campaign, "roles": roles, "monitors": monitors,
+                "configs": configs, "connected": connected, "messages": messages, "case": imed.checkpoint_case(),
+                "bo": bo_settings, "size_term": self.settings_page.pbm_size_samples.currentText(),
+                "folders": (experiment_folder, model_folder), "workers": imed.cpu_workers()}
+
     def _recipe_compiler(self, mode, setup, configs, connected):
         from experiment.doe_campaign import ProfileAssignment
 
@@ -2343,14 +2388,13 @@ class MainWindow(QMainWindow):
             return
         return self._start_loop_campaign(campaign)
 
-    def _manual_loop_campaign(self, configs, monitors, *, simulation=None):
+    def _manual_loop_campaign(self, configs, monitors, *, simulation=None, setup=None):
         experiments = tuple(ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
                             for number, frame in enumerate(self.control_panel.experiments, 1))
-        settings = self.settings_page
         if simulation is not None:
             from imed_python.demo_campaign import CONTROL_TYPES, VERSION, compile_simulation
 
-            setup = validate_setup(settings.loop_setup)
+            setup = validate_setup(self.settings_page.loop_setup if setup is None else setup)
             controls, simulation = setup["manual_assignments"], setup["manual_simulation"]
             if not set(CONTROL_TYPES) <= controls.keys():
                 raise ValueError("Map all PBM simulation actuator roles to Control Panel devices.")
@@ -2456,7 +2500,7 @@ class MainWindow(QMainWindow):
 
         self.settings_page = SettingsPage(parent=self, loop_devices=lambda: {
             key: widget.config for key, widget in self.control_panel.device_widgets.items()
-        })
+        }, loop_preview=self._loop_setup_context)
         self.imed_page = IMEDPage(parent=self)
         self.imed_page.panel.recipe_launcher = self._execute_imed_recipe
         self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case,

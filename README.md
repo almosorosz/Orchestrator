@@ -122,9 +122,10 @@ target a scale in its own unit so that weights compare dimensionless losses.
 from the selected experiments. Add, delete, or reorder stages, then set durations
 and endpoints in seconds, °C, or g/s. Equal temperature endpoints define a hold.
 Antisolvent stages can turn the pump off, hold a positive rate, or ramp the rate.
-Select up to four decision controls per profile. Choices include individual
-stage settings and grouped controls such as start delay, final temperature,
-and total antisolvent dose.
+Select as many decision controls as your recipe needs. Add stages to expose more
+durations, temperatures, or feed rates. Grouped controls include start delay,
+final temperature, and total antisolvent dose. The selected runs still need to
+show variation for BO to search along a control.
 
 BO fits the selected physical controls to the recorded profiles and estimates
 the proposed recipe from those fits. Compare recorded and fitted traces before
@@ -535,6 +536,10 @@ Panel batch and map its device IDs to DoE roles on the **Devices** tab. Connect
 the devices and monitors, then choose writable Experiment and MODEL folders. Open
 **Automatic loop setup…** to set the number of **Follow-up experiments** and edit
 the **Recording**, **Process inputs**, **Devices** and **Support profiles** tabs.
+**Used values** shows the applied assignments, starting profiles, resolved process
+inputs, recording mappings and modeling settings for the selected starting batch.
+The **Source** column distinguishes inherited values from overrides. Return to
+**Used values** to see edits before saving.
 The **IMED design** tab is available when IMED is selected. **Save setup preset…**
 retains these choices for the next session. BO
 targets and stage templates come from the BO page. IMED uses the case, solver,
