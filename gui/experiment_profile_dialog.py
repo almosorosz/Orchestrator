@@ -254,6 +254,7 @@ class DOEPlotsDialog(QDialog):
             )
 
             canvas.setMinimumHeight(350)
+            canvas.setMinimumWidth(round(fig.get_figwidth() * fig.dpi))
 
             container_layout.addWidget(canvas)
 

@@ -546,6 +546,29 @@ parallel. Reuse the same pump line during charging, antisolvent addition, cleani
 and rinsing. An empty pump or valve cell is off. An empty temperature or stirring
 cell holds the preceding target.
 
+Temperature Start/End fields have **Equal to previous** checkboxes. Each linked
+value resolves from the preceding section's final target separately for each
+generated experiment (the first section uses the line's Initial target). For
+example, alternate the cooling End between 15 and 20 °C and check Equal to previous
+on the equilibration Hold: it stays at 15 or 20 °C in the matching experiment.
+Linked values do not add independent DoE dimensions. New temperature ramps link
+their Start by default; the Equilibration palette action links its temperature.
+
+An action's **Action lasts until** can span several shared stages, or continue to
+**End of experiment (longest profile)**. Define a constant stirrer once in the
+first stage and use that end option. Shared stages may contain any subset of
+device actions; overlapping actions on one device are rejected.
+
+Use **Edit device profile…**, also available from a device column header, for an
+independent sequence of Holds, Ramps or Mass additions. Give each device its own
+section count, durations and Fixed/DoE/Alternate controls. Saving an independent
+profile replaces that line's shared-stage actions. Generation first resolves
+every profile separately, takes the longest total duration, and synchronizes all
+devices onto the combined time points. Shorter profiles retain their final target
+until the common end. A Mass addition completes at its own section's end and
+extends at zero flow to preserve the requested mass. Add an explicit zero-flow or
+closed-valve section when you want those states at the end of a non-dose profile.
+
 Set each duration and target to **Fixed**, **DoE** with bounds, or **Alternate**
 between its bounds. Mass additions specify grams and derive the calibrated flow
 from the stage duration. Temperature actions select **Jacket** or **Internal vessel
@@ -560,6 +583,14 @@ assignments. Presets retain the recipe and exact generated profiles. CSV export,
 the native runner and recorded campaign viewer use the same compiled profiles.
 Keep Experiment and Equilibration stages together to define the modeling window.
 Native modeling follow-ups retain the timeline's charging and cleanup profiles.
+Independent profiles without shared stages use the full experiment as their
+modeling window. With shared stages, their purpose fields define that window.
+
+**View DoE Experiment Profiles** uses the original combined plot style for both
+component and timeline designs: matching colors, line styles, colored axes and
+legend, with actual units for each signal. In the **Control Panel / Control
+Center**, **View Experiment Profiles** opens the same viewer for every manually
+generated experiment. Previewing does not connect devices or execute experiments.
 
 ### Automatic BO and IMED
 

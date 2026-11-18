@@ -1,14 +1,15 @@
 """Drag-and-drop Experiment Definition with device columns and time rows."""
 from copy import deepcopy
 from uuid import uuid4
+import numpy as np
 
 from PySide6.QtCore import QByteArray, QMimeData, QPointF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QDrag, QBrush, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QInputDialog,
     QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QPushButton, QScrollArea, QSplitter, QTabWidget,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from experiment.doe_campaign import ROLES
@@ -34,10 +35,12 @@ def number(value):
 
 
 class ParameterTable(QTableWidget):
-    def __init__(self, entries, parent=None):
-        super().__init__(len(entries), 5, parent)
-        self.setHorizontalHeaderLabels(("Parameter", "Across experiments", "Value", "Minimum", "Maximum"))
+    def __init__(self, entries, parent=None, temperature=False):
+        super().__init__(len(entries), 6 if temperature else 5, parent)
+        self.setHorizontalHeaderLabels(("Parameter", "Across experiments", "Value", "Minimum", "Maximum")
+                                      + (("Equal to previous",) if temperature else ()))
         self.entries = entries
+        self.links = {}
         for row, (label, item) in enumerate(entries):
             title = QTableWidgetItem(label)
             title.setFlags(title.flags() & ~Qt.ItemFlag.ItemIsEditable)
@@ -47,8 +50,23 @@ class ParameterTable(QTableWidget):
             mode.setCurrentText(item["mode"])
             self.setCellWidget(row, 1, mode)
             for column, key in enumerate(("value", "min", "max"), 2):
-                self.setCellWidget(row, column, number(item[key]))
+                field = number(item[key])
+                field.setMinimumWidth(65)
+                field.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                self.setCellWidget(row, column, field)
+            if temperature and not label.startswith("Duration"):
+                link = QCheckBox("Equal to previous")
+                link.setToolTip("Use this device's preceding section's final temperature in each experiment; the first section uses Initial target.")
+                self.setCellWidget(row, 5, link)
+                self.links[row] = link
+                def enable(checked, r=row):
+                    for c in range(1, 5):
+                        self.cellWidget(r, c).setEnabled(not checked)
+                link.toggled.connect(enable)
+                link.setChecked(item.get("equal_previous", False))
         self.resizeColumnsToContents()
+        for column, width in enumerate((112, 145, 105, 105, 105, 165)[:self.columnCount()]):
+            self.setColumnWidth(column, width)
         self.horizontalHeader().setStretchLastSection(True)
 
     def save(self):
@@ -56,6 +74,8 @@ class ParameterTable(QTableWidget):
             item["mode"] = self.cellWidget(row, 1).currentText()
             for column, key in enumerate(("value", "min", "max"), 2):
                 item[key] = self.cellWidget(row, column).value()
+            if row in self.links:
+                item["equal_previous"] = self.links[row].isChecked()
 
 
 class ActionPalette(QListWidget):
@@ -85,7 +105,13 @@ class ActionBlock(QGraphicsRectItem):
         action = stage["actions"][lane["id"]]
         value = action["end"]
         unit = "g" if action["kind"] == "Dose" else ROLES[lane["role"]].unit
-        detail = f"{value['value']:g} {unit}" if value["mode"] == "Fixed" else f"{value['mode']} {value['min']:g}–{value['max']:g} {unit}"
+        detail = ("Equal to previous" if value.get("equal_previous") else
+                  f"{value['value']:g} {unit}" if value["mode"] == "Fixed" else f"{value['mode']} {value['min']:g}–{value['max']:g} {unit}")
+        stop = (len(editor.recipe["stages"]) - 1 if action.get("until_end") else
+                next((i for i, item in enumerate(editor.recipe["stages"]) if item["id"] == action.get("until_stage")),
+                     editor.recipe["stages"].index(stage)))
+        span = stop - editor.recipe["stages"].index(stage) + 1
+        self.setRect(0, 0, COLUMN_WIDTH - 12, max(ROW_HEIGHT - 12, ROW_HEIGHT * span - 12))
         mode = "\n" + action["control_mode"] if lane["role"] == "T" else ""
         text = editor.scene.addText(f"{action.get('name', action['kind'])}\n{detail}{mode}")
         text.setDefaultTextColor(QColor("#f8fafc"))
@@ -160,13 +186,16 @@ class RecipeEditor(QWidget):
         side.addWidget(self.stage_list, 1)
         for label, callback in (("Add stage", self.add_stage), ("Edit stage", self.edit_stage),
                                 ("Delete stage", self.delete_stage), ("Add device line", self.add_line),
+                                ("Edit device profile…", self.edit_device_profile),
                                 ("Remove selected action", self.delete_action)):
             button = QPushButton(label)
             button.setMaximumHeight(32)
+            button.setStyleSheet("QPushButton { padding: 4px 10px; }")
             button.clicked.connect(callback)
             side.addWidget(button)
         self.notice = QLabel()
         self.notice.setWordWrap(True)
+        self.notice.setText("Use shared stages, or Edit device profile for separate sections per device. Shorter profiles hold their final target; mass additions stop when finished.")
         side.addWidget(self.notice)
         left = QWidget()
         left.setLayout(side)
@@ -189,12 +218,13 @@ class RecipeEditor(QWidget):
         self.scene.clear()
         width = LABEL_WIDTH + COLUMN_WIDTH * len(self.recipe["lanes"])
         for column, lane in enumerate(self.recipe["lanes"]):
-            text = self.scene.addText(f"{lane['name']}\n{lane.get('device_id') or 'Assign device'}")
+            text = self.scene.addText(f"{lane['name']}\n{lane.get('device_id') or 'Assign device'}" + (" · own profile" if lane.get("profile") else ""))
             text.setDefaultTextColor(QColor("#e2e8f0"))
             text.setTextWidth(COLUMN_WIDTH - 10)
             text.setPos(LABEL_WIDTH + column * COLUMN_WIDTH, 0)
             text.setToolTip("Double-click the header to edit the line and its device assignment.")
         time = 0.
+        blocks = []
         for row, stage in enumerate(self.recipe["stages"]):
             y = HEADER_HEIGHT + row * ROW_HEIGHT
             text = self.scene.addText(f"{time:g} s\n{stage['name']}\n{stage['purpose']}")
@@ -205,11 +235,75 @@ class RecipeEditor(QWidget):
                 self.scene.addRect(LABEL_WIDTH + column * COLUMN_WIDTH, y, COLUMN_WIDTH, ROW_HEIGHT,
                                    QPen(QColor("#24364d")))
                 if lane["id"] in stage["actions"]:
-                    block = ActionBlock(self, stage, lane)
-                    self.scene.addItem(block)
-                    block.setPos(LABEL_WIDTH + column * COLUMN_WIDTH + 6, y + 6)
+                    blocks.append((stage, lane, column, y))
             time += stage["duration"]["value"]
-        self.scene.setSceneRect(0, 0, max(width, 700), max(HEADER_HEIGHT + ROW_HEIGHT * len(self.recipe["stages"]), 400))
+        rendered_blocks = []
+        for stage, lane, column, y in blocks:
+            block = ActionBlock(self, stage, lane)
+            self.scene.addItem(block)
+            block.setPos(LABEL_WIDTH + column * COLUMN_WIDTH + 6, y + 6)
+            rendered_blocks.append((block, stage["actions"][lane["id"]], y))
+        # Independent profiles show all of their own sections in their column.
+        # The canvas uses the shared-stage nominal time scale; generation resolves
+        # sampled durations separately for each experiment.
+        total = max([time] + [sum(s["duration"]["value"] for s in lane.get("profile", [])) for lane in self.recipe["lanes"]])
+        durations = [stage["duration"]["value"] for stage in self.recipe["stages"]]
+        anchors = np.r_[0., np.cumsum(durations)]
+        scale = (ROW_HEIGHT * len(durations) / max(time, 1.) if durations else
+                 max(400., ROW_HEIGHT * max([1] + [len(lane.get('profile', [])) for lane in self.recipe["lanes"]])) / max(total, 1.))
+        def position_at(elapsed):
+            if durations and elapsed <= time:
+                return HEADER_HEIGHT + float(np.interp(elapsed, anchors, np.arange(len(anchors)) * ROW_HEIGHT))
+            return HEADER_HEIGHT + (ROW_HEIGHT * len(durations) + (elapsed - time) * scale if durations else elapsed * scale)
+        bottom = HEADER_HEIGHT + ROW_HEIGHT * len(self.recipe["stages"])
+        for block, action, y in rendered_blocks:
+            if action.get("until_end"):
+                block.setRect(0, 0, COLUMN_WIDTH - 12, max(ROW_HEIGHT - 12, position_at(total) - y - 12))
+        for column, lane in enumerate(self.recipe["lanes"]):
+            elapsed = 0.
+            for section_index, section in enumerate(lane.get("profile", [])):
+                y = position_at(elapsed)
+                final_hold = section["kind"] == "Hold" and section_index == len(lane["profile"]) - 1
+                until = total if final_hold else elapsed + section["duration"]["value"]
+                height = max(26., position_at(until) - y)
+                block = self.scene.addRect(LABEL_WIDTH + column * COLUMN_WIDTH + 6, y + 2, COLUMN_WIDTH - 12, height - 4,
+                                           QPen(QColor("#64748b")), QBrush(QColor(COLORS.get(lane["role"], "#334155"))))
+                value = section["end"]
+                unit = "g" if section["kind"] == "Dose" else ROLES[lane["role"]].unit
+                target = ("Equal to previous" if value.get("equal_previous") else f"{value['value']:g}" if value["mode"] == "Fixed"
+                          else f"{value['mode']} {value['min']:g}–{value['max']:g}")
+                if not value.get("equal_previous"):
+                    target += f" {unit}"
+                text = self.scene.addText(f"{section['name']} · {section['duration']['value']:g} s\n{section['kind']} · {target}"
+                                          + ("\nHolds to experiment end" if final_hold and until > elapsed + section["duration"]["value"] else ""))
+                text.setDefaultTextColor(QColor("#f8fafc"))
+                text.setTextWidth(COLUMN_WIDTH - 20)
+                text.setParentItem(block)
+                text.setPos(LABEL_WIDTH + column * COLUMN_WIDTH + 9, y + 3)
+                elapsed += section["duration"]["value"]
+                bottom = max(bottom, y + height)
+            if lane.get("profile") and elapsed < total and lane["profile"][-1]["kind"] != "Hold":
+                y = position_at(elapsed)
+                self.scene.addRect(LABEL_WIDTH + column * COLUMN_WIDTH + 6, y + 2, COLUMN_WIDTH - 12,
+                                   max(2., position_at(total) - y - 4), QPen(QColor("#475569")), QBrush(QColor("#132033")))
+                text = self.scene.addText("Off after mass addition" if lane["profile"][-1]["kind"] == "Dose" else
+                                          "Hold final target\nto experiment end")
+                text.setDefaultTextColor(QColor("#94a3b8"))
+                text.setTextWidth(COLUMN_WIDTH - 20)
+                text.setPos(LABEL_WIDTH + column * COLUMN_WIDTH + 9, y + 4)
+            bottom = max(bottom, position_at(total))
+        if not durations:
+            ticks = sorted({0., total} | {sum(s["duration"]["value"] for s in lane.get("profile", [])[:i + 1])
+                                         for lane in self.recipe["lanes"] for i in range(len(lane.get("profile", [])))})
+            last_y = -100.
+            for tick in ticks:
+                y = position_at(tick)
+                if y - last_y >= 22. or tick == total:
+                    label = self.scene.addText(f"{tick:g} s")
+                    label.setDefaultTextColor(QColor("#94a3b8"))
+                    label.setPos(4, y)
+                    last_y = y
+        self.scene.setSceneRect(0, 0, max(width, 700), max(bottom + 40, 400))
         self.changed.emit()
 
     def reorder(self):
@@ -299,6 +393,9 @@ class RecipeEditor(QWidget):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
         if index is not None:
+            profile_button = QPushButton("Edit device profile…")
+            profile_button.clicked.connect(lambda: (dialog.reject(), self.edit_device_profile(index)))
+            form.addRow(profile_button)
             remove = QPushButton("Remove device line")
             form.addRow(remove)
             def delete():
@@ -313,12 +410,37 @@ class RecipeEditor(QWidget):
             key = old.get("id") or role.currentData()
             if not old and key in {lane["id"] for lane in self.recipe["lanes"]}:
                 key += "_" + identifier()
-            line = {"id": key, "name": name.text().strip() or ROLES[role.currentData()].label,
+            line = {**deepcopy(old), "id": key, "name": name.text().strip() or ROLES[role.currentData()].label,
                     "role": role.currentData(), "device_id": device.currentData(), "initial": initial.value()}
             if index is None:
                 self.recipe["lanes"].append(line)
             else:
                 self.recipe["lanes"][index] = line
+            self.refresh()
+
+    def edit_device_profile(self, index=None):
+        # clicked(bool) is not a lane index.
+        if isinstance(index, bool):
+            index = None
+        if index is None:
+            if not self.recipe["lanes"]:
+                self.notice.setText("Add a device line first.")
+                return
+            names = [f"{i + 1}. {lane['name']}" for i, lane in enumerate(self.recipe["lanes"])]
+            chosen, ok = QInputDialog.getItem(self, "Device profile", "Device line", names, 0, False)
+            if not ok:
+                return
+            index = names.index(chosen)
+        from gui.device_profile_dialog import DeviceProfileDialog
+        lane = self.recipe["lanes"][index]
+        dialog = DeviceProfileDialog(lane, self.recipe["stages"], self)
+        if dialog.exec():
+            if dialog.enabled.isChecked():
+                lane["profile"] = dialog.sections
+                for stage in self.recipe["stages"]:
+                    stage["actions"].pop(lane["id"], None)
+            else:
+                lane.pop("profile", None)
             self.refresh()
 
     def cell(self, point):
@@ -330,6 +452,9 @@ class RecipeEditor(QWidget):
             self.notice.setText("Drop the action into an existing stage and device line.")
             return
         stage, lane = self.recipe["stages"][row], self.recipe["lanes"][column]
+        if lane.get("profile"):
+            self.notice.setText("This line uses its own profile. Edit device profile to change its sections, or disable it to use shared stages.")
+            return
         if lane["id"] in stage["actions"]:
             self.notice.setText("This device already has an action in that stage. Double-click it to edit.")
             return
@@ -342,6 +467,9 @@ class RecipeEditor(QWidget):
                   "name": kind, "start": parameter(lane["initial"]),
                   "end": parameter(1. if kind == "Open valve" else 0. if kind == "Close valve" else lane["initial"]),
                   "control_mode": "Process"}
+        if lane["role"] == "T":
+            action["start"]["equal_previous"] = kind == "Ramp"
+            action["end"]["equal_previous"] = kind == "Equilibration"
         stage["actions"][lane["id"]] = action
         self.edit_action(stage["id"], lane["id"], new=True)
 
@@ -351,7 +479,7 @@ class RecipeEditor(QWidget):
         action = deepcopy(stage["actions"][lane_id])
         dialog = QDialog(self)
         dialog.setWindowTitle(f"{stage['name']} · {lane['name']}")
-        dialog.resize(760, 270)
+        dialog.resize(1000, 340)
         layout = QVBoxLayout(dialog)
         form = QFormLayout()
         name = QLineEdit(action.get("name", action["kind"]))
@@ -363,11 +491,18 @@ class RecipeEditor(QWidget):
         if lane["role"] == "T":
             form.addRow("Temperature control", mode)
         layout.addLayout(form)
+        span = QComboBox()
+        current = self.recipe["stages"].index(stage)
+        for following in self.recipe["stages"][current:]:
+            span.addItem(f"End of {following['name']}", following["id"])
+        span.addItem("End of experiment (longest profile)", "__end__")
+        span.setCurrentIndex(max(0, span.findData("__end__" if action.get("until_end") else action.get("until_stage", stage_id))))
+        form.addRow("Action lasts until", span)
         unit = "g" if action["kind"] == "Dose" else ROLES[lane["role"]].unit
         entries = [(f"End ({unit})", action["end"])]
         if action["kind"] == "Ramp":
             entries.insert(0, (f"Start ({unit})", action["start"]))
-        table = ParameterTable(entries)
+        table = ParameterTable(entries, temperature=lane["role"] == "T")
         layout.addWidget(table)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -376,6 +511,8 @@ class RecipeEditor(QWidget):
         if dialog.exec():
             table.save()
             action.update(name=name.text().strip(), control_mode=mode.currentData())
+            action["until_end"] = span.currentData() == "__end__"
+            action["until_stage"] = "" if action["until_end"] else span.currentData()
             stage["actions"][lane_id] = action
         elif new:
             stage["actions"].pop(lane_id)

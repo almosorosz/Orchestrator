@@ -1626,6 +1626,9 @@ class ControlPanel(QWidget):
         self.limits_button = QPushButton("Device Limits")
         
         self.generate_experiment_button = QPushButton("Generate Experiment")
+        self.view_experiment_profiles_button = QPushButton("View Experiment Profiles")
+        self.view_experiment_profiles_button.setToolTip("Preview all generated manual experiments in the DoE viewer")
+        self.view_experiment_profiles_button.clicked.connect(self.show_experiment_profiles)
         self.simulation_speed = QDoubleSpinBox()
         self.simulation_speed.setRange(0.1, 100)
         self.simulation_speed.setValue(1.0)
@@ -1680,6 +1683,7 @@ class ControlPanel(QWidget):
         bottom_row.addSpacing(25)
         
         bottom_row.addWidget(self.generate_experiment_button)
+        bottom_row.addWidget(self.view_experiment_profiles_button)
         bottom_row.addWidget(self.start_experiment_button)
         bottom_row.addWidget(QLabel("Simulation speed"))
         bottom_row.addWidget(self.simulation_speed)
@@ -2329,6 +2333,7 @@ class ControlPanel(QWidget):
         )
     
         has_experiments = n > 0
+        self.view_experiment_profiles_button.setEnabled(has_experiments)
     
         self.start_experiment_button.setEnabled(
             has_experiments
@@ -2714,6 +2719,23 @@ class ControlPanel(QWidget):
                 "Experiment Startup Error",
                 str(error),
             )
+
+    def show_experiment_profiles(self):
+        from experiment.profile_plots import manual_profile_figures
+        from gui.experiment_profile_dialog import DOEPlotsDialog
+        if not self.experiments:
+            QMessageBox.information(self, "No experiments", "Generate an experiment before viewing its profiles.")
+            return None
+        try:
+            configs, _ = self.collect_current_configuration()
+            figures = manual_profile_figures(self.experiments, configs)
+        except (ValueError, KeyError) as error:
+            QMessageBox.warning(self, "Profile preview", str(error))
+            return None
+        self.experiment_profiles_dialog = DOEPlotsDialog(figures, self)
+        self.experiment_profiles_dialog.setWindowTitle("Control Center Experiment Profiles")
+        self.experiment_profiles_dialog.show()
+        return self.experiment_profiles_dialog
 
     def generate_experiment(self):
     
