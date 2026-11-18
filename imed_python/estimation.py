@@ -212,9 +212,10 @@ class FitResult:
     simulation_seconds: float = 0.
     wall_seconds: float = 0.
     generation_history: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
+    stopped_stage: str = ""
 
 
-def _global_trial(candidate, *, objective, baseline, free, cancelled):
+def _global_trial(candidate, *, objective, baseline, free, cancelled, retain_residuals=False):
     if cancelled():
         raise InterruptedError("Parameter estimation cancelled")
     objective.cancelled = cancelled
@@ -223,8 +224,8 @@ def _global_trial(candidate, *, objective, baseline, free, cancelled):
     try:
         errors = objective.residuals(parameters, global_stage=True)
     except TRIAL_ERRORS as error:
-        return objective.residual_count * REJECTED_RESIDUAL**2, str(error), getattr(objective, "simulation_times", [])
-    return float(errors @ errors), None, getattr(objective, "simulation_times", [])
+        return objective.residual_count * REJECTED_RESIDUAL**2, str(error), getattr(objective, "simulation_times", []), None
+    return float(errors @ errors), None, getattr(objective, "simulation_times", []), errors if retain_residuals else None
 
 
 def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iterations"],
@@ -233,7 +234,7 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
               mutation_min=PYFIT_DEFAULTS["mutation_min"], mutation_max=PYFIT_DEFAULTS["mutation_max"],
               recombination=PYFIT_DEFAULTS["recombination"],
               local_evaluations=PYFIT_DEFAULTS["local_evaluations"], cancelled=None, progress=None,
-              workers=1, generation_progress=None):
+              workers=1, generation_progress=None, retain_partial=False):
     """Fit the model, optionally evaluating global trials in separate CPU processes."""
     if isinstance(objective, FitObjective) and objective.settings.get("Numerics") == "jax":
         if workers != 1:
@@ -264,6 +265,12 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
     simulation_seconds = 0.
     fit_started = monotonic()
     generation_history = []
+    best_trials = {}
+
+    def retain(candidate, score, errors, global_stage):
+        previous = best_trials.get(global_stage)
+        if errors is not None and np.isfinite(score) and (previous is None or score < previous[0]):
+            best_trials[global_stage] = score, candidate.copy(), errors.copy()
 
     def begin_phase(name):
         nonlocal phase, evaluations, rejected, generation, best, current, next_update, last_report
@@ -338,7 +345,10 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
             record_trial(None, str(error))
         else:
             if penalize:
-                record_trial(float(errors @ errors) if progress is not None else None, None)
+                value = float(errors @ errors) if progress is not None or retain_partial else None
+                if retain_partial:
+                    retain(candidate, value, errors, global_stage)
+                record_trial(value, None)
             else:
                 record_timing(getattr(objective, "simulation_times", []))
         return errors
@@ -347,59 +357,83 @@ def fit_model(model, objective, *, global_iterations=PYFIT_DEFAULTS["global_iter
         errors = residual(candidate, global_stage=True)
         return float(errors @ errors)
 
-    start = values[free]
-    if free.any() and global_iterations:
-        begin_phase("Differential evolution" if workers == 1 else
-                    f"Differential evolution ({workers} CPU workers)")
-        bounds = list(zip(lower[free], upper[free]))
-        # SciPy's popsize is a multiplier of the number of free parameters.
-        # Supplying the initial sample preserves IMED's absolute population size.
-        unit_population = qmc.LatinHypercube(d=len(bounds), seed=0).random(n=max(5, int(population_size)))
-        population = qmc.scale(unit_population, lower[free], upper[free])
-        options = dict(maxiter=int(global_iterations), seed=0, x0=start, init=population,
-                       tol=float(global_tolerance), polish=False,
-                       mutation=(float(mutation_min), float(mutation_max)),
-                       recombination=float(recombination),
-                       callback=report_generation)
-        if workers == 1:
-            global_result = differential_evolution(score, bounds, **options)
-        else:
-            worker_objective = copy(objective)
-            worker_objective.cancelled = None
-            baseline = parameters.copy()
-            baseline[active] = values
-            free_parameters = np.flatnonzero(active)[free]
-            trial = partial(_global_trial, objective=worker_objective, baseline=baseline,
-                            free=free_parameters)
+    def run_search():
+        start = values[free]
+        if free.any() and global_iterations:
+            begin_phase("Differential evolution" if workers == 1 else
+                        f"Differential evolution ({workers} CPU workers)")
+            bounds = list(zip(lower[free], upper[free]))
+            # Supplying the initial sample preserves IMED's absolute population size.
+            unit_population = qmc.LatinHypercube(d=len(bounds), seed=0).random(n=max(5, int(population_size)))
+            population = qmc.scale(unit_population, lower[free], upper[free])
+            options = dict(maxiter=int(global_iterations), seed=0, x0=start, init=population,
+                           tol=float(global_tolerance), polish=False,
+                           mutation=(float(mutation_min), float(mutation_max)),
+                           recombination=float(recombination), callback=report_generation)
+            if workers == 1:
+                global_result = differential_evolution(score, bounds, **options)
+            else:
+                worker_objective = copy(objective)
+                worker_objective.cancelled = None
+                baseline = parameters.copy()
+                baseline[active] = values
+                trial = partial(_global_trial, objective=worker_objective, baseline=baseline,
+                                free=np.flatnonzero(active)[free], retain_residuals=retain_partial)
 
-            def collect(_candidate, result):
-                return record_trial(*result)
+                def collect(candidate, result):
+                    value, error, times, residuals = result
+                    if retain_partial:
+                        retain(candidate, value, residuals, True)
+                    return record_trial(value, error, times)
 
-            objective_stop = getattr(objective, "cancelled", None)
+                objective_stop = getattr(objective, "cancelled", None)
 
-            def stop_parallel():
-                return ((cancelled is not None and cancelled())
-                        or (objective_stop is not None and objective_stop is not cancelled and objective_stop()))
+                def stop_parallel():
+                    return ((cancelled is not None and cancelled())
+                            or (objective_stop is not None and objective_stop is not cancelled and objective_stop()))
 
-            with candidate_map(min(workers, len(population)), trial, collect, stop_parallel) as map_trials:
-                global_result = differential_evolution(score, bounds, workers=map_trials,
-                                                       updating="deferred", **options)
-        start = global_result.x
-        report_progress(force=True)
-    jacobian = np.zeros((objective.residual_count, int(active.sum())))
-    converged = True
-    if free.any():
-        begin_phase("Local least-squares refinement")
-        result = least_squares(residual, start, bounds=(lower[free], upper[free]),
-                               max_nfev=int(local_evaluations), ftol=1e-5)
-        start = result.x
-        jacobian[:, free] = result.jac
-        converged = result.success
-        report_progress(force=True)
-    if progress is not None:
-        progress("Checking the final fit")
-    errors = residual(start, penalize=False)
-    global_errors = residual(start, global_stage=True, penalize=False)
+                record = (lambda _, result: result[0]) if retain_partial else collect
+                with candidate_map(min(workers, len(population)), trial, record, stop_parallel,
+                                   retain=collect if retain_partial else None) as map_trials:
+                    global_result = differential_evolution(score, bounds, workers=map_trials,
+                                                           updating="deferred", **options)
+            start = global_result.x
+            report_progress(force=True)
+        jacobian = np.zeros((objective.residual_count, int(active.sum())))
+        converged = True
+        if free.any():
+            begin_phase("Local least-squares refinement")
+            result = least_squares(residual, start, bounds=(lower[free], upper[free]),
+                                   max_nfev=int(local_evaluations), ftol=1e-5)
+            start = result.x
+            jacobian[:, free] = result.jac
+            converged = result.success
+            report_progress(force=True)
+        if progress is not None:
+            progress("Checking the final fit")
+        errors = residual(start, penalize=False)
+        global_errors = residual(start, global_stage=True, penalize=False)
+        return errors, global_errors, jacobian, converged
+
+    try:
+        errors, global_errors, jacobian, converged = run_search()
+    except InterruptedError:
+        if not retain_partial or not best_trials:
+            raise
+        global_stage = False not in best_trials
+        objective_value, point, errors = best_trials[global_stage]
+        values[free] = point
+        aic = np.nan
+        nvars, count = len(values), objective.sample_count
+        if global_stage and objective_value > 0 and count > nvars + 2:
+            aic = np.log(objective_value) + (count + nvars) / (count - nvars - 2)
+        return FitResult(values.copy(), errors, np.full((len(errors), len(values)), np.nan),
+                         np.full((len(values), len(values)), np.nan), objective_value if global_stage else np.nan,
+                         aic, False, uncertainty_error="Stopped before final confidence intervals were calculated.",
+                         simulation_count=total_simulations, simulation_seconds=simulation_seconds,
+                         wall_seconds=monotonic() - fit_started,
+                         generation_history=np.asarray(generation_history, dtype=float).reshape(-1, 3),
+                         stopped_stage="Differential evolution" if global_stage else "Local least squares")
     ssr = float(global_errors @ global_errors)
     degrees = len(errors) - int(free.sum())
     covariance = np.full((len(values), len(values)), np.nan)

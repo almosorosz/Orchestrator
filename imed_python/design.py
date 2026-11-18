@@ -202,7 +202,7 @@ def recipe_space(conditions):
 
 
 def optimize_recipe(experiment, process, conditions, score, *, iterations=5, population=12,
-                    cancelled=None, workers=1):
+                    cancelled=None, workers=1, retain_partial=False):
     """Optimize a recipe. Parallel searches require a picklable score callable."""
     from scipy.optimize import differential_evolution
 
@@ -223,25 +223,30 @@ def optimize_recipe(experiment, process, conditions, score, *, iterations=5, pop
 
     middle = np.mean(bounds, axis=1)
     free = sum(high > low for low, high in bounds)
-    if not free:
-        evaluate(middle)
-    else:
-        popsize = max(5, int(np.ceil(population / free)))
-        options = dict(x0=middle, maxiter=iterations, popsize=popsize, polish=False, seed=0)
-        if workers == 1:
-            differential_evolution(evaluate, bounds, **options)
+    try:
+        if not free:
+            evaluate(middle)
         else:
-            trial = partial(_design_trial, recipe=recipe, score=score)
+            popsize = max(5, int(np.ceil(population / free)))
+            options = dict(x0=middle, maxiter=iterations, popsize=popsize, polish=False, seed=0)
+            if workers == 1:
+                differential_evolution(evaluate, bounds, **options)
+            else:
+                trial = partial(_design_trial, recipe=recipe, score=score)
 
-            def collect(candidate, cost):
-                nonlocal best
-                if np.isfinite(cost) and (best is None or -cost > best[0]):
-                    best = -cost, *recipe(candidate)
-                return cost
+                def collect(candidate, cost):
+                    nonlocal best
+                    if np.isfinite(cost) and (best is None or -cost > best[0]):
+                        best = -cost, *recipe(candidate)
+                    return cost
 
-            with candidate_map(min(workers, popsize * free), trial, collect, cancelled) as map_trials:
-                differential_evolution(evaluate, bounds, workers=map_trials,
-                                       updating="deferred", **options)
+                with candidate_map(min(workers, popsize * free), trial, lambda _, cost: cost,
+                                   cancelled, retain=collect) as map_trials:
+                    differential_evolution(evaluate, bounds, workers=map_trials,
+                                           updating="deferred", **options)
+    except InterruptedError:
+        if not retain_partial or best is None:
+            raise
     if best is None:
         raise ValueError("No candidate produced a finite objective. Check the model, data, and rate bounds.")
     return best

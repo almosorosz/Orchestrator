@@ -242,23 +242,29 @@ class EstimationJob(QThread):
                                      settings, self.weights, self.terms, cancelled=cancelled)
             results, errors = {}, {}
             for index in self.models:
+                if cancelled():
+                    break
                 self.message.emit(f"Fitting model {index + 1}…")
                 try:
                     results[index] = fit_model(case["ModelParameter"][index], objective,
                                                cancelled=cancelled, progress=self.message.emit,
                                                generation_progress=partial(self.generation.emit, index),
+                                               retain_partial=True,
                                                **self.limits)
+                except InterruptedError:
+                    break
                 except (ValueError, RuntimeError, TimeoutError, FloatingPointError) as error:
                     errors[index] = str(error)
                     self.message.emit(f"Model {index + 1} failed: {error}")
                 else:
-                    self.message.emit(f"Model {index + 1} finished · WMSE {results[index].ssr:.5g}")
                     fit = results[index]
+                    if fit.stopped_stage:
+                        self.message.emit(f"Model {index + 1} · retained the best evaluated parameters from {fit.stopped_stage}.")
+                        break
+                    self.message.emit(f"Model {index + 1} finished · WMSE {fit.ssr:.5g}")
                     self.message.emit(
                         f"Model {index + 1} · 95% parameter CIs ready" if fit.intervals is not None else
                         f"Model {index + 1} · CIs unavailable · {fit.uncertainty_error}")
-            if cancelled():
-                raise InterruptedError("Parameter estimation stopped.")
         except InterruptedError:
             return
         except Exception as error:
@@ -633,8 +639,8 @@ class ParameterEstimation(QDialog):
             control.setEnabled(True)
         self.size_samples.setEnabled(self.terms.currentText() != "CSD")
         if stopped:
-            self.clear_results()
-            self.log_progress("Parameter estimation stopped.")
+            self.log_progress(f"Stopped · retained results for {len(self.results)} model(s)." if self.results
+                              else "Stopped before a usable parameter evaluation finished.")
         self.save_button.setEnabled(bool(self.results))
         self.details_button.setEnabled(bool(self.results))
 
@@ -656,10 +662,13 @@ class ParameterEstimation(QDialog):
         rows = []
         for index, fit in results.items():
             diagnosis = self.screening[index]
-            rows.append((index + 1, len(fit.parameters), fit.ssr, fit.aic, diagnosis["rank"] or "—",
+            status = f"Stopped · {fit.stopped_stage}" if fit.stopped_stage else (
+                "Converged" if fit.converged else "Evaluation limit reached")
+            rows.append((index + 1, len(fit.parameters), fit.ssr if np.isfinite(fit.ssr) else "—",
+                         fit.aic if np.isfinite(fit.aic) else "—", diagnosis["rank"] or "—",
                          "Pass" if diagnosis["f_pass"] else "Fail", "Pass" if diagnosis["t_pass"] else "Fail",
                          "Excluded" if diagnosis["reasons"] else "Retained",
-                         "Converged" if fit.converged else "Evaluation limit reached",
+                         status,
                          "Ready" if fit.intervals is not None else fit.uncertainty_error))
         rows.extend((index + 1, *("—",) * 7, message, "—") for index, message in errors.items())
         rows.sort()
@@ -744,7 +753,8 @@ class ParameterEstimation(QDialog):
             note.setWordWrap(True)
             layout.addWidget(note)
         if not fit.converged:
-            note = QLabel("The fit reached its evaluation limit. Treat its local intervals as provisional.")
+            note = QLabel(f"Best evaluated parameters at Stop · {fit.stopped_stage}." if fit.stopped_stage else
+                          "The fit reached its evaluation limit. Treat its local intervals as provisional.")
             note.setWordWrap(True)
             layout.addWidget(note)
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -758,7 +768,7 @@ class ParameterEstimation(QDialog):
             model = {key: value for key, value in self.case["ModelParameter"][index].items()
                      if key in ("Name", "paraset")}
             model.update(para=fit.parameters.reshape(1, -1), covmat=fit.covariance,
-                         resnorm=float(fit.residuals @ fit.residuals),
+                         resnorm=float(fit.residuals @ fit.residuals) if fit.stopped_stage != "Differential evolution" else np.nan,
                          resid=fit.residuals, jacobian=fit.jacobian, nvars=len(fit.parameters),
                          SSR=fit.ssr, AICVector=fit.aic)
             model.update(matlab_screening_fields(self.screening[index]))

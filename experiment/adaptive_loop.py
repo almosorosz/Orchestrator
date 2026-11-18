@@ -630,7 +630,7 @@ class AdaptiveLoop:
             publish("imed_inputs", {"case": deepcopy(self.case), "folder": manifest["campaign_folder"]})
         progress(f"Saved {self.mode.upper()} inputs and recording CSVs to {target}")
         if self.mode == "imed":
-            survivors, scores, pe_stage = self._fit_imed(cancelled, progress, publish, target)
+            survivors, scores, pe_stage = self._fit_imed(cancelled, report, publish, target)
         if collect_only:
             if self.mode == "imed":
                 progress("Follow-up limit reached. The final IMED fit includes every completed experiment.")
@@ -742,13 +742,18 @@ class AdaptiveLoop:
         options = {key: optimizer.get(key, default) for key, default in PYFIT_DEFAULTS.items()}
         fits, models = {}, list(self.case["ModelParameter"])
         for position, index in enumerate(self.active_models, 1):
+            if cancelled():
+                break
             model = models[index]
             name = display_name(model, f"Model {index + 1}")
             report(f"IMED parameter estimation · {name} · {position} of {len(self.active_models)} active candidates")
             fit = fit_model(model, objective, workers=self.workers, cancelled=cancelled, progress=report,
+                            retain_partial=True,
                             generation_progress=lambda generation, mean, best, i=index:
                             publish("imed_generation", (i, generation, mean, best)), **options)
             fits[index] = fit
+        if not fits:
+            raise InterruptedError("Stopped before a usable parameter evaluation finished.")
         assessment = screen_models(fits, sample_count=objective.sample_count, delta_aic=self.setup["imed"]["delta_aic"])
         survivors = tuple(index for index, result in assessment.items() if not result["reasons"])
         for index, fit in fits.items():
@@ -778,6 +783,8 @@ class AdaptiveLoop:
             aic = f"ΔAIC {difference:.3g}" if difference is not None else "ΔAIC unavailable"
             report(f"IMED model {index + 1} · {aic} · F {result['f_value']:.3g}/{result['f_limit']:.3g} · {decision}")
         scores = {index: result["total_aic"] for index, result in assessment.items() if result["total_aic"] is not None}
+        if cancelled():
+            raise InterruptedError(f"Stopped. Current PE results saved to {destination}.")
         return survivors, scores, stage
 
     def _recommend_imed(self, experiments, processes, survivors, scores, pe_stage, cancelled, report, publish, target):

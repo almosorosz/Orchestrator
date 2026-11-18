@@ -21,7 +21,7 @@ def _run_trial(candidate):
 
 
 @contextmanager
-def candidate_map(workers, evaluate, collect, cancelled, *, completed=None):
+def candidate_map(workers, evaluate, collect, cancelled, *, completed=None, retain=None):
     """Provide SciPy's map interface and keep progress reporting in the parent."""
     context = get_context("spawn")
     stop = context.Event()
@@ -36,14 +36,24 @@ def candidate_map(workers, evaluate, collect, cancelled, *, completed=None):
         # The SciPy objective closes over parent state. Workers use their own evaluator.
         check_stop()
         pending = [(candidate, executor.submit(_run_trial, candidate)) for candidate in candidates]
-        if completed is not None:
-            # Notify on completion and collect in input order so draws and outputs stay aligned.
-            unfinished = {trial for _, trial in pending}
+        if completed is not None or retain is not None:
+            # Retain finished trials before propagating a stop. SciPy still receives scores in input order.
+            candidates_by_future = {future: candidate for candidate, future in pending}
+            unfinished = set(candidates_by_future)
             while unfinished:
-                check_stop()
-                finished, unfinished = wait(unfinished, timeout=0.1, return_when=FIRST_COMPLETED)
+                stopping = cancelled is not None and cancelled()
+                if stopping:
+                    finished = {future for future in unfinished if future.done()}
+                else:
+                    finished, unfinished = wait(unfinished, timeout=0.1, return_when=FIRST_COMPLETED)
                 for trial in finished:
-                    completed(trial.result())
+                    result = trial.result()
+                    if retain is not None:
+                        retain(candidates_by_future[trial], result)
+                    if completed is not None:
+                        completed(result)
+                if stopping:
+                    raise InterruptedError("Search stopped.")
         scores = []
         for candidate, trial in pending:
             while not trial.done():

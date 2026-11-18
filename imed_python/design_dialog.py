@@ -21,7 +21,7 @@ def fitted_models(case):
 
 
 class DesignJob(QThread):
-    completed = Signal(object)
+    completed = Signal(object, bool)
     failed = Signal(str)
     message = Signal(str)
 
@@ -39,15 +39,14 @@ class DesignJob(QThread):
             if not self.isInterruptionRequested():
                 self.message.emit(f"Simulating candidate recipes with {backend}{worker_note}…")
             result = optimize_recipe(*self.inputs, iterations=self.iterations,
-                                     cancelled=self.isInterruptionRequested, workers=self.workers)
-            if self.isInterruptionRequested():
-                raise InterruptedError("Experiment design cancelled")
+                                     cancelled=self.isInterruptionRequested, workers=self.workers,
+                                     retain_partial=True)
         except InterruptedError:
-            self.failed.emit("Experiment design stopped.")
+            self.failed.emit("Stopped before a candidate with a usable score finished.")
         except Exception as error:
             self.failed.emit(str(error))
         else:
-            self.completed.emit(result)
+            self.completed.emit(result, self.isInterruptionRequested())
 
 
 class DesignDialog(QDialog):
@@ -152,7 +151,7 @@ class DesignDialog(QDialog):
             saved = step["result"]
             self.load_request(saved.get("request", {}))
             self.show_recipe((float(saved["score"]), saved["experiment"], saved["process"]),
-                             remember=False)
+                             bool(saved.get("stopped", False)), remember=False)
             self.export_button.setEnabled(True)
             if previous_inputs:
                 self.status.setText("Previous design from earlier inputs. " + self.status.text())
@@ -275,7 +274,7 @@ class DesignDialog(QDialog):
         self.job.finished.connect(self.finish_design)
         self.job.start()
 
-    def show_recipe(self, result, *, remember=True):
+    def show_recipe(self, result, stopped=False, *, remember=True):
         self.recipe_result = result
         score, experiment, process = result
         t, flow = experiment["TemperatureData"], experiment["FlowRateData"]
@@ -284,7 +283,8 @@ class DesignDialog(QDialog):
         self.seed_mass = process["SeedMass"]
         fill_table(self.result_table, self.recipe)
         label = "Log determinant" if self.optimal else "Model separation"
-        self.status.setText(f"{label}: {score:.6g}   Seed mass: {self.seed_mass:.6g} g")
+        prefix = "Stopped · best evaluated recipe · " if stopped else ""
+        self.status.setText(f"{prefix}{label}: {score:.6g}   Seed mass: {self.seed_mass:.6g} g")
         self.execute_button.setEnabled(self.recipe_launcher is not None and self.job is None)
         if remember:
             action = "d_optimal_design" if self.optimal else "model_discrimination"
@@ -296,7 +296,8 @@ class DesignDialog(QDialog):
                                    for control in self.weights],
                        "conditions": self.job.inputs[2] if self.job is not None else {}}
             record_step(self.case, action,
-                        {"score": score, "experiment": experiment, "process": process, "request": request},
+                        {"score": score, "experiment": experiment, "process": process, "request": request,
+                         "stopped": stopped},
                         context=context)
 
     def finish_design(self):

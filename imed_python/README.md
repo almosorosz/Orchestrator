@@ -64,6 +64,14 @@ The design search supports one temperature ramp and one antisolvent pulse. Therm
 
 Run `python -m unittest imed_python.test_solver imed_python.test_estimation imed_python.test_uncertainty imed_python.test_session imed_python.test_design imed_python.test_comparison imed_python.test_probabilistic` for the local calculation checks.
 
+**Stop** in PE retains the best evaluated parameters and completed earlier model fits.
+Stopped fits remain available in Parameter Details and can be applied or saved in an
+IMED case. They are labeled with the interrupted stage. Final confidence intervals
+require a completed local fit. DO and MD retain the best scored recipe for review,
+export and execution. Reliability and sensitivity retain completed simulation draws
+and calculate their summaries using those draws. The result records the requested
+draw count and the stopped state.
+
 The [PBM numerical validation](validation/README.md) includes the independent QMOM implementation, a nine-case grid-refinement study, and the saved comparison trajectories.
 
 For archived MATLAB fits, **Archived MATLAB PE** uses the historical parameter-estimation discretization and an ode45-style step controller. The mode retains the historical mass-balance defects. **SciPy PBM** and **JAX PBM** use the corrected conservative discretization. Parameters calibrated with one scheme may need refitting for use with the other.

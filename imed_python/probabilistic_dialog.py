@@ -39,9 +39,9 @@ class ProbabilisticJob(QThread):
         try:
             result = propagate(self.case, self.model_index, self.experiment_index,
                                **self.request, cancelled=self.cancel_requested.is_set,
-                               progress=self.message.emit, draw_progress=self.draws.emit)
+                               progress=self.message.emit, draw_progress=self.draws.emit, retain_partial=True)
         except InterruptedError:
-            self.failed.emit("Probabilistic analysis stopped.")
+            self.failed.emit("Stopped before a successful draw finished.")
         except Exception as error:
             self.failed.emit(str(error))
         else:
@@ -481,6 +481,7 @@ class ProbabilisticDialog(QDialog):
         self.reliability_label.setText(text)
         self.reliability_export.setEnabled(True)
         self.status.setText(
+            self.stopped_prefix(self.result, assessment["draw_count"]) +
             f"Model {int(self.result['model_index'])+1} · Experiment {int(self.result['experiment_index'])+1} · "
             f"{len(self.result['predictions'])}/{assessment['draw_count']} successful draws · "
             f"{self.reliability_scope.currentText()}. " + text)
@@ -537,6 +538,7 @@ class ProbabilisticDialog(QDialog):
 
     def show_result(self, result, *, remember=True):
         self.result = result
+        self.draw_bar.hide()
         if self.job is not None:
             self.status.setText("Rendering analysis plots…")
         for figure, _ in self.figures.values():
@@ -640,7 +642,7 @@ class ProbabilisticDialog(QDialog):
             template = f"Experiment {int(result['experiment_index'])+1}"
             recipe = result["request"].get("simulated_profile")
             label = f"{recipe['name']} · Template {template}" if recipe else template
-            self.status.setText(f"Model {int(result['model_index'])+1} · {label} · "
+            self.status.setText(self.stopped_prefix(result, count) + f"Model {int(result['model_index'])+1} · {label} · "
                                 f"{len(predictions)}/{count} successful draws · {failed} failed.")
         self.export_button.setEnabled(True)
         self.intervals_export.setEnabled(True)
@@ -650,6 +652,10 @@ class ProbabilisticDialog(QDialog):
             request = result["request"]
             if request.get("simulated_profile") or "stirring_factor" in request.get("conditions", {}):
                 remember_active_doe(self.case)
+
+    @staticmethod
+    def stopped_prefix(result, count):
+        return f"Stopped · {count}/{result['request']['samples']} draws evaluated · " if result.get("stopped") else ""
 
     def plot_fbrm(self, result):
         ax = self.figures["FBRM prediction"][0].subplots()

@@ -275,9 +275,13 @@ def prcc_diagnostics(inputs, outputs):
             "draw_counts": counts, "minimum_draws": int((input_spans > 0).sum())+3}
 
 
+def _numbered_trial(item, *, trial, cancelled):
+    return trial(item[1], cancelled=cancelled)
+
+
 def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_parameters=True,
               conditions=None, workers=1, simulated_profile=None, cancelled=None, progress=None,
-              draw_progress=None):
+              draw_progress=None, retain_partial=False):
     if not 2 <= samples <= 10000:
         raise ValueError("Use between 2 and 10000 samples.")
     if progress is not None:
@@ -317,6 +321,7 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
     trial = partial(_trial, baseline=baseline, indices=indices, condition_keys=keys,
                     experiment=experiment, process=process, solubility=case["Solubility"], settings=settings)
     predictions, concentrations, counts, valid, failures = [], [], [], [], []
+    completed_draws = {}
 
     def collect(_candidate, result):
         prediction, error = result
@@ -343,16 +348,34 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
         progress(f"Simulating sampled draws with {min(workers, samples)} worker(s)…")
     if draw_progress is not None:
         draw_progress(0, samples, 0)
-    if workers > 1:
-        with candidate_map(min(workers, samples), trial, collect, cancelled, completed=report) as evaluate:
-            evaluate(None, draws)
-    else:
-        for candidate in draws:
-            if cancelled is not None and cancelled():
-                raise InterruptedError("Probabilistic analysis stopped.")
-            result = trial(candidate, cancelled=cancelled)
-            collect(candidate, result)
-            report(result)
+    stopped = False
+
+    def retain(item, result):
+        completed_draws[item[0]] = result
+        report(result)
+
+    try:
+        if workers > 1:
+            numbered = partial(_numbered_trial, trial=trial)
+            with candidate_map(min(workers, samples), numbered, lambda _, result: result,
+                               cancelled, retain=retain) as evaluate:
+                evaluate(None, enumerate(draws))
+        else:
+            for index, candidate in enumerate(draws):
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("Probabilistic analysis stopped.")
+                retain((index, candidate), trial(candidate, cancelled=cancelled))
+    except InterruptedError:
+        if not retain_partial or not completed_draws:
+            raise
+        stopped = True
+    indices_completed = sorted(completed_draws)
+    for index in indices_completed:
+        collect(draws[index], completed_draws[index])
+    completed_draws.clear()
+    if stopped and not predictions:
+        raise InterruptedError("Probabilistic analysis stopped before a successful draw finished.")
+    draws = draws[indices_completed]
     if progress is not None:
         progress("Summarizing sampled predictions…")
     if not predictions:
@@ -377,4 +400,4 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
             "observation_time": dict(zip(("D10", "D50", "D90"), times)),
             "observed": dict(zip(("D10", "D50", "D90"), observed)),
             "model_index": model_index, "experiment_index": experiment_index,
-            "request": request}
+            "request": request, "stopped": stopped}
