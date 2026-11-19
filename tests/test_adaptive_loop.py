@@ -23,7 +23,6 @@ from imed_python.demo_campaign import model_inputs
 from imed_python.model_screening import screen_models
 from imed_python.native_case import read_native_case
 from imed_python.session import history, latest_pe_step, loop_stages
-from gui.loop_setup_dialog import LoopSetupDialog
 from MAIN_WINDOW import MainWindow
 
 
@@ -361,8 +360,8 @@ class AdaptiveLoopTests(unittest.TestCase):
                     dialog.accept()
                     return dialog.result()
 
-                with patch.object(LoopSetupDialog, "exec", set_followups):
-                    window.settings_page.loop_setup_button.click()
+                dialog = window.settings_page.edit_loop_setup()
+                set_followups(dialog)
                 self.assertEqual(window.settings_page.loop_setup["max_followups"], 2)
                 with patch.object(window, "_choose_loop_source", return_value="manual"):
                     window.start_command()
@@ -411,8 +410,9 @@ class AdaptiveLoopTests(unittest.TestCase):
                     self.assertIn(("80", "Process inputs override"), rows("Starting process inputs").values())
                     return dialog.result()
 
-                with patch.object(LoopSetupDialog, "exec", inspect_preview):
-                    settings.loop_setup_button.click()
+                dialog = settings.edit_loop_setup()
+                inspect_preview(dialog)
+                dialog.reject()
                 self.assertNotIn("SolvMass", settings.loop_setup["process"])
             finally:
                 self.doCleanups()

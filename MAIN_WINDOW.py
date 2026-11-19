@@ -1419,6 +1419,7 @@ class MainWindow(QMainWindow):
             self.settings_page.set_doe_available(False)
             self.create_experiments = None
             self.execution.set_experiment_creator(None)
+            self.settings_page.show_definition(self.experiment_service.exp_par)
             self.log_message(
                 "Experiment Definition saved. Generate the DoE and apply device assignments.",
                 "INFO"
@@ -2613,6 +2614,13 @@ class MainWindow(QMainWindow):
         self.modeling_workflow = "imed"
         self.imed_page.bo_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.bo_page)))
         self.bo_page.imed_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.imed_page)))
+        def navigate_setup(key):
+            page = {"control": self.control_panel_page, "bo": self.bo_page,
+                    "imed": self.imed_page, "pe": self.imed_page, "folders": self.settings_page}.get(key, self.settings_page)
+            self.switch_page(self.stack.indexOf(page))
+            if key == "pe":
+                self.imed_page.panel._review_setup_item("pe")
+        self.settings_page.loop_navigation_requested.connect(navigate_setup)
 
         # ----------------------------------------------------------
         # ALLOW PAGES TO SHRINK

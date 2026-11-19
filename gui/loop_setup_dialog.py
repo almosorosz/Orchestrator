@@ -2,7 +2,7 @@
 from copy import deepcopy
 from math import isfinite
 
-from PySide6.QtCore import QLocale, QSignalBlocker, Qt
+from PySide6.QtCore import QLocale, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
@@ -19,6 +19,8 @@ from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
 from gui.loop_setup_preview import used_loop_values, value_text
 from gui.experiment_period_widget import ExperimentPeriodWidget
+from gui.setup_checklist import SetupChecklist, SetupItem
+from gui.setup_readiness import loop_readiness
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
@@ -189,10 +191,13 @@ class SupportProfiles(QWidget):
 
 
 class LoopSetupDialog(QDialog):
+    navigate_requested = Signal(str)
+
     def __init__(self, setup, backend, device_configs=None, parent=None, *, preview=None):
         super().__init__(parent)
         self.setWindowTitle("Automatic loop setup")
-        self.resize(730, 610)
+        available = self.screen().availableGeometry()
+        self.resize(min(1000, int(available.width() * .94)), min(800, int(available.height() * .90)))
         self.setMinimumSize(550, 460)
         self.setup = deepcopy(validate_setup(setup))
         self.configs = device_configs or {}
@@ -201,6 +206,10 @@ class LoopSetupDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
+        self.readiness = SetupChecklist(parent=self)
+        self.readiness.activated.connect(self._navigate_check)
+        layout.addWidget(self.readiness)
+        self._refreshing_checklist = False
         run = QGroupBox("Bayesian optimization" if backend == "bo" else "IMED")
         form = QFormLayout(run)
         self.max_followups = integer_field(self.setup["max_followups"], 1, 1000)
@@ -217,7 +226,16 @@ class LoopSetupDialog(QDialog):
         self.tabs.addTab(self.process_page(), "Process inputs")
         self.tabs.addTab(self.devices_page(), "Devices")
         self.support = SupportProfiles(self.setup["support_profiles"])
-        self.tabs.addTab(self.support, "Support profiles")
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        explanation(advanced_layout, "Optional overrides and simulation controls. Normal runs inherit their defined preparation and cleanup profiles.")
+        advanced_layout.addWidget(self.overrides_group)
+        advanced_layout.addWidget(self.support)
+        advanced_layout.addWidget(self.simulation_group)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(advanced)
+        self.tabs.addTab(scroll, "Advanced")
         if backend == "imed":
             self.tabs.addTab(self.design_page(), "IMED design")
         self.period = ExperimentPeriodWidget(self.setup["experiment_period"])
@@ -241,6 +259,74 @@ class LoopSetupDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        navigation = QHBoxLayout()
+        for title, key in (("Open Control Panel", "control"),
+                           ("Open BO" if backend == "bo" else "Open IMED", backend),
+                           ("Output folders", "folders")):
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, key=key: self.navigate_requested.emit(key))
+            navigation.addWidget(button)
+        layout.insertLayout(1, navigation)
+        notice = QLabel("Save applies these settings. You can navigate to another page and return to this draft from Automatic loop setup.")
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+        self.check_timer = QTimer(self)
+        self.check_timer.setSingleShot(True)
+        self.check_timer.setInterval(180)
+        self.check_timer.timeout.connect(self.refresh_checklist)
+        for field in self.findChildren(QLineEdit):
+            field.textChanged.connect(lambda *_: self.check_timer.start())
+        for field in self.findChildren(QComboBox):
+            field.currentIndexChanged.connect(lambda *_: self.check_timer.start())
+        for field in self.findChildren(QCheckBox):
+            field.toggled.connect(lambda *_: self.check_timer.start())
+        for field in self.findChildren(QSpinBox):
+            field.valueChanged.connect(lambda *_: self.check_timer.start())
+        for field in self.findChildren(QTableWidget):
+            field.itemChanged.connect(lambda *_: self.check_timer.start())
+        self.refresh_checklist()
+        self.live_checks = QTimer(self)
+        self.live_checks.setInterval(1000)
+        self.live_checks.timeout.connect(lambda: self.refresh_checklist() if self.isVisible() else None)
+        self.live_checks.start()
+
+    def _navigate_check(self, key):
+        tab = {"batch": "Used values", "period": "Experiment period", "devices": "Devices",
+               "recording": "Recording", "inputs": "Process inputs", "design": "IMED design", "advanced": "Advanced"}.get(key)
+        if key == "limits":
+            self.max_followups.setFocus()
+            return
+        if tab:
+            for index in range(self.tabs.count()):
+                if self.tabs.tabText(index) == tab:
+                    self.tabs.setCurrentIndex(index)
+                    break
+        else:
+            self.navigate_requested.emit(self.backend if key == "model" else key)
+
+    def refresh_checklist(self):
+        if self._refreshing_checklist:
+            return
+        self._refreshing_checklist = True
+        try:
+            draft = self.collect()
+            if self.preview is None:
+                items = [SetupItem("batch", "Starting batch", False, "Open this dialog from Settings to check the assigned campaign.")]
+            else:
+                context = self.preview(self.backend, draft, self.preview_source.currentData())
+                items = loop_readiness(draft, self.backend, context)
+            self.readiness.set_items(items)
+            if self.preview is not None:
+                self.refresh_preview()
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            self.readiness.set_items([SetupItem("inputs", "Complete current values", False, str(error))])
+        finally:
+            self._refreshing_checklist = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "check_timer"):
+            self.check_timer.start()
 
     def preview_page(self):
         page = QWidget()
@@ -276,6 +362,7 @@ class LoopSetupDialog(QDialog):
     def refresh_preview(self):
         try:
             context = self.preview(self.backend, self.collect(validate_period=False), self.preview_source.currentData())
+            self._refresh_device_choices(context.get("configs", self.configs))
             self.period.set_context(context)
             if hasattr(self, "reactor"):
                 selected = self.reactor.currentData()
@@ -311,6 +398,31 @@ class LoopSetupDialog(QDialog):
                 for column in range(3):
                     row.setToolTip(column, row.text(column))
             group.setExpanded(expanded.get(title, title in {"Device assignments", "Starting process inputs"}))
+
+    def _refresh_device_choices(self, configs):
+        """Keep a draft usable after adding a device on another page."""
+        self.configs = configs
+        def update(field, choices):
+            selected = field.currentText()
+            available = list(choices)
+            if selected not in available:
+                available.append(selected)
+            if available == [field.itemText(index) for index in range(field.count())]:
+                return
+            with QSignalBlocker(field):
+                field.clear()
+                field.addItems(available)
+                field.setCurrentText(selected)
+        choices = sorted(f"{device}.{name}" for device, cfg in configs.items()
+                         for name in DEVICE_RECORDING_COLUMNS.get(cfg.get("type"), ()))
+        for field in self.channels.values():
+            update(field, ["Automatic", "Not recorded", *choices])
+        for role, field in self.assignments.items():
+            update(field, ["Automatic", *sorted(device for device, cfg in configs.items()
+                    if cfg.get("type") in ROLES[role].compatible_types and not is_monitor_only(cfg))])
+        for role, field in self.simulated_monitors.items():
+            update(field, ["", *sorted(device for device, cfg in configs.items()
+                    if cfg.get("type") == MONITOR_TYPES[role] and cfg.get("simulated"))])
 
     def _period_mode_changed(self):
         manual = self.period.mode.currentData() == "manual"
@@ -394,6 +506,7 @@ class LoopSetupDialog(QDialog):
         form.addRow("Seed D10 / D50 / D90 (µm)", row)
         explanation(form, "An unseeded experiment uses Seed mass = 0 g and seed D10/D50/D90 = 0/0/0 (or blank). Positive seed mass requires a positive seed distribution.")
         group = QGroupBox("Starting experiment overrides")
+        self.overrides_group = group
         overrides = QVBoxLayout(group)
         explanation(overrides, "Override a common model input for a named starting experiment, for example exp3 → Seed mass. "
                     "The physical experiment must deliver the matching charge; this table changes modeling inputs only.")
@@ -497,6 +610,8 @@ class LoopSetupDialog(QDialog):
         self.mixing_volume.setEnabled(self.volume_mode.currentData() == "fixed")
         explanation(mixing, "Charged volume prefers the AS scale; otherwise calibrated pump delivery is used. "
                     "Component densities supply an estimated additive liquid volume. Power number and diameter are constant per campaign.")
+        explanation(mixing, "The existing PBM uses this scalar in secondary nucleation and agglomeration through their power exponents. "
+                    "Primary nucleation has no power term. An exponent fixed at zero gives no mixing dependence; review candidate bounds in IMED Model Configurations.")
         form.addRow(self.mixing_group)
         self.delta_aic = number_field(imed["delta_aic"])
         self.iterations = integer_field(imed["iterations"], 0, 1000)

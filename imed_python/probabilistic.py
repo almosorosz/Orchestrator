@@ -229,14 +229,19 @@ def _trial(candidate, *, baseline, indices, condition_keys, experiment, process,
             factor = conditions["volume_factor"]
             process["SolvMass"] *= factor
             process["AntiSolvMass"] *= factor
+            if "InitialVolume_ml" in process:
+                process["InitialVolume_ml"] *= factor
         if "MixingSettings" in process:
             from .mixing import average_mixing
             mixing = dict(process["MixingSettings"])
             if mixing["volume_mode"] == "fixed":
                 mixing["volume_ml"] *= conditions.get("volume_factor", 1.)
             experiment.pop("AddedAntisolventData", None)
+            rpm = process.get("StirringRPM", process.get("MixingSummary", {}).get("average_rpm"))
+            if rpm is None and mixing["enabled"]:
+                raise ValueError("Average mixing sensitivity requires the experiment's average stirring rate.")
             process = average_mixing(experiment, process, mixing,
-                                    mean_rpm=process.get("StirringRPM", 1.) * conditions.get("stirring_factor", 1.))
+                                    mean_rpm=None if rpm is None else rpm * conditions.get("stirring_factor", 1.))
         elif "stirring_factor" in conditions:
             process["PowerRatio"] = stirring_power_ratio(process["PowerRatio"], conditions["stirring_factor"], 1.)
         return _predict(parameters, experiment, process, solubility, settings, cancelled=cancelled), ""

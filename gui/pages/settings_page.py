@@ -22,9 +22,10 @@ from imed_python.size_data import SIZE_SAMPLE_OPTIONS
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from gui.settings_workflow import SettingsWorkflow
 
 
-class SettingsPage(QWidget):
+class SettingsPage(SettingsWorkflow, QWidget):
 
     define_requested = Signal()
     generate_requested = Signal()
@@ -37,6 +38,7 @@ class SettingsPage(QWidget):
     reservoirs_requested = Signal()
     save_preset_requested = Signal()
     load_preset_requested = Signal()
+    loop_navigation_requested = Signal(str)
 
     def __init__(self, parent=None, *, loop_devices=None, loop_preview=None, external_model_context=None):
         super().__init__(parent)
@@ -47,6 +49,7 @@ class SettingsPage(QWidget):
         self.loop_preview = loop_preview
         self.external_model_context = external_model_context
         self.external_model_dialog = None
+        self.loop_setup_dialog = None
         self._build_ui()
 
     def _build_ui(self):
@@ -534,6 +537,7 @@ class SettingsPage(QWidget):
         main_layout.addWidget(
             scroll_area
         )
+        self._organize_workflow()
 
     def get_environment_inputs(self):
         return (
@@ -562,8 +566,9 @@ class SettingsPage(QWidget):
         experiment_count,
     ):
         self.changed_dimensions_count_label.setText(
-            str(changed_dimensions)
+            str(dimensions)
         )
+        self.changed_dimensions_count_label.setToolTip(str(changed_dimensions))
 
         self.changed_dimensions_label.setText(
             str(dimensions)
@@ -624,6 +629,15 @@ class SettingsPage(QWidget):
     def edit_loop_setup(self):
         from gui.loop_setup_dialog import LoopSetupDialog
 
+        if self.loop_setup_dialog is not None:
+            if self.loop_setup_dialog.backend != self.loop_backend.currentData():
+                self.loop_setup_dialog.reject()
+                return self.edit_loop_setup()
+            self.loop_setup_dialog.show()
+            self.loop_setup_dialog.raise_()
+            self.loop_setup_dialog.refresh_checklist()
+            return self.loop_setup_dialog
+
         try:
             configs = self.loop_devices() if self.loop_devices is not None else {}
             dialog = LoopSetupDialog(self.loop_setup, self.loop_backend.currentData(), configs, self,
@@ -631,9 +645,22 @@ class SettingsPage(QWidget):
         except (TypeError, ValueError) as error:
             QMessageBox.warning(self, "Check loop setup", str(error))
             return
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.loop_setup = dialog.setup
-        dialog.deleteLater()
+        self.loop_setup_dialog = dialog
+        def finished(result):
+            if result == QDialog.DialogCode.Accepted:
+                self.loop_setup = dialog.setup
+            self.loop_setup_dialog = None
+            dialog.deleteLater()
+            self.update_workflow_checklist()
+        dialog.finished.connect(finished)
+        def navigate(key):
+            dialog.hide()
+            if key == "folders":
+                self.workflow_tabs.setCurrentIndex(3)
+            self.loop_navigation_requested.emit(key)
+        dialog.navigate_requested.connect(navigate)
+        dialog.show()
+        return dialog
 
     def external_model_info_context(self):
         context = self.external_model_context() if self.external_model_context is not None else {}
@@ -656,12 +683,15 @@ class SettingsPage(QWidget):
 
 
     def reset_ui(self):
+        if self.loop_setup_dialog is not None:
+            self.loop_setup_dialog.reject()
         self.set_doe_available(False)
         self.clear_inputs()
         from experiment.adaptive_loop import default_setup
 
         self.loop_backend.setCurrentIndex(0)
         self.loop_setup = default_setup()
+        self.variable_table.setRowCount(0)
 
         self.changed_dimensions_count_label.clear()
         self.changed_dimensions_label.clear()
@@ -679,6 +709,10 @@ class SettingsPage(QWidget):
 
     def set_controls_enabled(self, enabled):
         self._controls_enabled = bool(enabled)
+        for button in self.folder_browse_buttons:
+            button.setEnabled(enabled)
+        if self.loop_setup_dialog is not None:
+            self.loop_setup_dialog.setEnabled(enabled)
         self.load_preset_button.setEnabled(enabled)
         self.define_button.setEnabled(enabled)
         for control in (self.exp_path_input, self.MODEL_path_input, self.exp_number_input, self.pbm_size_samples,
@@ -694,6 +728,10 @@ class SettingsPage(QWidget):
 
     def set_doe_available(self, available):
         self._doe_available = bool(available)
+        if not available:
+            self._workflow_creator = None
+            self.experiment_choice.clear()
+            self._workflow_profile_figures = []
         enabled = available and getattr(self, "_controls_enabled", True)
         self.assign_doe_button.setEnabled(enabled)
         self.export_doe_button.setEnabled(enabled)
@@ -701,6 +739,7 @@ class SettingsPage(QWidget):
 
     def set_assignment_available(self, available):
         self._assignment_available = bool(available)
+        self.update_workflow_checklist(use_context=False)
         self.start_independent_doe_button.setEnabled(available and getattr(self, "_controls_enabled", True))
         self.assign_doe_button.setStyleSheet("""
             QPushButton#assign_doe_button {
@@ -828,50 +867,4 @@ class SettingsPage(QWidget):
         experiment_creator,
         dark_mode,
     ):
-        try:
-            experiment_creator.plot_sampled_points(
-                fig_2d=self.canvas_2d.figure,
-                fig_3d=self.canvas_3d.figure,
-            )
-
-            dims = getattr(
-                experiment_creator,
-                "dimensions",
-                1,
-            )
-
-            min_width = max(
-                350,
-                dims * 85,
-            )
-
-            self.canvas_2d.setMinimumWidth(
-                min_width
-            )
-
-            self.canvas_2d.draw()
-
-        except Exception:
-            self._show_plot_unavailable(
-                self.canvas_2d,
-                dark_mode,
-            )
-
-        try:
-            experiment_creator.plot_sampled_points(
-                fig_2d=self.canvas_2d.figure,
-                fig_3d=self.canvas_3d.figure,
-            )
-
-            self.canvas_3d.setMinimumSize(
-                300,
-                300,
-            )
-
-            self.canvas_3d.draw()
-
-        except Exception:
-            self._show_plot_unavailable(
-                self.canvas_3d,
-                dark_mode,
-            )
+        self.render_workflow(experiment_creator, dark_mode)

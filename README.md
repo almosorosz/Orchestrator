@@ -1,5 +1,30 @@
 # CrystaLoop 0.4.0 — Campaign archive, recovery, presets and Windows release
 
+## Guided experiment and automatic loop setup
+
+Settings now has four full-width tabs: **Experiment design**, **Preview & devices**,
+**Automatic loop**, and **Files & presets**. The checklist above them shows missing
+requirements in amber and configured items in green. Click an item, or **Review next
+item**, to reach its settings. Generate the experiments, inspect individual profiles,
+then validate and apply device assignments. Sampling diagnostics retain minimum and
+mean pairwise factor separations and let you select the three axes of the 3D plot.
+
+**Automatic loop setup** has its own live checklist for the starting batch, output
+folders, experiment period, devices, recording, process inputs and modeling settings.
+For IMED it also checks PE responses and follow-up design bounds. Optional overrides,
+support profiles and PBM simulation controls are under **Advanced**. **Used values**
+shows inherited values and their sources. You can open Control Panel or the modeling
+page and return to the same draft; **Save** applies it and **Cancel** discards it.
+Dashboard **Start** still performs execution preflight and selects the starting batch
+if both Control Panel and Settings experiments are available.
+
+IMED also shows a clickable checklist above **Case setup**, with the modeling actions
+grouped into **Inputs & models**, **Fit & design**, and **Analysis & history**.
+Fitted results are a subsequent step rather than a prerequisite for starting PE.
+
+The [16-point implementation audit](TODAY_TASK_AUDIT.md) records the completed scope,
+regression evidence and numerical validation of average mixing inputs.
+
 ## IMED
 
 Open **IMED** in the sidebar to import a MATLAB model or a recorded CrystaLoop

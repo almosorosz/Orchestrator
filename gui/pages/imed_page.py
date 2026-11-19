@@ -29,7 +29,7 @@ class IMEDPage(QWidget):
         scroll.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         scroll.setWidgetResizable(True)
         self.panel = ControlPanel(Window, parent=scroll)
-        self.panel.setMaximumWidth(640)
+        self.panel.setMaximumWidth(1050)
         # Use the same primary action colors as Settings in both themes.
         self.panel.body.setStyleSheet("""
             QPushButton[imedPrimary="true"]:enabled {

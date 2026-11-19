@@ -21,6 +21,8 @@ from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
 from .solver import read_model
 from .solver_choice import SolverChoice
 from .session import clear_matlab_fit_summaries, delete_models, display_name, history, loop_stages, record_step
+from gui.setup_checklist import SetupChecklist
+from gui.setup_readiness import imed_readiness
 
 
 def table(headers):
@@ -78,6 +80,8 @@ class ControlPanel(QMainWindow):
         self.status = QPlainTextEdit(self.body)
         self.status.setReadOnly(True)
         self.followup_summary = None
+        self.readiness = SetupChecklist(parent=self.body)
+        self.readiness.activated.connect(self._review_setup_item)
         self.checklist = QFrame(self.body)
         self.checks = {}
         for key, label in (
@@ -118,15 +122,39 @@ class ControlPanel(QMainWindow):
             lambda: self.workers.setEnabled(self.numerics.currentData()[0] != "jax"))
         if parent is None:
             self._build_diagram()
+            original = self.takeCentralWidget()
+            wrapper = QWidget()
+            rows = QVBoxLayout(wrapper)
+            rows.addWidget(self.readiness)
+            original.setMinimumSize(self.WIDTH, self.HEIGHT)
+            rows.addWidget(original, 1)
+            self.setCentralWidget(wrapper)
+            self.setMinimumSize(self.WIDTH + 30, self.HEIGHT + 190)
+            self.setMaximumSize(16777215, 16777215)
+            self.resize(950, 800)
         else:
             self._build_embedded()
         self.show_message("Open an IMED case or import a CrystalLoop recording.")
         self.refresh_status()
 
+    def _review_setup_item(self, key):
+        if hasattr(self, "model_tabs"):
+            self.model_tabs.setCurrentIndex(1 if key in {"pe", "fits"} else 0)
+        if key in {"experiments", "process", "solubility"}:
+            self.edit_inputs()
+        elif key == "models":
+            self.show_configurations() if self.case.get("ModelParameter") else self.generate_candidate()
+        elif key in {"pe", "fits"}:
+            if self.estimation_buttons[0].isEnabled():
+                self.show_estimation()
+            else:
+                self.show_message("Complete experimental data, process information, solubility and candidate models first. Click the amber checklist items above.")
+
     def _build_embedded(self):
         layout = QVBoxLayout(self.body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        layout.addWidget(self.readiness)
 
         setup = QGroupBox("Case setup")
         setup_layout = QVBoxLayout(setup)
@@ -147,13 +175,18 @@ class ControlPanel(QMainWindow):
 
         workflow = QGroupBox("Modeling workflow")
         workflow_layout = QVBoxLayout(workflow)
+        self.model_tabs = QTabWidget()
+        workflow_layout.addWidget(self.model_tabs)
         self.design.setProperty("imedPrimary", True)
-        for button in (*self.input_buttons, self.review_inputs, self.candidate_button,
-                       self.configurations, *self.estimation_buttons,
-                       self.uncertainty_button, self.md_button, self.dopt_button, self.design,
-                       self.reliability, self.sensitivity, self.history_button, self.stages_button):
-            button.setMinimumHeight(42)
-            workflow_layout.addWidget(button)
+        for title, buttons in (("Inputs & models", (*self.input_buttons, self.review_inputs, self.candidate_button, self.configurations)),
+                               ("Fit & design", (*self.estimation_buttons, self.uncertainty_button, self.md_button, self.dopt_button, self.design)),
+                               ("Analysis & history", (self.reliability, self.sensitivity, self.history_button, self.stages_button))):
+            page = QWidget()
+            grid = QGridLayout(page)
+            for index, button in enumerate(buttons):
+                button.setMinimumHeight(42)
+                grid.addWidget(button, index // 2, index % 2)
+            self.model_tabs.addTab(page, title)
         layout.addWidget(workflow)
 
         status = QGroupBox("Case status")
@@ -168,7 +201,7 @@ class ControlPanel(QMainWindow):
         checklist.setContentsMargins(0, 0, 0, 0)
         for index, check in enumerate(self.checks.values()):
             checklist.addWidget(check, index // 2, index % 2)
-        status_layout.addWidget(self.checklist)
+        self.checklist.hide()  # The actionable checklist is above the setup controls.
         layout.addWidget(status)
         layout.addStretch()
 
@@ -335,6 +368,7 @@ class ControlPanel(QMainWindow):
             self.show_message(f"Saved IMED case {destination.name}.")
 
     def refresh_status(self):
+        self.readiness.set_items(imed_readiness(self.case))
         counts = {key: item_count(self.case.get(key)) for key in
                   (*self.checks, "MDsimulation", "PPsimulation", "summaryTable")}
         for key, check in self.checks.items():

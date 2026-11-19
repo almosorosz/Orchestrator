@@ -226,6 +226,14 @@ def simulate(parameters, experiment, process, solubility, settings=None, *,
     numerics = settings.get("Numerics", "conservative")
     if numerics not in PBM_MODES:
         raise ValueError(f"Unknown PBM mode {numerics!r}. Choose from {', '.join(PBM_MODES)}.")
+    power = float(process["PowerRatio"])
+    if not np.isfinite(power) or power < 0:
+        raise ValueError("The mixing power input must be finite and nonnegative.")
+    if power == 0:
+        for rate, exponent in ((5, 11), (24, 27)):
+            if np.isfinite(parameters[rate]) and parameters[exponent] < 0:
+                raise ValueError("Zero mixing power cannot use a negative nucleation or agglomeration power exponent. "
+                                 "Use a positive stirring rate or revise the candidate power-exponent bounds.")
 
     def check_cancelled():
         if cancelled is not None and cancelled():

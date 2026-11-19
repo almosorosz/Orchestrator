@@ -25,13 +25,16 @@ def validate_mixing(settings):
     return result
 
 
-def trace_mean(points, duration, label):
+def trace_mean(points, duration, label, *, step=False):
     points = np.asarray(points, dtype=float)
     if (points.ndim != 2 or points.shape[0] != 2 or points.shape[1] < 2
             or not np.isfinite(points).all() or np.any(np.diff(points[0]) <= 0)
             or np.any(points[1] < 0) or points[0, 0] > 1e-7 or points[0, -1] < duration - 1e-7):
         raise ValueError(f"{label} must cover the selected experiment period with finite nonnegative values.")
     knots = np.unique(np.r_[0., points[0, (points[0] > 0) & (points[0] < duration)], duration])
+    if step:
+        indices = np.clip(np.searchsorted(points[0], knots[:-1], side="right") - 1, 0, points.shape[1] - 1)
+        return float(np.dot(np.diff(knots), points[1, indices]) / duration)
     return float(np.trapezoid(np.interp(knots, *points), knots) / duration)
 
 

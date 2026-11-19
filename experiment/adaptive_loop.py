@@ -312,6 +312,7 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
         speed_field = next((field for field in ("speed_rpm", "speed", "target")
                             if f"{stirrer}.{field}" in headers and series(f"{stirrer}.{field}").shape[1] >= 2), None)
         speed = series(f"{stirrer}.{speed_field}") if speed_field else None
+        speed_step = False
         speed_source = "Assigned stirrer commands" if speed_field == "target" else "Measured stirring rate"
         if speed is not None:
             speed[0] -= origin
@@ -320,9 +321,11 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
             if entry:
                 raw = np.asarray([[p["time_s"] for p in entry["points"]], [p["target"] for p in entry["points"]]])
                 times = np.unique(np.r_[origin, raw[0, (raw[0] > origin) & (raw[0] < origin + duration)], origin + duration])
-                speed = np.vstack((times - origin, np.interp(times, *raw)))
+                speed_step = entry.get("interpolation") == "step"
+                values = raw[1, np.clip(np.searchsorted(raw[0], times, side="right") - 1, 0, len(raw[0]) - 1)] if speed_step else np.interp(times, *raw)
+                speed = np.vstack((times - origin, values))
                 speed_source = "Assigned stirrer commands"
-        mean_rpm = trace_mean(speed, duration, "Stirring rate") if speed is not None else None
+        mean_rpm = trace_mean(speed, duration, "Stirring rate", step=speed_step) if speed is not None else None
         if mean_rpm is not None:
             process = {**process, "StirringRPM": mean_rpm}
         if all(key in process for key in ("SolvMass", "AntiSolvMass", "SolventDensity", "AntiSolventDensity")):
