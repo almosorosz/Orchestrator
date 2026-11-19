@@ -134,7 +134,7 @@ class RecordingTests(unittest.TestCase):
         from unittest.mock import patch
         from PySide6.QtWidgets import QApplication
         from gui.recording_settings_dialog import RecordingSettingsDialog, load_recording_settings, database_counts
-        app = QApplication.instance() or QApplication([])
+        _app = QApplication.instance() or QApplication([])  # Keep Qt alive throughout the test.
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as folder:
             settings_file = Path(folder) / "settings.json"
             with patch("gui.recording_settings_dialog.SETTINGS_FILE", settings_file):

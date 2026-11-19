@@ -1,0 +1,3 @@
+# Optional audit tooling; the application and unittest suite do not require it.
+ruff==0.17.6
+coverage==7.17.3

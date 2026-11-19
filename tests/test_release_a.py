@@ -625,7 +625,7 @@ class GuiTests(unittest.TestCase):
             dashboard = window.experiment_page.dashboard
             self.assertIsNotNone(dashboard)
             self.assertEqual(dashboard.recording_settings["output_folder"], panel.control_output_path.text())
-            self.assertNotEqual(dashboard.recording_settings["output_folder"], str(Path.cwd() / "data" / "runs"))
+            self.assertEqual(dashboard.recording_settings["output_folder"], window._experiment_output_folder())
             # Reserved startup is active too, before the 200 ms start timer fires.
             self.assertTrue(dashboard.is_execution_active())
             self.assertFalse(window.experiment_page.end_session_button.isEnabled())

@@ -6,6 +6,8 @@ from PyInstaller.utils.hooks import collect_data_files
 
 root = Path(SPECPATH).parent
 datas = [(str(root / "assets"), "assets"),
+         (str(root / "data" / "omni"), "data/omni"),
+         (str(root / "data" / "omni_export" / "headers_OMNI.csv"), "data/omni_export"),
          (str(root / "data" / "pump_calibration"), "data/pump_calibration"),
          (str(root / "imed_python" / "workflow.png"), "imed_python")]
 datas += collect_data_files("pyDOE3")

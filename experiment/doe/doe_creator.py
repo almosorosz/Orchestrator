@@ -1,8 +1,6 @@
 from app.paths import (OMNI_DATA_DIR, OMNI_HEADER_FILE)
 
-import copy
 import shutil
-import matplotlib.pyplot as plt
 import pandas            as pd
 import numpy             as np
 import matplotlib        as mpl
@@ -10,11 +8,8 @@ import matplotlib        as mpl
 import experiment.profiles.profile_gen_helper_funcs as profile_gen_helper_funcs
 
 from pathlib           import Path
-from scipy.interpolate import interp1d
-from dataclasses       import asdict, dataclass, field, fields
-from itertools         import accumulate, chain
+from dataclasses       import asdict, fields
 from openpyxl          import load_workbook, Workbook
-from matplotlib.figure import Figure
 
 mpl.rcParams.update({'font.size': 7,'axes.labelsize': 7,'axes.titlesize': 7,
                      'xtick.labelsize': 7,'ytick.labelsize': 7,'legend.fontsize': 7,
@@ -197,7 +192,6 @@ class ExperimentCreator():
                                          "cmp16.1.csv","cmp18.1.csv","cmp19.1.csv",
                                          "compids.csv","expt.xml", "sstrace.csv"]
         
-        files_internal_location = OMNI_DATA_DIR
         
         for filename in files_to_copy_w_OMNI_profile:
             

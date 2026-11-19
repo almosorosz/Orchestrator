@@ -456,7 +456,15 @@ Tests use Python's built-in unittest runner; pytest is optional:
 
 ```powershell
 .venv\Scripts\python -B -m unittest discover -s tests -v
+$imedTests = Get-ChildItem imed_python/test_*.py | ForEach-Object { "imed_python.$($_.BaseName)" }
+.venv\Scripts\python -B -m unittest @imedTests -v
+.venv\Scripts\python -B -m unittest imed_python.validation.test_ccas_qmom imed_python.validation.test_numerical -v
+.venv\Scripts\python -B -m unittest bo_app.test_workflow -v
 ```
+
+Optional static checks use `pip install -r requirements-dev.txt` followed by
+`python -m ruff check .`. The repository excludes generated notebook checkpoints
+from source control. See [the code audit](CODE_AUDIT.md) for cleanup and regression details.
 
 Tests select Qt's offscreen backend and never connect physical devices. Temporary
 export fixtures are created inside the repository and cleaned after each test.

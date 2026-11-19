@@ -1,9 +1,8 @@
 """Load/preview CSV calibrations and save their points with a pump configuration."""
 from copy import deepcopy
-from pathlib import Path
 import pandas as pd
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
-    QComboBox, QSpinBox, QLineEdit, QFileDialog, QMessageBox)
+    QComboBox, QSpinBox, QLineEdit, QFileDialog)
 from experiment.pump_calibration_files import load_calibration, OUTPUT_UNITS
 
 

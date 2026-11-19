@@ -4,10 +4,8 @@ import datetime
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel,QHBoxLayout,
-    QProgressBar, QTextEdit
+    QWidget, QHBoxLayout
 )
-from PySide6.QtCore import Qt
 from gui.stylish_widgets import MetricCard
 # ==========================================================
 # Background worker

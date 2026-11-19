@@ -263,7 +263,7 @@ class DashboardPage(QWidget):
         log_box.setLayout(log_layout)
 
         # ----------------------------------------------------------
-        # CONNECTED DEVICES
+        # RESERVOIR AMOUNTS
         # ----------------------------------------------------------
 
         devices_box = QGroupBox(
@@ -438,12 +438,6 @@ class DashboardPage(QWidget):
             )
     
 
-    def set_experiment_controls_enabled(
-        self,
-        enabled,
-    ):
-        self.start_button.setEnabled(enabled)
-        self.reset_button.setEnabled(enabled)
     
     
     def reset_status(self):

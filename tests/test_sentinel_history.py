@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 PI_DIR = Path(__file__).resolve().parents[1] / "sentinel/pi"
 sys.path.insert(0, str(PI_DIR))

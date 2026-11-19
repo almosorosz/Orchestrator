@@ -549,7 +549,6 @@ class RecipeCompiler:
                 raise ValueError("Volume decisions require a known starting liquid volume.")
             volume_scale = process["RequestedInitialVolume_ml"] / reference
             if not np.isclose(volume_scale, 1.):
-                from experiment.material_balance import pump_mass
                 charge_devices = {device for role, device in self.roles.items()
                                   if self.line_roles.get(role, {}).get("role", role) in {"AS", "solvent", "solution"}}
                 adjustable = [p for p in original.profiles if p.device_id in charge_devices

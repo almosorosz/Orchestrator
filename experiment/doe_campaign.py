@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 import json
-import math
 
 import numpy as np
 import pandas as pd

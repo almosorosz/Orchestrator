@@ -23,7 +23,7 @@ from imed_python.solver import model_parameters
 
 class ImedValidationDoeTests(unittest.TestCase):
     def test_recorded_assignments_and_crystallization_window_round_trip(self):
-        app = QApplication.instance() or QApplication([])
+        _app = QApplication.instance() or QApplication([])  # Keep Qt alive throughout the test.
         preset = Path(__file__).resolve().parents[1] / "examples/configurations/imed_validation_doe.json"
         data, parameters, assignments = read_preset(preset)
         configs = data["control_panel"]["devices"]

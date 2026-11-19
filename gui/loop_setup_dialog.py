@@ -19,7 +19,6 @@ from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
 from gui.loop_setup_preview import used_loop_values, value_text
 from gui.experiment_period_widget import ExperimentPeriodWidget
-from imed_python.mixing import DEFAULT_MIXING
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}

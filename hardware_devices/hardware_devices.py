@@ -194,7 +194,7 @@ class MasterflexPump(BaseDevice):
 
             time.sleep(0.4)
 
-            ack = self.ser.read_all()
+            self.ser.read_all()
 
             self.is_connected = True
 

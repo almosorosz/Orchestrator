@@ -6,17 +6,13 @@
 
 import os
 import numpy             as np
-import pandas            as pd
 import matplotlib        as mpl
-import matplotlib.pyplot as plt
 
 from matplotlib.figure import Figure
 
 from joblib                 import Parallel, delayed
-from mpl_toolkits.mplot3d   import Axes3D
 from scipy.spatial.distance import pdist      
 from scipy.spatial.distance import cdist
-from pyDOE3                 import ff2n
 from pyDOE3                 import fracfact
 from scipy.stats            import qmc
 from dataclasses            import fields
@@ -41,7 +37,6 @@ class DoESampler:
 
         #weighted_points = points * np.sqrt(weights)
 
-        distances = pdist(points, metric='euclidean')
         weighted_av  = np.mean([weights[ii] * self.dist_calculator(np.array(points[:,ii]).reshape(-1,1),n_sample)[0].mean() for ii in range(n_dims)])
         weighted_min = np.mean([weights[ii] * self.dist_calculator(np.array(points[:,ii]).reshape(-1,1),n_sample)[0].min() for ii in range(n_dims)])
         weighted_std = np.mean([weights[ii] * self.dist_calculator(np.array(points[:,ii]).reshape(-1,1),n_sample)[0].std() for ii in range(n_dims)])
@@ -67,18 +62,8 @@ class DoESampler:
         np.fill_diagonal(dist, np.inf)
         return dist[np.triu_indices(n = n_sample, k=1)], dist
 
-    def dist_eval(self,B,name,n_sample,FIG = False):
 
-        ddist, dist = self.dist_calculator(B,n_sample)
-
-        if FIG:
-            plt.figure(figsize=(5,2))
-            plt.imshow(dist)
-            plt.colorbar()
-
-        return ddist.mean(), ddist.min(), ddist.std()
-
-    def two_dim_plotter(self, POINTS, names, name_strings=[],fig=None):
+    def two_dim_plotter(self, POINTS, names, name_strings=None,fig=None):
         n_dims   = POINTS[0].shape[1]
         n_sample = POINTS[0].shape[0]
         
@@ -221,24 +206,7 @@ class DoESampler:
             min_dist = dist.min(axis=1)
         return points
 
-    def figger(self,axx, LOCs, randd_p, markk, coll, labb,LS):
-        axx[0].scatter(LOCs,randd_p[:,0],20,marker=markk,color=coll,label=labb)
-        [axx[i].scatter(LOCs,randd_p[:,i],20,marker=markk,color=coll) for i in [1,2]]
-        [axx[j].plot(LOCs,randd_p[:,j],color=coll,linestyle=LS) for j in [0,1,2]]
 
-    def greedy_reducer(self,original_points, n_to_reduce, random_state=42): 
-        rng = np.random.default_rng(random_state)
-        candidates = original_points
-        initial_idx = rng.integers(0, len(candidates))
-        points = [candidates[initial_idx]]
-
-        for _ in range(n_to_reduce - 1): 
-            dist = cdist(candidates, np.array(points)) 
-            min_dist = dist.min(axis=1) 
-            next_idx = np.argmax(min_dist) 
-            points.append(candidates[next_idx]) 
-
-        return np.array(points)
 
     def dim_counter(self,Exp_par):
         dim_c = 0
@@ -258,7 +226,7 @@ class DoESampler:
     
         # --- TITLE WITH BACKGROUND BOX ---
         ax.set_title(
-            " Representation of\nfirst three factors in 3D. ",
+            title_text or " Representation of\nfirst three factors in 3D. ",
             color="#e5e7eb",
             fontsize=7,
             bbox=dict(boxstyle="round,pad=0.8",facecolor="none",edgecolor="#4b5563", linewidth=0.7,alpha=0.95,),
@@ -295,12 +263,6 @@ class DoESampler:
         span = np.max(B, axis=0)
         return np.divide(B, span, out=np.zeros_like(B, dtype=float), where=span != 0)
 
-    def two_factplotter(self,A):
-        plt.figure(figsize=(2,2))
-        plt.scatter(A[:,0],A[:,2])
-        plt.xlim([-0.01,1.01])
-        plt.ylim([-0.01,1.01])
-        return
 
     def factorial_design(self,n_dims, Fraction=0):
         if not isinstance(n_dims, int) or not 1 <= n_dims <= 10:

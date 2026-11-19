@@ -6,7 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTextBrowser, QVBoxLayout)
 
 from app.presets import validate_manual_experiments
 from experiment.recording import atomic_json

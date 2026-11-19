@@ -1,0 +1,5 @@
+target-version = "py313"
+extend-exclude = ["*.ipynb", "FILES", "campaign_*", "_model_*", "tmp*"]
+
+[lint]
+select = ["F", "E9"]

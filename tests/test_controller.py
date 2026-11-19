@@ -1,23 +1,19 @@
-#!/usr/bin/env python
-# coding: utf-8
+"""Controller basics, discoverable by the standard unittest runner."""
+import unittest
 
-# In[2]:
-
-
-from app.controller import Controller
-
-def test_stage_start():
-    c = Controller(r"C:\Users\user\Desktop\OMNI\1. OMNI",r"C:\Users\user\Desktop\OMNI\2. IMED", 3)
-    c.start()
-    assert c.current_stage.name == "OMNI"
-    
-def test_expnum():
-    c = Controller(r"C:\Users\user\Desktop\OMNI\1. OMNI",r"C:\Users\user\Desktop\OMNI\2. IMED", 3)
-    assert c.initial_exp_count == 3
+from app.controller import Controller, Stage
 
 
-# In[ ]:
+class ControllerBasicsTests(unittest.TestCase):
+    def test_stage_start(self):
+        controller = Controller("experiments", "models", 3)
+        controller.start()
+        self.assertEqual(controller.current_stage, Stage.OMNI)
+
+    def test_expnum(self):
+        controller = Controller("experiments", "models", 3)
+        self.assertEqual(controller.initial_exp_count, 3)
 
 
-
-
+if __name__ == "__main__":
+    unittest.main()

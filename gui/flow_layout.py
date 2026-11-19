@@ -23,7 +23,7 @@ class FlowLayout(QLayout):
         return self.items.pop(index) if 0 <= index < len(self.items) else None
 
     def addStretch(self, stretch=0):
-        pass  # Wrapping rows pack controls to the left.
+        del stretch  # Retain QLayout's argument; wrapping rows pack controls to the left.
 
     def addSpacing(self, spacing):
         self.addItem(QSpacerItem(spacing, 0))

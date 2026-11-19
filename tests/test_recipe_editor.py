@@ -1,6 +1,5 @@
 """Recipe editing, exact DoE restore, assignment and timeline execution."""
 from copy import deepcopy
-from dataclasses import asdict
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory

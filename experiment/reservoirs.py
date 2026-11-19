@@ -1,6 +1,7 @@
 """Thread-safe reservoir inventory and estimated reactor mass during execution."""
 from copy import deepcopy
 import json
+import logging
 from pathlib import Path
 from threading import RLock
 
@@ -10,6 +11,8 @@ from PySide6.QtCore import QObject, Signal
 from experiment.material_balance import pump_mass, delivery_times
 from experiment.recording import atomic_json
 from experiment.system_topology import PUMPS
+
+logger = logging.getLogger("orchestrator.reservoirs")
 
 
 class InsufficientStock(ValueError):
@@ -26,12 +29,28 @@ class ReservoirBook(QObject):
         self.units, self.configs, self.remaining, self.current_used = {}, {}, {}, {}
         self.system_mass_g = None
         self._saved = {}
+        self._load_error = None
         self.active_sources = None
         if self.state_file and self.state_file.is_file():
-            self._saved = json.loads(self.state_file.read_text(encoding="utf-8"))
+            try:
+                saved = json.loads(self.state_file.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    raise ValueError("Expected a mapping of refill identifiers to grams")
+                if any(not isinstance(value, (float, int)) or isinstance(value, bool)
+                       or not np.isfinite(value) or value < 0 for value in saved.values()):
+                    raise ValueError("Saved reservoir stock must be finite, nonnegative grams")
+                self._saved = saved
+            except (OSError, ValueError) as error:
+                self._load_error = str(error)
+                logger.warning("Could not read reservoir inventory %s: %s", self.state_file, error)
 
-    def configure(self, topology, configs):
+    def configure(self, topology, configs, *, confirm_amounts=False):
         with self.lock:
+            if confirm_amounts:
+                self._saved.update({unit["inventory_id"]: unit["inventory_g"]
+                                    for unit in topology.get("unit_operations", [])
+                                    if unit.get("inventory_id") and unit.get("inventory_g") is not None})
+                self._load_error = None
             self.units = {u["code"]: deepcopy(u) for u in topology.get("unit_operations", [])}
             self.configs = deepcopy(configs)
             self.remaining = {}
@@ -39,10 +58,15 @@ class ReservoirBook(QObject):
                 amount = unit.get("inventory_g")
                 if amount is None:
                     continue
-                if not isinstance(amount, (float, int)) or not np.isfinite(amount) or amount < 0:
+                if not isinstance(amount, (float, int)) or isinstance(amount, bool) or not np.isfinite(amount) or amount < 0:
                     raise ValueError(f"{unit['name']}: reservoir amount must be nonnegative grams, or blank.")
                 key = unit.get("inventory_id")
-                self.remaining[code] = float(self._saved.get(key, amount)) if key else float(amount)
+                remaining = 0. if self._load_error else (self._saved.get(key, amount) if key else amount)
+                if (not isinstance(remaining, (float, int)) or isinstance(remaining, bool)
+                        or not np.isfinite(remaining) or remaining < 0):
+                    raise ValueError(f"{unit['name']}: saved reservoir stock must be finite, nonnegative grams. "
+                                     "Enter the actual amount in Reservoir amounts before starting.")
+                self.remaining[code] = float(remaining)
             self.active_sources = None
         self.changed.emit()
 
@@ -62,6 +86,8 @@ class ReservoirBook(QObject):
 
     def save(self):
         with self.lock:
+            if self._load_error:
+                return  # Preserve the unreadable file until actual amounts have been confirmed.
             for code, amount in self.remaining.items():
                 key = self.units[code].get("inventory_id")
                 if key:
@@ -106,6 +132,9 @@ class ReservoirBook(QObject):
 
     def check(self, experiment, *, end_hold_s=0.):
         with self.lock:
+            if self._load_error and self.remaining:
+                raise ValueError("The saved reservoir inventory could not be read. Open Reservoir amounts, "
+                                 "enter the actual container amounts and save before starting.")
             end = max(p.points[-1].time_s for p in experiment.profiles) + end_hold_s
             times = sorted({point.time_s for profile in experiment.profiles for point in profile.points} | {end})
             times = sorted(set(times) | {float(time) for profile in experiment.profiles

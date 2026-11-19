@@ -111,7 +111,6 @@ class BOWindow(QWidget):
         self.revision = 0
         self.rendering = False
         self.proposal = None
-        self.encoding = None
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)

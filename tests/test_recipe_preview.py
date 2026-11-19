@@ -14,7 +14,7 @@ from experiment.doe_campaign import ROLES
 from experiment.experiment_service import ExperimentService
 from experiment.recipe import parameter
 from gui.device_profile_dialog import DeviceProfileDialog
-from gui.recipe_editor import COLUMN_WIDTH, HEADER_HEIGHT, LABEL_WIDTH, ROW_HEIGHT, ExperimentDefinitionDialog
+from gui.recipe_editor import COLUMN_WIDTH, LABEL_WIDTH, ROW_HEIGHT, ExperimentDefinitionDialog
 from test_recipe_editor import APP, CONFIGS
 
 
@@ -159,7 +159,8 @@ class RecipePreviewTests(unittest.TestCase):
             editor = dialog.editor
             self.assertEqual(editor.stage_list.count(), 35)
             self.assertGreater(editor.view.verticalScrollBar().maximum(), 0)
-            self.assertGreater(editor.sidebar.verticalScrollBar().maximum(), 0)
+            # The compact sidebar may fit; its stage list must still scroll through every stage.
+            self.assertGreater(editor.stage_list.verticalScrollBar().maximum(), 0)
             self.assertGreaterEqual(editor.stage_edges[1] - editor.stage_edges[0], ROW_HEIGHT * 12)
             # Drag/drop coordinates still refer to shared stages after expansion.
             from PySide6.QtCore import QPointF

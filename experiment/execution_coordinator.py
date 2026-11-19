@@ -263,30 +263,6 @@ class ExperimentCoordinator(QObject):
     
             self.handle_monitoring_error(error)
 
-    def record_omni_file_count(self, current_count):
-        """
-        Update the cumulative experiment count from the actual
-        number of OMNI result files detected.
-        """
-    
-        # Protect against a folder/count reset.
-        if current_count < self.previous_exp_count:
-            self.previous_exp_count = current_count
-            return 0
-    
-        new_experiments = (
-            current_count
-            - self.previous_exp_count
-        )
-    
-        if new_experiments > 0:
-            self.conducted_experiments_count += (
-                new_experiments
-            )
-    
-        self.previous_exp_count = current_count
-    
-        return new_experiments
 
     def begin_campaign(self, campaign, *, native_modeling=False):
         if self.controller is None:

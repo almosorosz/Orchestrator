@@ -29,3 +29,7 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(paths["DATA_DIR"], Path(local) / "CrystaLoop" / "data")
             self.assertEqual(paths["PUMP_CALIBRATION_DIR"], root / "data" / "pump_calibration")
             self.assertEqual(paths["ASSETS_DIR"], root / "assets")
+            self.assertEqual(paths["OMNI_HEADER_FILE"], root / "data" / "omni_export" / "headers_OMNI.csv")
+            self.assertEqual(paths["OMNI_DATA_DIR"], root / "data" / "omni")
+            self.assertTrue(paths["OMNI_HEADER_FILE"].is_file())
+            self.assertTrue((paths["OMNI_DATA_DIR"] / "expt.xml").is_file())

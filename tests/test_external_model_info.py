@@ -11,7 +11,7 @@ import pandas as pd
 from control_panel.control_panel import HARDWARE_TYPES, create_hardware
 from experiment_dashboard.experiment_dashboard import ExperimentWorker
 from gui.doe_assignment_dialog import DoeAssignmentDialog
-from gui.external_model_info import ExternalModelInfoDialog, experiment_template
+from gui.external_model_info import experiment_template
 from gui.plot_renderer import OriginalPlotRenderer
 from test_recipe_editor import APP, CONFIGS
 import test_recipe_editor as recipe_fixture

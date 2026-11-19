@@ -364,7 +364,9 @@ class PresetTests(unittest.TestCase):
                     self.assertEqual(window.experiment_service.exp_par.T_room, 22)
                     self.assertIsNone(window.create_experiments)
                     self.assertIsNone(window._assigned_doe_campaign)
-                    self.assertEqual(panel.control_output_path.text(), str(Path(root) / "manual"))
+                    # Settings owns the shared output root for every start path.
+                    self.assertEqual(window.settings_page.exp_path_input.text(), str(Path(root) / "loop"))
+                    self.assertEqual(panel.control_output_path.text(), str(Path(root) / "loop"))
                     self.assertEqual(panel.device_widgets["STR_MAIN"].config["target_limits"]["max"], 900)
                     self.assertFalse(any(device.is_connected for device in panel.hardware.values()))
                     self.assertFalse(window.execution.timer.isActive())

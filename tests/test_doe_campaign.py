@@ -222,7 +222,6 @@ class AssignmentGuiTests(unittest.TestCase):
 
     def test_control_panel_folder_round_trip_and_legacy_default(self):
         from MAIN_WINDOW import MainWindow
-        from app.paths import DATA_DIR
         window = MainWindow()
         panel = window.control_panel
         try:

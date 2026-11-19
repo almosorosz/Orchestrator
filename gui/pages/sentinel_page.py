@@ -14,7 +14,7 @@ from gui.sentinel_archive_ui import ArchiveController
 from gui.sentinel_theme import DASHBOARD_STYLESHEET
 
 try:
-    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineLoadingInfo
     from PySide6.QtWebEngineWidgets import QWebEngineView
 except ImportError:
     QWebEngineView = None
@@ -393,15 +393,25 @@ class SentinelPage(QWidget):
             self._profile = QWebEngineProfile(self)
             self._browser.setPage(SentinelWebPage(self._profile, self._browser, self))
             self._profile.downloadRequested.connect(self._download_requested)
-            self._browser.loadFinished.connect(self._dashboard_loaded)
+            self._browser.page().loadingChanged.connect(self._dashboard_loading_changed)
         self._page_loading = True
         self._show_message("Loading Sentinel…")
         self._browser.load(QUrl(self._base_url + "/"))
 
+    def _dashboard_loading_changed(self, info):
+        # Clearing a page navigates to about:blank asynchronously. Its late
+        # completion must not finish or cancel a newer dashboard request.
+        if not self._is_pi_page(info.url()):
+            return
+        if info.status() not in (QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus,
+                                 QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus):
+            return
+        self._dashboard_loaded(info.status() == QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus)
+
     def _dashboard_loaded(self, success):
         if success and self._online:
             self._apply_dashboard_theme()
-        if not self._page_loading or not self._online or self._browser.url().scheme() == "about":
+        if not self._page_loading or not self._online:
             return
         self._page_loading = False
         self._page_loaded = success

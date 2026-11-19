@@ -84,7 +84,7 @@ class AutostartTests(unittest.TestCase):
         stack.enter_context(patch.object(installer, "APP_DIR", PurePosixPath("/home/pi/Monitor files")))
         stack.enter_context(patch.object(installer.sys, "argv", ["install_autostart.py"] + (["--dry-run"] if dry_run else [])))
         stack.enter_context(patch.object(installer.sys, "platform", "linux"))
-        stack.enter_context(patch.dict("sys.modules", {"pwd": types.SimpleNamespace(getpwuid=lambda uid: types.SimpleNamespace(pw_name="pi"))}))
+        stack.enter_context(patch.dict("sys.modules", {"pwd": types.SimpleNamespace(getpwuid=lambda _uid: types.SimpleNamespace(pw_name="pi"))}))
         stack.enter_context(patch.object(installer.os, "geteuid", return_value=1000, create=True))
         stack.enter_context(patch.object(installer.Path, "is_dir", autospec=True,
                                         side_effect=lambda path: str(path).replace("\\", "/") == "/run/systemd/system"))

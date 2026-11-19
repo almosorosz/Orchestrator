@@ -1,7 +1,6 @@
 """Physical unit operations, device placement and the notebook-compatible MSI grammar."""
-from copy import deepcopy
 import re
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 PUMPS = {"masterflex", "ismatec"}
 READ_ONLY = {"opcua", "mettler"}

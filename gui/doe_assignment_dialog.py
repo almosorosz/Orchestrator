@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTable
                                QTableWidgetItem, QComboBox, QPushButton,
                                QCheckBox, QFileDialog, QMessageBox, QAbstractItemView)
 
-from experiment.doe_campaign import DoeCampaignService, ProfileAssignment, ROLES, DEFAULT_ASSIGNMENTS
+from experiment.doe_campaign import DoeCampaignService, ProfileAssignment, DEFAULT_ASSIGNMENTS
 from hardware_devices.capabilities import is_monitor_only
 
 

@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import traceback
 import json
-import sys
 
 from copy import deepcopy
 from pathlib import Path
@@ -13,12 +12,11 @@ from hardware_devices.simulated import SimulatedDevice
 from hardware_devices.limits import DEFAULT_LIMITS, target_limits
 from experiment.models import Campaign, ExperimentDefinition
 from experiment.run_stages import frame_metadata
-from asyncua.sync import Client
 
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QEvent
 from gui.flow_layout import FlowLayout
 
-from PySide6.QtWidgets import (QApplication,QFileDialog, 
+from PySide6.QtWidgets import (QFileDialog,
     QWidget, QGroupBox, QFormLayout, QLineEdit, QLabel, QComboBox,
     QSpinBox, QDoubleSpinBox, QPushButton, QHBoxLayout, QVBoxLayout,
     QGridLayout, QScrollArea, QDialog, QDialogButtonBox, QTableWidget,
@@ -343,8 +341,6 @@ DEFAULT_DEVICES = {
         "plot_index": 5
     }
 }
-
-DEVICES = deepcopy(DEFAULT_DEVICES)
 
 PROFILE_TYPES = {
     "masterflex",
@@ -1895,7 +1891,7 @@ class ControlPanel(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.system_topology = dialog.definition
             configs, _ = self.collect_current_configuration()
-            self.reservoirs.configure(dialog.definition, configs)
+            self.reservoirs.configure(dialog.definition, configs, confirm_amounts=True)
             self.reservoirs.save()
 
     def refresh_connectivity_fields(self):
@@ -3513,12 +3509,6 @@ class ControlPanel(QWidget):
             print(f"[NEW CONNECTION] {device_id}: {e}")
 
 
-    def get_all_values(self):
-
-        return {
-            device_id: widget.get_values()
-            for device_id, widget in self.device_widgets.items()
-        }
     def shutdown_hardware(self):
         """
         Disconnect all hardware safely.

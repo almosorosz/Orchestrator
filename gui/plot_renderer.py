@@ -61,7 +61,6 @@ class OriginalPlotRenderer(FigureCanvas):
 
         self.fig.patch.set_facecolor("#111827")
 
-        self.plot_counter = 0
         self.reset_canvas()
 
     def set_theme(self, dark=True):
@@ -385,113 +384,6 @@ class OriginalPlotRenderer(FigureCanvas):
         except (ValueError, TypeError):
             return np.nan
 
-    def _render_sample(self, data: dict):
-
-        t = self._safe_float(
-            data.get("timestamp")
-        )
-
-        if np.isnan(t):
-            return
-
-        self.t_data.append(t)
-
-        for device_id, config in self.device_configs.items():
-
-            device_type = config.get("type")
-
-            fields = self.TELEMETRY_FIELDS.get(
-                device_type,
-                []
-            )
-
-            status = data.get(
-                device_id,
-                {}
-            )
-
-            for field, _ in fields:
-
-                key = (
-                    device_id,
-                    field
-                )
-
-                if key not in self.history:
-                    continue
-
-                value = self._safe_float(
-                    status.get(field)
-                )
-
-                self.history[key].append(
-                    value
-                )
-
-                self.lines[key].set_data(
-                    self.t_data,
-                    self.history[key]
-                )
-
-        for device_id, config in self.device_configs.items():
-
-            device_type = config.get("type")
-        
-            fields = self.SECONDARY_FIELDS.get(
-                device_type,
-                []
-            )
-        
-            status = data.get(
-                device_id,
-                {}
-            )
-        
-            for field, _ in fields:
-        
-                key = (
-                    device_id,
-                    field
-                )
-        
-                if key not in self.history:
-                    continue
-        
-                value = self._safe_float(
-                    status.get(field)
-                )
-        
-                self.history[key].append(
-                    value
-                )
-        
-                self.secondary_lines[key].set_data(
-                    self.t_data,
-                    self.history[key]
-                )
-        
-        for ax in self.axes:
-        
-            ax.relim()
-            ax.autoscale_view()
-        
-        for plot_index, ax2 in self.secondary_axes.items():
-        
-            secondary_types = {
-                config.get("type")
-                for config in self.device_configs.values()
-                if int(config.get("plot_index", 1)) == plot_index
-            }
-        
-            ax2.relim()
-        
-            if "nidaq_valve" in secondary_types:
-                ax2.set_ylim(-0.05, 1.05)
-                ax2.set_yticks([0, 1])
-            else:
-                ax2.autoscale_view()
-        
-        self.draw_idle()
 
 
 

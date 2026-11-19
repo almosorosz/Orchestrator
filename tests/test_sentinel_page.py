@@ -293,6 +293,28 @@ class SentinelPageTests(unittest.TestCase):
         self.assertIn("/api/sensors", self.server.paths)
         self.assertIn("/", self.server.paths)
 
+    def test_late_blank_navigation_does_not_finish_a_dashboard_refresh(self):
+        from types import SimpleNamespace
+        from PySide6.QtWebEngineCore import QWebEngineLoadingInfo
+        self.connect()
+        self.wait_until(lambda: self.page._page_loaded)
+        self.page._page_loaded = False
+        self.page._page_loading = True
+        self.page._dashboard_loading_changed(SimpleNamespace(
+            url=lambda: QUrl("about:blank"),
+            status=lambda: QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus))
+        self.assertTrue(self.page._page_loading)
+        self.assertFalse(self.page._page_loaded)
+        self.page._dashboard_loading_changed(SimpleNamespace(
+            url=lambda: QUrl(self.url + "/"),
+            status=lambda: QWebEngineLoadingInfo.LoadStatus.LoadStoppedStatus))
+        self.assertTrue(self.page._page_loading)
+        self.page._dashboard_loading_changed(SimpleNamespace(
+            url=lambda: QUrl(self.url + "/"),
+            status=lambda: QWebEngineLoadingInfo.LoadStatus.LoadSucceededStatus))
+        self.assertTrue(self.page._page_loaded)
+        self.assertFalse(self.page._page_loading)
+
     def test_disconnect_hides_stale_page_then_automatically_recovers(self):
         self.connect()
         self.wait_until(lambda: self.page._page_loaded)
@@ -451,7 +473,7 @@ class SentinelPageTests(unittest.TestCase):
         try:
             import numpy as np
             from sentinel.pi.tc001_reader import decode_tc001_frame, render_thermal_jpeg
-            import cv2
+            __import__("cv2")  # Skip this integration check if the optional decoder cannot load.
         except ImportError:
             self.skipTest("Install Pi thermal dependencies to run the TC001 browser integration check")
         words = np.full((192, 256), round((25 + 273.15) * 64), dtype=np.uint16)

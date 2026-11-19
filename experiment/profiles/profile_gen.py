@@ -1,20 +1,14 @@
 
-import matplotlib.pyplot as plt
 import pandas            as pd
 import numpy             as np
 import matplotlib        as mpl
 import copy
 
-from scipy.interpolate   import interp1d
 
 from dataclasses         import dataclass, field
-from itertools           import accumulate, chain
-from dataclasses         import fields, dataclass
 
 import experiment.profiles.profile_gen_helper_funcs as profile_gen_helper_funcs
 
-from experiment.pump_calibration  import PumpRateConverter
-from experiment.doe.doe_sampler   import DoESampler
 
 
 mpl.rcParams.update({'font.size': 7,'axes.labelsize': 7,'axes.titlesize': 7,'xtick.labelsize': 7,'ytick.labelsize': 7,'legend.fontsize': 7,
@@ -614,7 +608,6 @@ class ProfileGenerator():
         T_prof_back_to_RT = self.exp_component_gen.occasional_temp_prof_gen(Eq.T[-1],exp_params.T_room,
                                                                             exp_params.T_room,0.01,exp_params.t_before_open_valve,
                                                                             exp_params,Eq)             
-        Eq_final          = self.exp_component_gen.eq_gen(T_prof_back_to_RT, exp_params, 0.5) 
         valve_open        = self.exp_component_gen.valve_prof_gen(exp_params)            
         cleaning_sol_add  = self.exp_component_gen.sol_add_gen(exp_params.clean_sol,exp_params.if_cleaning,exp_params)   
         T_boil_out_clean  = self.exp_component_gen.occasional_temp_prof_gen(cleaning_sol_add.T[-1],
@@ -622,7 +615,6 @@ class ProfileGenerator():
                                                                             exp_params.T_room,exp_params.t_boil.value,exp_params.t_h_boil.value,exp_params,
                                                                             cleaning_sol_add,exp_params.if_boil)             
         
-        valve_open_1      = self.exp_component_gen.valve_prof_gen(exp_params)            
         solvent_rinse     = self.exp_component_gen.sol_add_gen(exp_params.solvent,exp_params.if_solv_rinse,exp_params)    
         Eq_final_2        = self.exp_component_gen.eq_gen(solvent_rinse, exp_params, exp_params.wait_after_exp)     
         

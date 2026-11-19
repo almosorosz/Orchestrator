@@ -20,7 +20,7 @@ from imed_python.campaign_import import seed_distribution
 from imed_python.mixing import average_mixing
 from bo.physical import Stage, physical_profile, physical_controls, apply_controls, control_values
 from bo.profiles import Profile
-from test_recipe_editor import APP
+from test_recipe_editor import APP as APP  # Retain the shared QApplication for widget tests.
 
 
 def fixture(stock=15.):
@@ -204,6 +204,39 @@ class LinkedInputTests(unittest.TestCase):
             restored = ReservoirBook(state_file=filename)
             restored.configure(topology, configs)
             self.assertEqual(restored.remaining["feed"], 10.)
+
+    def test_invalid_saved_inventory_cannot_bypass_stock_checks(self):
+        topology, configs = fixture()
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            filename = Path(directory) / "stock.json"
+            for invalid in (float("nan"), float("inf"), -1., True, None, "unknown"):
+                with self.subTest(saved_amount=invalid):
+                    filename.write_text(json.dumps({"test-refill": invalid}), encoding="utf-8")
+                    book = ReservoirBook(state_file=filename)
+                    book.configure(topology, configs)
+                    experiment = ExperimentDefinition("Dose", (profile("P", [(0, 60), (10, 0)], True),))
+                    with self.assertRaisesRegex(ValueError, "saved reservoir inventory"):
+                        book.check(experiment)
+
+    def test_unreadable_inventory_keeps_app_open_but_requires_confirmed_amounts(self):
+        topology, configs = fixture()
+        experiment = ExperimentDefinition("Dose", (profile("P", [(0, 60), (10, 0)], True),))
+        with TemporaryDirectory(dir=Path.cwd()) as directory:
+            filename = Path(directory) / "stock.json"
+            for broken in ("{truncated", "[]"):
+                with self.subTest(saved_file=broken):
+                    filename.write_text(broken, encoding="utf-8")
+                    book = ReservoirBook(state_file=filename)
+                    book.configure(topology, configs)
+                    self.assertEqual(book.remaining["feed"], 0.)
+                    with self.assertRaisesRegex(ValueError, "saved reservoir inventory"):
+                        book.check(experiment)
+                    book.save()
+                    self.assertEqual(filename.read_text(encoding="utf-8"), broken)
+                    book.configure(topology, configs, confirm_amounts=True)
+                    self.assertEqual(book.check(experiment)["feed"], 10.)
+                    book.save()
+                    self.assertEqual(json.loads(filename.read_text())["test-refill"], 15.)
 
     def test_recorded_mean_rpm_and_pump_fallback_generate_scalar_inputs(self):
         from experiment.recording import atomic_json

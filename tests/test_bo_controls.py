@@ -15,7 +15,7 @@ import numpy as np
 
 from bo.physical import Stage, apply_controls, physical_profile
 from bo.physical_fit import choose_controls, fit_stage_controls, read_spec, trace_spec
-from bo.profiles import Profile, make_profile, selected_horizon
+from bo.profiles import make_profile, selected_horizon
 from bo.settings import empty_settings, validate_settings
 from bo.stage_editor import StageEditor
 

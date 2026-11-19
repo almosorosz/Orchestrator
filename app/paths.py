@@ -23,8 +23,9 @@ DATA_DIR = (Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CrystaLoop
 if os.environ.get("CRYSTALOOP_DATA_DIR"):
     DATA_DIR = Path(os.environ["CRYSTALOOP_DATA_DIR"]).expanduser().resolve()
 
-OMNI_DATA_DIR = DATA_DIR / "omni"
-OMNI_EXPORT_DIR = DATA_DIR / "omni_export"
+# Export templates are bundled resources, independent of the writable data root.
+OMNI_DATA_DIR = RESOURCE_DIR / "data" / "omni"
+OMNI_EXPORT_DIR = RESOURCE_DIR / "data" / "omni_export"
 PUMP_CALIBRATION_DIR = RESOURCE_DIR / "data" / "pump_calibration"
 
 LOGO_PATH = ASSETS_DIR / "LOGO.png"

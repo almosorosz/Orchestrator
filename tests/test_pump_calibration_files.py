@@ -4,7 +4,6 @@ from pathlib import Path
 import tempfile
 import unittest
 import numpy as np
-import pandas as pd
 from PySide6.QtWidgets import QApplication
 
 from experiment.pump_calibration_files import load_calibration, convert_flow, validate_calibration

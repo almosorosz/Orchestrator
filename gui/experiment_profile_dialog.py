@@ -2,20 +2,13 @@
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from PySide6.QtWidgets  import (QDialog, QWidget, QFormLayout, QTableWidget,
-                                QGroupBox,QVBoxLayout,QCheckBox,QSpinBox,
+                                QGroupBox,QCheckBox,QSpinBox,QHeaderView,
                                 QDoubleSpinBox,QLineEdit,QDialogButtonBox,
                                 QVBoxLayout,QScrollArea, QSizePolicy)
 
 
 from dataclasses import fields, is_dataclass
 
-from dataclasses import fields, is_dataclass, dataclass, field
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from PySide6.QtWidgets import (
-    QDialog, QWidget, QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView,
-    QGroupBox, QVBoxLayout, QCheckBox, QSpinBox, QDoubleSpinBox, QLineEdit,
-    QDialogButtonBox, QScrollArea, QSizePolicy
-)
 from PySide6.QtCore import Qt
 
 class DataclassEditor(QWidget):

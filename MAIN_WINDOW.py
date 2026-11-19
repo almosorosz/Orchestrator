@@ -14,27 +14,20 @@
 import sys            
 import json
 import os
-import time
 from copy import deepcopy
 from dataclasses import replace
 from uuid import uuid4
 
 from pathlib import Path
 
-from matplotlib.figure                    import Figure
-from datetime                             import datetime
 
 from PySide6.QtGui                        import QPainterPath, QRegion, QPixmap
 from app.branding import configure_application_icon, configure_windows_identity
 from PySide6.QtCore                       import QTimer, Qt, Slot, QRect
-from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabel, QScrollArea,QFormLayout,
-                                                   QPushButton,QLineEdit,QMessageBox,QProgressBar,QFrame,
-                                                   QWidget,QDialog,QVBoxLayout,QHBoxLayout,QStyle,QComboBox,
-                                                   QStackedWidget,QGroupBox,QTextEdit,QGridLayout)
+from PySide6.QtWidgets                    import (QApplication,QMainWindow,QLabel, QScrollArea,QPushButton,QMessageBox,QFrame,
+                                                   QWidget,QDialog,QVBoxLayout,QHBoxLayout,QStackedWidget)
 
-from gui.system_monitor_widget            import SystemMonitorWidget
-from gui.experiment_profile_dialog        import ExperimentProfileDialog, DOEPlotsDialog
-from gui.stylish_widgets                  import MetricCard, LogViewer, StatusBadge
+from gui.experiment_profile_dialog        import DOEPlotsDialog
 
 from gui.pages.dashboard_page             import DashboardPage
 from gui.pages.experiment_page            import ExperimentPage
@@ -54,14 +47,8 @@ from experiment.execution_coordinator     import (ExperimentCoordinator,
                                                  )
 from hardware_devices.hardware_manager    import HardwareBusyError
 
-from experiment.profiles.profile_gen      import (
-                                                 DefineProcessParameter,
-                                                 ProfileCreator,
-                                                 )
 
 from app.paths                            import (
-                                                 BASE_DIR,
-                                                 ASSETS_DIR,
                                                  DATA_DIR,
                                                  LOGO_PATH,
                                                  TEXT_PATH,
@@ -2314,14 +2301,6 @@ class MainWindow(QMainWindow):
     def refresh_reservoir_amounts(self):
         self.dashboard_page.set_reservoirs(self.control_panel.reservoirs.rows())
 
-    @Slot(dict)
-    def update_system_cards(self, data):
-        # Extract values directly from the dictionary emitted by the worker
-        cpu  = data["cpu" ]
-        ram  = data["ram" ]
-        down = data["down"]
-        up   = data["up"  ]
-        self.log_message(f"CPU:{cpu}%, RAM:{ram}%, Net Down:{down:.2f} MB/s")
 
     @Slot(dict)
     def on_omni_completed(self, result):

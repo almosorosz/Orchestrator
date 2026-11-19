@@ -6,7 +6,6 @@
 
 import pandas            as pd
 import numpy             as np
-import matplotlib.pyplot as plt
 from scipy.optimize      import minimize
 
 class PumpRateConverter:
@@ -50,7 +49,6 @@ class PumpRateConverter:
         MASS_start = self.selector(MASS,start)
         time_start = self.selector(time,start)
 
-        RPM_stop   = self.selector(RPM,stop)
         MASS_stop  = self.selector(MASS,stop)
         time_stop  = self.selector(time,stop)
 

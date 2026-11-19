@@ -11,7 +11,7 @@ from scipy.stats import qmc
 from .candidate_workers import candidate_map
 from .distribution import cell_volumes, d_values
 from .mesh_grid import grid_edges, is_log_grid
-from .pe_settings import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY
+from .pe_settings import PYFIT_DEFAULTS
 from .solver import pbm_backend_label, simulate
 from .size_data import TREND_SIZE_TERM
 from .uncertainty import DISCRETE_PARAMETERS, ParameterIntervals, intervals_from_covariance

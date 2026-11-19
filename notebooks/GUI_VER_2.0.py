@@ -6,12 +6,8 @@
 
 import os
 import tkinter as tk
-import subprocess
-import time
 
 from tkinter import ttk, messagebox
-from enum import Enum  
-from typing import Optional
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from Controller import Controller, Stage
@@ -408,7 +404,7 @@ if __name__ == "__main__":
 # In[5]:
 
 
-import os, shutil
+import shutil
 
 folder_1 = r'C:\Users\user\Desktop\OMNI\1. OMNI'
 folder_2 = r'C:\Users\user\Desktop\OMNI\2. IMED'
