@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import numpy as np
 import pandas as pd
 from experiment.models import Campaign, ExperimentDefinition
 from experiment.recording import RunRecorder, sync_sql, validate_settings
@@ -14,6 +15,61 @@ from hardware_devices.simulated import SimulatedDevice
 
 
 class RecordingTests(unittest.TestCase):
+    def test_numpy_json_conversion_keeps_strict_validation(self):
+        from experiment.recording import atomic_json
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+            target = Path(root) / "metadata.json"
+            atomic_json(target, {"valid": True})
+            for value, error in ((np.float32("nan"), ValueError), (np.float32("inf"), ValueError),
+                                 (object(), TypeError)):
+                with self.subTest(value=value), self.assertRaises(error):
+                    atomic_json(target, {"invalid": value})
+                self.assertEqual(json.loads(target.read_text()), {"valid": True})
+
+    def test_numpy_scalars_remain_typed_in_all_recording_outputs(self):
+        configs = {"pump": {"type": "masterflex"}}
+        definition = ExperimentDefinition.from_frame(pd.DataFrame({"time_s": [0.], "pump": [10.]}), configs)
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+            recorder = RunRecorder(root, Campaign("NumPy recording", (definition,)), configs, {"sql_enabled": True})
+            recorder.submit("run_start", "run1", {"planned": {"time_s": [0], "pump": [10]}})
+            recorder.submit("run_stage", "run1", {"modeling_period": np.bool_(True), "start_s": np.float64(0)})
+            recorder.submit("sample", "run1", {"elapsed_s": np.float32(0), "pump.connected": np.bool_(True),
+                                                "pump.speed_rpm": np.int64(10)})
+            recorder.submit("summary", "", {"status": "completed", "recording_complete": np.bool_(True)})
+            recorder.close()
+            events = [json.loads(line) for line in (recorder.folder / "events.jsonl").read_text().splitlines()]
+            stage = next(event["payload"] for event in events if event["kind"] == "run_stage")
+            self.assertIs(stage["modeling_period"], True)
+            frame = pd.read_csv(recorder.folder / "run1" / "execution.csv")
+            self.assertEqual(frame["pump.speed_rpm"].tolist(), [10])
+            with closing(sqlite3.connect(recorder.database)) as db:
+                payload = json.loads(db.execute("SELECT payload FROM events WHERE kind='sample'").fetchone()[0])
+            self.assertIs(payload["pump.connected"], True)
+            self.assertEqual(payload["pump.speed_rpm"], 10)
+            self.assertIs(json.loads((recorder.folder / "summary.json").read_text())["recording_complete"], True)
+
+    def test_numpy_modeling_window_stage_transition_completes(self):
+        from experiment.run_stages import RunStage
+        configs = {"T": {"type": "huber", "simulated": True}}
+        frame = pd.DataFrame({"time_s": [0., .02, .04], "T": [25., 24., 24.]})
+        frame.attrs["run_stages"] = [RunStage("prep", "Prepare", "Preparing for experiment", 0., .02),
+                                     RunStage("exp", "Crystallization", "Experiment", .02, .04)]
+        frame.attrs["model_window"] = (np.float64(.02), np.float64(.04))
+        definition = ExperimentDefinition.from_frame(frame, configs)
+        device = SimulatedDevice("Temperature", "huber")
+        device.connect()
+        try:
+            with tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
+                worker = ExperimentWorker({"T": device}, configs, [definition], speed=100, end_hold_s=0,
+                    recording={"enabled": True, "output_folder": root})
+                worker.start_experiment()
+                self.assertEqual(worker.outcome.value, "completed", worker.error_message)
+                events = [json.loads(line) for line in (worker.recorder.folder / "events.jsonl").read_text().splitlines()]
+                stages = [event["payload"]["modeling_period"] for event in events if event["kind"] == "run_stage"]
+                self.assertEqual(stages, [False, True])
+        finally:
+            device.disconnect()
+
     def test_manual_and_sampled_batches_use_ordered_unique_run_ids(self):
         from uuid import UUID
         configs = {"pump": {"type": "masterflex"}}

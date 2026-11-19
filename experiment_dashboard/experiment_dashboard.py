@@ -460,7 +460,7 @@ class ExperimentWorker(QObject):
                     if stage is not None and stage.id != current_stage_id:
                         current_stage_id = stage.id
                         window = definition.model_window
-                        modeled = window is not None and window[0] <= stage.start_s and stage.end_s <= window[1]
+                        modeled = bool(window is not None and window[0] <= stage.start_s and stage.end_s <= window[1])
                         logger.info("Run %s stage %s (%s), %g–%g s; %s", run.run_id, stage.name, stage.purpose,
                                     stage.start_s, stage.end_s, "modeling experiment period" if modeled else "support phase")
                         if self.recorder:

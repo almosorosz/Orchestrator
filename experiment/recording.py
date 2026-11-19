@@ -12,6 +12,7 @@ import time
 import sqlite3
 from threading import Event, Thread
 from uuid import uuid4
+import numpy as np
 
 logger = logging.getLogger("orchestrator.recording")
 _synchronizers = {}
@@ -37,9 +38,24 @@ def validate_settings(settings):
     return settings
 
 
+def _json_scalar(value):
+    """Preserve NumPy telemetry scalars as JSON booleans and numbers."""
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _encode_json(payload):
+    return json.dumps(payload, allow_nan=False, default=_json_scalar)
+
+
 def atomic_json(path, payload):
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, allow_nan=False), encoding="utf-8")
+    temporary.write_text(_encode_json(payload), encoding="utf-8")
     temporary.replace(path)
 
 
@@ -54,7 +70,7 @@ class CsvSpool:
 
     def append(self, row):
         with self.pending.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(row, allow_nan=False) + "\n")
+            stream.write(_encode_json(row) + "\n")
 
     def flush(self):
         if not self.pending.exists() or self.pending.stat().st_size <= self.state["cursor"]:
@@ -181,7 +197,7 @@ class RunRecorder:
                             input_closed = True
                         else:
                             event_id, utc, kind, run_id, payload = item
-                            encoded = json.dumps(payload, allow_nan=False)
+                            encoded = _encode_json(payload)
                             if kind == "campaign":
                                 atomic_json(self.folder / "definition.json", payload)
                             elif kind == "run_start":
@@ -201,7 +217,7 @@ class RunRecorder:
                             elif kind == "summary":
                                 summary = payload
                             with (self.folder / "events.jsonl").open("a", encoding="utf-8") as log:
-                                log.write(json.dumps({"id": event_id, "utc": utc, "kind": kind, "run_id": run_id, "payload": payload}) + "\n")
+                                log.write(_encode_json({"id": event_id, "utc": utc, "kind": kind, "run_id": run_id, "payload": payload}) + "\n")
                             if db is not None:
                                 db.execute("INSERT INTO events(id,utc,kind,run_id,payload) VALUES(?,?,?,?,?)", (event_id, utc, kind, run_id, encoded))
                                 db.commit()
