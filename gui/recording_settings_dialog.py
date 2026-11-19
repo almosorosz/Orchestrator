@@ -35,7 +35,7 @@ def database_counts(filename):
 
 
 class RecordingSettingsDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, output_folder=None):
         super().__init__(parent)
         self.setWindowTitle("Run recording and SQL")
         self.resize(820, 360)
@@ -44,13 +44,16 @@ class RecordingSettingsDialog(QDialog):
         form = QFormLayout()
         self.sql_enabled = QCheckBox("Also save to SQL (local database and optional remote sync)")
         self.sql_enabled.setChecked(current.get("sql_enabled", True))
-        self.folder = QLineEdit(current["output_folder"])
+        self.folder = QLineEdit(output_folder if output_folder is not None else current["output_folder"])
+        if output_folder is not None:
+            self.folder.setReadOnly(True)
+            self.folder.setToolTip("Shared by every start method. Change Experiment output folder in Settings.")
         self.sql = QLineEdit(current.get("remote_sql_url", ""))
         self.sql.setEchoMode(QLineEdit.EchoMode.Password)
         self.sql.setPlaceholderText("Optional: sqlite:///absolute/path/cloud.sqlite3 or postgresql+psycopg://…")
         form.addRow(QLabel("CSV recording is automatic for every experiment."))
         form.addRow(self.sql_enabled)
-        form.addRow("Run output folder", self.folder)
+        form.addRow("Experiment output folder (Settings)" if output_folder is not None else "Run output folder", self.folder)
         form.addRow("Remote SQL URL", self.sql)
         self.sql.setEnabled(self.sql_enabled.isChecked())
         self.sql_enabled.toggled.connect(self.sql.setEnabled)

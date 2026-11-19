@@ -1548,7 +1548,7 @@ class MainWindow(QMainWindow):
         configs, _ = panel.collect_current_configuration()
         dialog = DoeAssignmentDialog(self.create_experiments, configs, panel.hardware, self._doe_assignments, self,
                                      calibration_editor=panel.edit_pump_calibrations)
-        dialog.selected_monitor_ids = self._saved_doe_monitors
+        dialog.restore_monitor_selection(self._saved_doe_monitors)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         if accepted and dialog.campaign is not None:
             configs, _ = panel.collect_current_configuration()
@@ -1560,6 +1560,8 @@ class MainWindow(QMainWindow):
                         dict(experiment.imed_simulation["monitors"]))
             self._apply_doe_campaign(dialog.campaign, configs)
             self.log_message("DoE assignments applied. Use Start DoE independent from loop, or Dashboard Start for the EXP–MODEL loop.", "SUCCESS")
+            self.log_message("Read-only monitors included for recording and live plots: "
+                             + (", ".join(dialog.campaign.monitor_device_ids) or "none"), "INFO")
 
     def _apply_doe_campaign(self, campaign, configs):
         ids = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
@@ -1627,6 +1629,45 @@ class MainWindow(QMainWindow):
 
     def _connected_loop_devices(self):
         return {key for key, widget in self.control_panel.device_widgets.items() if widget.is_connected()}
+
+    def _experiment_output_folder(self, *, prepare=False):
+        from gui.recording_settings_dialog import load_recording_settings
+        field = self.settings_page.exp_path_input
+        configured = field.text().strip()
+        root = Path(configured or load_recording_settings()["output_folder"]).expanduser().resolve()
+        if prepare:
+            if not configured:
+                root.mkdir(parents=True, exist_ok=True)
+                field.setText(str(root))
+            if not root.is_dir():
+                raise ValueError(f"Experiment output folder does not exist: {root}. Choose it in Settings.")
+            self.log_message(f"Experiment recordings will be saved under: {root}", "INFO")
+        return str(root)
+
+    def _model_output_folder(self, *, prepare=False):
+        field = self.settings_page.MODEL_path_input
+        configured = field.text().strip()
+        root = Path(configured or DATA_DIR / "models").expanduser().resolve()
+        if prepare:
+            if not configured:
+                root.mkdir(parents=True, exist_ok=True)
+                field.setText(str(root))
+            if not root.is_dir():
+                raise ValueError(f"Model output folder does not exist: {root}. Choose it in Settings.")
+        return str(root)
+
+    def _external_model_info_context(self):
+        from gui.recording_settings_dialog import load_recording_settings
+        panel = self.control_panel
+        configs, _ = panel.collect_current_configuration()
+        campaign = self._assigned_doe_campaign
+        frames = ([experiment.to_frame() for experiment in campaign.experiments] if campaign is not None else panel.experiments)
+        controller = self.CONTROLLER
+        return {"active_model_folder": getattr(controller, "current_model_folder", ""),
+                "recording_root": load_recording_settings()["output_folder"],
+                "control_root": panel.control_output_path.text().strip(), "devices": configs,
+                "experiments": [frame.to_dict(orient="split") for frame in frames],
+                "system_topology": panel.current_system_topology(), "simulation_speed": panel.simulation_speed.value()}
 
     def _loop_setup_context(self, backend, setup, source):
         panel = self.control_panel
@@ -1738,7 +1779,7 @@ class MainWindow(QMainWindow):
             feedback = RecipeFeedback(
                 mode, campaign.campaign_id, campaign.experiments[0].experiment_id, recording, mapping, compiler.roles,
                 recipe_process, window, solubility, source or f"{mode.upper()} recipe", seed_template or {},
-                self.settings_page.MODEL_path_input.text().strip())
+                self._model_output_folder(prepare=True))
             dataset = imed.case if mode == "imed" else self.bo_page.state["runs"]
             snapshot = deepcopy(imed_case if mode == "imed" else self.bo_page.state)
             if self.experiment_page.dashboard is not None:
@@ -1845,7 +1886,13 @@ class MainWindow(QMainWindow):
 
         settings = self.settings_page
         experiments, models, _ = settings.get_environment_inputs()
-        problems = check_loop_folders(experiments, models)
+        problems = []
+        try:
+            experiments = self._experiment_output_folder(prepare=True)
+            models = self._model_output_folder(prepare=True)
+        except ValueError as error:
+            problems.append(str(error))
+        problems.extend(check_loop_folders(experiments, models))
         try:
             if self._pending_recipe_feedback is not None:
                 raise ValueError("Wait for the previous recipe's recordings to finish saving and importing.")
@@ -2008,7 +2055,7 @@ class MainWindow(QMainWindow):
 
     def configure_recording(self):
         from gui.recording_settings_dialog import RecordingSettingsDialog
-        dialog = RecordingSettingsDialog(self)
+        dialog = RecordingSettingsDialog(self, output_folder=self._experiment_output_folder())
         dialog.exec()
         from gui.recording_settings_dialog import load_recording_settings
         from experiment.recording import resume_sql
@@ -2019,7 +2066,7 @@ class MainWindow(QMainWindow):
         from gui.recording_settings_dialog import load_recording_settings
         settings = load_recording_settings()
         from app.logging_config import set_output_log_root
-        set_output_log_root(settings["output_folder"])
+        set_output_log_root(self._experiment_output_folder())
         self.plots_page.browser.set_roots([settings["output_folder"], self.control_panel.control_output_path.text(),
                                            self.settings_page.exp_path_input.text().strip()], recover=recover)
 
@@ -2044,8 +2091,9 @@ class MainWindow(QMainWindow):
                            "loop_backend": self.settings_page.loop_backend.currentData(),
                            "loop_setup": json.dumps(self.settings_page.loop_setup, allow_nan=False),
                            "sampling_strategy": self.settings_page.get_sampling_strategy()}
+            recording = {**load_recording_settings(), "output_folder": self._experiment_output_folder()}
             write_preset(filename, panel, self.experiment_service.exp_par, self._doe_assignments,
-                         environment, load_recording_settings(),
+                         environment, recording,
                          generated_doe=snapshot_doe(self.create_experiments),
                          monitor_device_ids=self._saved_doe_monitors or (),
                          modeling={**self.imed_page.panel.setup_settings(),
@@ -2368,8 +2416,17 @@ class MainWindow(QMainWindow):
         if source is None:
             return
         if self.settings_page.loop_backend.currentData() == "external":
-            if self.CONTROLLER is None and source == "manual":
-                self.define_command(default_count=len(panel.experiments))
+            try:
+                experiments = self._experiment_output_folder(prepare=True)
+                models = self._model_output_folder(prepare=True)
+            except ValueError as error:
+                self.log_message(str(error), "ERROR")
+                return
+            if (self.CONTROLLER is None or self.CONTROLLER.omni_folder != experiments
+                    or self.CONTROLLER.model_folder != models):
+                count = len(panel.experiments) if source == "manual" else len(self.create_experiments.exp_storage.data)
+                if not self.define_command(default_count=count):
+                    return
             if self.CONTROLLER is None:
                 self.log_message('Define the Experiment and MODEL folders first.', 'WARNING')
                 return
@@ -2505,7 +2562,13 @@ class MainWindow(QMainWindow):
 
         self.settings_page = SettingsPage(parent=self, loop_devices=lambda: {
             key: widget.config for key, widget in self.control_panel.device_widgets.items()
-        }, loop_preview=self._loop_setup_context)
+        }, loop_preview=self._loop_setup_context, external_model_context=self._external_model_info_context)
+        self.control_panel.output_folder_provider = self._experiment_output_folder
+        self.control_panel.output_folder_setter = self.settings_page.exp_path_input.setText
+        self.control_panel.control_output_path.setReadOnly(True)
+        self.control_panel.control_output_path.setToolTip("General experiment output folder from Settings. Browse changes the same location.")
+        self.settings_page.exp_path_input.textChanged.connect(lambda _: self.control_panel.sync_output_folder())
+        self.control_panel.sync_output_folder()
         self.imed_page = IMEDPage(parent=self)
         self.imed_page.panel.recipe_launcher = self._execute_imed_recipe
         self.bo_page = BOWindow(self, imed_case=self.imed_page.panel.checkpoint_case,

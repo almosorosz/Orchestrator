@@ -1551,6 +1551,8 @@ class ControlPanel(QWidget):
 
         self.hardware_manager = HardwareManager(self.hardware)
         self.setup_preset_loader = None
+        self.output_folder_provider = None
+        self.output_folder_setter = None
 
         self._connection_token = None
         self._experiment_token = None
@@ -1701,7 +1703,7 @@ class ControlPanel(QWidget):
         top_section.addLayout(top_row)
         top_section.addLayout(bottom_row)
         path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Control Panel experiment folder"))
+        path_row.addWidget(QLabel("Experiment output folder"))
         self.control_output_path = QLineEdit(str(DATA_DIR / "control_panel_runs"))
         path_row.addWidget(self.control_output_path, 1)
         browse = QPushButton("Browse…")
@@ -1907,7 +1909,14 @@ class ControlPanel(QWidget):
     def choose_control_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Control Panel experiment folder", self.control_output_path.text())
         if folder:
-            self.control_output_path.setText(folder)
+            if self.output_folder_setter is not None:
+                self.output_folder_setter(folder)
+            else:
+                self.control_output_path.setText(folder)
+
+    def sync_output_folder(self):
+        if self.output_folder_provider is not None:
+            self.control_output_path.setText(self.output_folder_provider())
 
     def experiment_window_attached(self):
         return getattr(self, "experiment_window", None) is not None
@@ -2008,6 +2017,7 @@ class ControlPanel(QWidget):
         # ----------------------------------------------------------
     
         self.control_output_path.setText(str(recording_folder or DATA_DIR / "control_panel_runs"))
+        self.sync_output_folder()
         self.system_topology = definition
         self.devices.clear()
         self.devices.update(
@@ -2634,6 +2644,10 @@ class ControlPanel(QWidget):
                 dashboard.recording_settings["output_folder"] = output
             if recording_override:
                 dashboard.recording_settings.update(recording_override)
+            if self.output_folder_provider is not None:
+                output = self.output_folder_provider(prepare=True)
+                dashboard.recording_settings["output_folder"] = output
+                self.control_output_path.setText(output)
             dashboard.recording_settings["enabled"] = True
             from app.logging_config import set_output_log_root
             set_output_log_root(dashboard.recording_settings["output_folder"])

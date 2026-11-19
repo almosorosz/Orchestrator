@@ -336,19 +336,20 @@ never overwrite earlier export folders. These are **planned profiles**.
 ## Continuous recording and SQL (Release C)
 
 Open **Settings → Recording / SQL settings**. Local recording is
-automatic for every experiment under `data/runs`; choose a different output folder if needed.
+automatic for every experiment. Choose the shared **Experiment output folder**
+in Settings; an unset location uses the existing recording default (`data/runs`
+on a new installation).
 SQL is independently optional: uncheck **Also save to SQL** for CSV/JSON-only
 recording. New installations default to SQL off. Enabling SQL creates the local
 database; leaving Remote SQL URL blank keeps it local-only. Turning SQL off stops
 future uploads but does not delete existing databases.
 Settings persist in `data/runtime/recording.json` and affect subsequent campaigns.
 Both manual experiments and assigned DoE campaigns use this recording pipeline.
-Manual experiments use the separate **Control Panel experiment folder** (default
-`data/control_panel_runs`), saved with the Control Panel configuration JSON.
-Older configurations without a folder use this separate default. Changing the
-Settings recording folder does not change the Control Panel folder. Independent
-Settings DoE runs use the recording folder in Settings; loop campaigns use the
-Experiment path in LOOP. SQL remains optional for all three execution routes.
+Manual experiments, independent DoE campaigns, Dashboard LOOP and BO/IMED recipe
+execution use the same general Experiment output folder. The Control Panel field
+mirrors that location; its Browse button updates the Settings field. Older saved
+Control Panel or SQL recording folders do not redirect current runs. SQL remains
+optional for every execution route.
 
 Each campaign execution gets a new folder containing a device/profile/settings
 snapshot (`definition.json`), continuous `events.jsonl`, a final `summary.json`, and
@@ -507,6 +508,16 @@ Read-only probes/scales have no target range. Valve targets remain binary.
 
 ## Dashboard/sidebar EXP → MODEL workflow
 
+**Settings → Experiment output folder** is the general recording root for Control
+Panel Start, independent DoE execution, Dashboard LOOP and BO/IMED Execute recipe.
+The Control Panel folder mirrors this setting; its Browse button changes the same
+location. Recording / SQL settings displays this shared folder read-only. Older
+per-mode recording paths do not override it. Runs receive unique campaign folders.
+**Model output folder** holds LOOP modeling stages and executed-recipe dataset
+snapshots. Runs without modeling do not create a modeling stage. If general paths
+have not been set, the app uses the existing recording default and a data/models
+default for modeling. Each start logs the actual recording root.
+
 Define existing Experiment and MODEL folders in Settings and generate a sampled
 DoE, then preview and **Apply assignments** in Settings. **Dashboard Start** and
 **sidebar Start** launch that assigned campaign in the loop. Its records are saved beneath the
@@ -533,6 +544,24 @@ dashboard waits for an externally produced `MODEL*.csv`, `.mat`, `.json`, `.txt`
 or extensionless completion marker. After it stabilizes, end the session and use
 Dashboard/sidebar Start to launch the next batch. Regeneration requires applying
 assignments again.
+
+Click the **information icon beside Dashboard LOOP modeling** for the external
+model guide. It shows the active MODEL iteration folder, accepted completion-file
+names and the loadable next-experiment format. **Save next-experiment template…**
+exports the assigned DoE or current Control Panel batch as a Control Panel JSON
+configuration. External programs can edit its experiments in device command units
+and save next_experiments.json beside campaign_input.json. Publish MODEL.json last
+to mark calculations complete; in this version, load the next-experiment file
+through Control Panel → Load Configuration and start it explicitly. The guide also
+describes the proposed watched-folder adapter for fully automatic external recipes;
+that adapter is not enabled yet.
+
+The DoE assignment preview explicitly lists read-only monitors included for
+recording/live plots and any disconnected probes it excludes. A saved empty
+monitor list restores the checkbox as off; enabling it selects all connected
+read-only monitors. This prevents an invisible empty filter from excluding FBRM
+and D10/D50/D90 channels while the checkbox appears enabled. Those channels are
+measurements and do not appear in pre-run actuator-profile plots.
 
 ### Experiment Definition timeline
 

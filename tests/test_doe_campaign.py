@@ -229,7 +229,7 @@ class AssignmentGuiTests(unittest.TestCase):
             with tempfile.TemporaryDirectory(dir=Path.cwd()) as parent:
                 filename = str(Path(parent) / "control.json")
                 folder = str(Path(parent) / "manual")
-                panel.control_output_path.setText(folder)
+                window.settings_page.exp_path_input.setText(folder)
                 with patch("control_panel.control_panel.QFileDialog.getSaveFileName", return_value=(filename, "")), patch("control_panel.control_panel.QMessageBox.information"):
                     panel.save_configuration()
                 self.assertEqual(json.loads(Path(filename).read_text())["recording_folder"], folder)
@@ -239,7 +239,7 @@ class AssignmentGuiTests(unittest.TestCase):
                 self.assertEqual(panel.control_output_path.text(), folder)
                 configs, _ = panel.collect_current_configuration()
                 panel.apply_loaded_configuration(configs, {}, [])
-                self.assertEqual(panel.control_output_path.text(), str(DATA_DIR / "control_panel_runs"))
+                self.assertEqual(panel.control_output_path.text(), folder)
         finally:
             window.close()
             APP.processEvents()
@@ -283,6 +283,9 @@ class AssignmentGuiTests(unittest.TestCase):
         window = MainWindow()
         panel = window.control_panel
         try:
+            directory = tempfile.TemporaryDirectory(dir=Path.cwd())
+            self.addCleanup(directory.cleanup)
+            window.settings_page.exp_path_input.setText(directory.name)
             panel.load_simulated_demo()
             configs, _ = panel.collect_current_configuration()
             # All unrelated devices deliberately remain disconnected.
@@ -298,8 +301,8 @@ class AssignmentGuiTests(unittest.TestCase):
             panel.simulation_speed.setValue(100)
             panel.start_campaign(campaign)
             dashboard = window.experiment_page.dashboard
-            self.assertEqual(dashboard.recording_settings["output_folder"], str(Path.cwd() / "data" / "runs"))
-            self.assertNotEqual(dashboard.recording_settings["output_folder"], panel.control_output_path.text())
+            self.assertEqual(dashboard.recording_settings["output_folder"], directory.name)
+            self.assertEqual(dashboard.recording_settings["output_folder"], panel.control_output_path.text())
             self.assertEqual(set(dashboard.devices), {"TEM_MAIN"})
             self.wait_for(lambda: hasattr(dashboard, "last_result") and dashboard.thread is None)
             self.assertEqual(dashboard.last_result["status"], "completed")

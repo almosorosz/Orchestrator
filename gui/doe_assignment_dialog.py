@@ -76,9 +76,11 @@ class DoeAssignmentDialog(QDialog):
         self.selected_monitor_ids = None
         self.include_monitors = QCheckBox("Include connected read-only monitors")
         self.include_monitors.setChecked(True)
-        self.include_monitors.toggled.connect(self.invalidate)
-        self.include_monitors.clicked.connect(lambda: setattr(self, "selected_monitor_ids", None))
+        self.include_monitors.toggled.connect(self.change_monitor_selection)
         layout.addWidget(self.include_monitors)
+        self.monitor_summary = QLabel()
+        self.monitor_summary.setWordWrap(True)
+        layout.addWidget(self.monitor_summary)
         self.summary = QLabel("Preview required before execution.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
@@ -112,11 +114,46 @@ class DoeAssignmentDialog(QDialog):
 
     def invalidate(self, *args):
         self.campaign = None
+        if hasattr(self, "monitor_summary"):
+            self.update_monitor_summary()
         if hasattr(self, "start_button"):
             self.start_button.setEnabled(False)
             self.export_button.setEnabled(False)
             self.summary.setText("Assignments changed. Preview and validate before execution.")
             self.preview_table.setRowCount(0)
+
+    def restore_monitor_selection(self, ids, *, include=None):
+        self.selected_monitor_ids = ids
+        enabled = ids is None or bool(ids)
+        if include is not None:
+            enabled = bool(include) and enabled
+        blocked = self.include_monitors.blockSignals(True)
+        self.include_monitors.setChecked(enabled)
+        self.include_monitors.blockSignals(blocked)
+        self.invalidate()
+
+    def change_monitor_selection(self, checked):
+        if checked:
+            self.selected_monitor_ids = None
+        self.invalidate()
+
+    def monitor_ids(self):
+        return tuple(key for key, config in self.configs.items()
+                     if self.include_monitors.isChecked() and is_monitor_only(config)
+                     and (self.selected_monitor_ids is None or key in self.selected_monitor_ids)
+                     and getattr(self.hardware.get(key), "is_connected", False))
+
+    def update_monitor_summary(self):
+        included = self.monitor_ids()
+        disconnected = [key for key, config in self.configs.items() if is_monitor_only(config)
+                        and (self.selected_monitor_ids is None or key in self.selected_monitor_ids)
+                        and not getattr(self.hardware.get(key), "is_connected", False)]
+        text = "Read-only monitors included for recording and live plots: " + (", ".join(included) if included else "none") + "."
+        if self.include_monitors.isChecked() and disconnected:
+            text += " Disconnected (excluded): " + ", ".join(disconnected) + ". Connect them and preview again."
+        if not self.include_monitors.isChecked():
+            text += " Enable the checkbox to include connected measurement devices."
+        self.monitor_summary.setText(text)
 
     def update_conversion(self, role):
         combo, row = self.rows[role]
@@ -155,10 +192,8 @@ class DoeAssignmentDialog(QDialog):
 
     def preview(self):
         try:
-            monitors = tuple(key for key, config in self.configs.items()
-                             if self.include_monitors.isChecked() and is_monitor_only(config)
-                             and (self.selected_monitor_ids is None or key in self.selected_monitor_ids)
-                             and getattr(self.hardware.get(key), "is_connected", False))
+            monitors = self.monitor_ids()
+            self.update_monitor_summary()
             campaign = self.service.compile(self.assignments(), self.configs, monitors,
                                             imed_monitors=self.imed_monitor_assignments())
             self.preview_table.setRowCount(0)
@@ -242,9 +277,7 @@ class DoeAssignmentDialog(QDialog):
                         not isinstance(key, str) or not is_monitor_only(self.configs.get(key, {}))
                         for key in saved_ids))):
                 raise ValueError("The assignment file contains invalid monitor settings.")
-            self.selected_monitor_ids = saved_ids
-            self.include_monitors.setChecked(include)
-            self.invalidate()
+            self.restore_monitor_selection(saved_ids, include=include)
             for combo, _ in self.rows.values():
                 combo.setCurrentIndex(0)
             for item in loaded:

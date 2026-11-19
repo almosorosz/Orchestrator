@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QDialog,
     QMessageBox,
+    QHBoxLayout,
+    QStyle,
 )
 
 from PySide6.QtCore import Qt, Signal
@@ -35,13 +37,15 @@ class SettingsPage(QWidget):
     save_preset_requested = Signal()
     load_preset_requested = Signal()
 
-    def __init__(self, parent=None, *, loop_devices=None, loop_preview=None):
+    def __init__(self, parent=None, *, loop_devices=None, loop_preview=None, external_model_context=None):
         super().__init__(parent)
         from experiment.adaptive_loop import default_setup
 
         self.loop_setup = default_setup()
         self.loop_devices = loop_devices
         self.loop_preview = loop_preview
+        self.external_model_context = external_model_context
+        self.external_model_dialog = None
         self._build_ui()
 
     def _build_ui(self):
@@ -51,7 +55,7 @@ class SettingsPage(QWidget):
         # ======================================================
 
         config_box = QGroupBox(
-            "🌎 Environmental variables' settings"
+            "Experiment and modeling setup"
         )
 
         config_layout = QGridLayout()
@@ -74,29 +78,31 @@ class SettingsPage(QWidget):
 
         self.exp_path_input = QLineEdit()
         self.exp_path_input.setPlaceholderText(
-            r"C:\Desktop\Current_Experiment"
+            "General experiment recording folder"
         )
 
         self.MODEL_path_input = QLineEdit()
         self.MODEL_path_input.setPlaceholderText(
-            r"C:\Desktop\Model_Outputs"
+            "General model output folder"
         )
 
         self.exp_number_input = QLineEdit()
         self.exp_number_input.setPlaceholderText(
             "5"
         )
+        self.exp_number_input.setToolTip("Initial batch size for non-full-factorial DoE generation. Follow-up experiments are configured in Automatic loop setup.")
         self.pbm_size_samples = QComboBox()
         for label, value in SIZE_SAMPLE_OPTIONS:
             self.pbm_size_samples.addItem(label, value)
         self.pbm_size_samples.setToolTip("Choose which recorded size measurements the LOOP MODEL stage uses for PBM fitting.")
 
         self.define_button = QPushButton(
-            "Define Variables"
+            "Apply output locations"
         )
         self.define_button.setObjectName(
             "define_button"
         )
+        self.define_button.setToolTip("Apply the general output locations and initial experiment count.")
 
         self.define_button.clicked.connect(
             lambda checked=False:
@@ -112,7 +118,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("Experiment path in LOOP:"),
+            QLabel("Experiment output folder:"),
             2,
             0,
         )
@@ -124,7 +130,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("Model path in LOOP:"),
+            QLabel("Model output folder:"),
             3,
             0,
         )
@@ -136,7 +142,7 @@ class SettingsPage(QWidget):
         )
 
         config_layout.addWidget(
-            QLabel("Experiments (non-full-factorial):"),
+            QLabel("Initial DoE experiments:"),
             4,
             0,
         )
@@ -253,7 +259,19 @@ class SettingsPage(QWidget):
         self.loop_setup_button.clicked.connect(self.edit_loop_setup)
         self.loop_backend.currentIndexChanged.connect(self.update_loop_setup_button)
         config_layout.addWidget(QLabel("Dashboard LOOP modeling"), 13, 0)
-        config_layout.addWidget(self.loop_backend, 13, 1)
+        backend_row = QWidget()
+        backend_layout = QHBoxLayout(backend_row)
+        backend_layout.setContentsMargins(0, 0, 0, 0)
+        backend_layout.addWidget(self.loop_backend, 1)
+        self.external_model_info_button = QPushButton()
+        self.external_model_info_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+        self.external_model_info_button.setFixedSize(32, 32)
+        self.external_model_info_button.setStyleSheet("padding: 3px;")
+        self.external_model_info_button.setAccessibleName("External model connection information")
+        self.external_model_info_button.setToolTip("How to connect your own model: folders, completion files and new experiments")
+        self.external_model_info_button.clicked.connect(self.show_external_model_info)
+        backend_layout.addWidget(self.external_model_info_button)
+        config_layout.addWidget(backend_row, 13, 1)
         config_layout.addWidget(self.loop_setup_button, 14, 0, 1, 2)
 
         doe_controls.setLayout(form)
@@ -612,6 +630,22 @@ class SettingsPage(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.loop_setup = dialog.setup
         dialog.deleteLater()
+
+    def external_model_info_context(self):
+        context = self.external_model_context() if self.external_model_context is not None else {}
+        return {**context, "experiment_root": self.exp_path_input.text().strip(),
+                "model_root": self.MODEL_path_input.text().strip()}
+
+    def show_external_model_info(self):
+        from gui.external_model_info import ExternalModelInfoDialog
+        if self.external_model_dialog is None:
+            self.external_model_dialog = ExternalModelInfoDialog(self.external_model_info_context, self)
+        else:
+            self.external_model_dialog.refresh()
+        self.external_model_dialog.show()
+        self.external_model_dialog.raise_()
+        self.external_model_dialog.activateWindow()
+        return self.external_model_dialog
 
     def update_loop_setup_button(self):
         self.loop_setup_button.setEnabled(self.loop_backend.isEnabled() and self.loop_backend.currentData() != "external")
