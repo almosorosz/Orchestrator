@@ -647,6 +647,8 @@ class ExperimentDefinitionDialog(QDialog):
         layout.addWidget(tabs, 1)
         self.error = QLabel()
         self.error.setWordWrap(True)
+        self.error.setTextFormat(Qt.TextFormat.PlainText)
+        self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.error.setStyleSheet("color: #ef4444")
         layout.addWidget(self.error)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)

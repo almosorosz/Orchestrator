@@ -42,6 +42,26 @@ def sampled_parameter(item):
     return item["mode"] == "DoE" and item["min"] < item["max"] and not item.get("equal_previous", False)
 
 
+def parameter_context(recipe, path):
+    """Resolve an internal parameter key to the names and units shown in the editor."""
+    lanes = {lane["id"]: lane for lane in recipe["lanes"]}
+    sections = [(stage["id"], f'Stage "{stage["name"]}"', stage["actions"]) for stage in recipe["stages"]]
+    sections.extend((f'profile:{lane["id"]}:{section["id"]}', f'Section "{section["name"]}"', {lane["id"]: section})
+                    for lane in recipe["lanes"] for section in lane.get("profile", []))
+    for prefix, location, actions in sections:
+        if path == f"{prefix}.duration":
+            unit = recipe.get("time_unit", "min")
+            return f"{location} → Duration", unit, TIME_UNITS[unit], False
+        for lane_id, action in actions.items():
+            for key, title in (("start", "Start"), ("end", "End")):
+                if path == f"{prefix}.{lane_id}.{key}":
+                    lane = lanes[lane_id]
+                    unit = "g" if action["kind"] == "Dose" else ROLES[lane["role"]].unit
+                    field = "Mass addition" if action["kind"] == "Dose" else title + (" temperature" if lane["role"] == "T" else " target")
+                    return f'{location} → {lane["name"]} → {field}', unit, 1., lane["role"] == "T"
+    return "Experiment parameter", "", 1., False
+
+
 def validate_recipe(recipe):
     if not isinstance(recipe, dict) or recipe.get("version") != 1:
         raise ValueError("Choose an Experiment Definition recipe.")
@@ -96,11 +116,22 @@ def validate_recipe(recipe):
                 if any(lane_id in following["actions"] for following in stages[index + 1:stop + 1]):
                     raise ValueError("Overlapping actions on the same device line. Shorten the span or remove the later action.")
     for name, item in recipe_parameters(recipe):
-        if item["mode"] not in {"Fixed", "DoE", "Alternate"} or any(
-            isinstance(item[key], bool) or not isinstance(item[key], (int, float)) or not isfinite(item[key])
-            for key in ("value", "min", "max")
-        ) or item["min"] > item["max"]:
-            raise ValueError(f"Check the value and bounds for {name}.")
+        invalid_numbers = [key for key in ("value", "min", "max") if isinstance(item[key], bool)
+                           or not isinstance(item[key], (int, float)) or not isfinite(item[key])]
+        if item["mode"] not in {"Fixed", "DoE", "Alternate"} or invalid_numbers or item["min"] > item["max"]:
+            context, unit, scale, temperature = parameter_context(recipe, name)
+            if item["mode"] not in {"Fixed", "DoE", "Alternate"}:
+                reason = f'Unknown Across experiments option {item["mode"]!r}. Choose Fixed, DoE or Alternate.'
+            elif invalid_numbers:
+                key = invalid_numbers[0]
+                field = {"value": "Value", "min": "Minimum", "max": "Maximum"}[key]
+                reason = f"{field} is {item[key]!r}; enter a finite number."
+            else:
+                reason = (f'Minimum {item["min"] / scale:g} {unit} is greater than Maximum {item["max"] / scale:g} {unit}. '
+                          "Set Minimum less than or equal to Maximum.")
+                if temperature:
+                    reason += " For a cooling ramp, use Start and End for the temperature decrease; Minimum/Maximum define the DoE range."
+            raise ValueError(f"{context}:\n{reason}")
         low = item["value"] if item["mode"] == "Fixed" else item["min"]
         high = item["value"] if item["mode"] == "Fixed" else item["max"]
         if name.endswith(".duration") and low <= 0:
