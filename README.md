@@ -569,6 +569,67 @@ retain the first starting run's preparation and cleanup around the proposed mode
 period. Supply process masses, concentration and seed information for the start of that
 period, after any charging/dissolution/seeding outside it.
 
+### Shared physical inputs, average mixing and inventories
+
+The Control Panel's physical topology is shared with loop assignments. In
+**Unit operations / modules**, label source containers as Solution, Solvent,
+Antisolvent, Seed suspension or Cleaning solvent, and identify the model reactor.
+Device cards also provide an **Experiment role** and **Measured quantity**.
+Automatic loop assignment follows these MSI connections and positive pump
+directions, reuses matching applied DoE assignments and resolves unique probes.
+Choose an explicit device/channel when more than one candidate remains. The
+**Used values** tab shows the assignments actually selected and their origin.
+
+**Starting experiment overrides** change a named experiment's model inputs. They
+do not operate pumps. Defined preparation charges can instead supply starting
+liquid masses automatically; explicit named overrides take precedence. Pump
+calibrations convert commands to grams. Seed-dose generation can reuse the
+calibration already loaded on the seed pump, using only the selected operating
+RPM. Manual g/s calibration remains available. Unseeded IMED inputs accept
+**0 g seed and initial D10/D50/D90 = 0/0/0**, with no initial seed population.
+
+In **Automatic loop setup → IMED design**, optional average mixing uses
+`epsilon = Np * (average_RPM / 60)^3 * diameter_m^5 / average_volume_m3`.
+RPM and liquid volume are averaged over the selected modeling period, then one
+constant is placed in each experiment's existing `PowerRatio` input. No stirring
+or volume profile is introduced into the PBM equations. When unchecked, this
+loop input is 1. Power number and impeller diameter are campaign constants.
+Fixed volume is entered in mL. Charged-volume mode uses starting liquid amounts
+plus additions, preferring AS scale data; calibrated pump delivery supplies the
+fallback. Component densities give an additive-volume estimate. The power-number
+relation and specific-power convention are described in the
+[impeller power reference](https://proquipinc.com/wp-content/uploads/2020/07/Impeller-Design-and-Performance-Considerations-for-Industrial-Tank-Agitators.pdf)
+and [stirred-tank mixing study](https://www.sciencedirect.com/science/article/abs/pii/S0263876213002682).
+
+The existing PBMs apply this power input to **secondary nucleation and
+agglomeration**. The initial campaign records which stirring/volume inputs varied.
+For varying power, existing non-degenerate candidate power-exponent bounds can be
+enabled for estimation; disabled mechanisms and fixed scientific bounds are
+retained. Use consistent mixing inputs across fitted data and independently vary
+RPM and volume to distinguish their effects. SA exposes initial-volume variation
+when present in the initial campaign and recomputes scalar mixing for its draws.
+BO exposes scalar initial charge volume and editable **Stirring** stages. Volume
+recommendations require executable preparation charging profiles; AS-dependent
+volume changes are controlled through AS rate/time. Importing a recorded campaign
+defaults to each run's own experiment period. Saved command profiles retain
+stirring through final holds and remain available when a case is moved.
+
+Use **Control Panel → Reservoir amounts…**, also accessible in Settings, to enter
+available material in grams. Blank amounts are untracked. Enter source density
+for volumetric pumps without a mass calibration. The dashboard shows remaining
+defined reservoirs and updates during additions. Stock is retained across runs and
+reloading the same refill; change the amount after refilling to start a new stock
+record. Each next experiment is checked before its commands are submitted. An
+insufficient reservoir blocks that experiment and identifies available/required
+grams. Source scales correct calculated draw where configured; otherwise delivery
+is calculated from the pump calibration and commands.
+
+The experiment window and `execution.csv` show **system_mass_g**: starting reactor
+contents plus deliveries. Opening a drain valve is treated as complete discharge;
+later additions accumulate again. Enter **Starting reactor mass** for material
+already present before a manual run. Undefined connections/calibrations leave an
+unavailable mass indication rather than inventing delivered grams.
+
 The DoE assignment preview explicitly lists read-only monitors included for
 recording/live plots and any disconnected probes it excludes. A saved empty
 monitor list restores the checkbox as off; enabling it selects all connected

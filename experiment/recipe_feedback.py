@@ -30,7 +30,8 @@ class RecipeFeedback:
         experiments, processes, runs = read_completed_recordings(
             folder, (self.experiment_id,), self.recording, self.mapping,
             {self.experiment_id: self.process}, {self.experiment_id: self.window},
-            require_initial_concentration=self.mode == "imed")
+            require_initial_concentration=self.mode == "imed", roles=self.roles,
+            mixing=self.process.get("MixingSettings") if self.mode == "imed" else None)
         for experiment in experiments:
             experiment.update(RecipeSource=self.source)
             if self.process["SeedMass"]:

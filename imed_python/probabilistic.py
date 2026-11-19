@@ -22,6 +22,7 @@ CONDITIONS = (
     ("concentration_factor", "Initial concentration multiplier", .95, 1.05),
     ("duration_factor", "Profile duration multiplier", .9, 1.1),
     ("stirring_factor", "Stirring speed multiplier", .9, 1.1),
+    ("volume_factor", "Initial liquid volume multiplier", .9, 1.1),
 )
 ERROR_LEVELS = (95., 99.)
 
@@ -224,7 +225,19 @@ def _trial(candidate, *, baseline, indices, condition_keys, experiment, process,
                else np.asarray(experiment["ConcentrationData"]).reshape(2, -1)[1, 0])
     experiment["InitialConcentration"] = initial * conditions.get("concentration_factor", 1.)
     try:
-        if "stirring_factor" in conditions:
+        if "volume_factor" in conditions:
+            factor = conditions["volume_factor"]
+            process["SolvMass"] *= factor
+            process["AntiSolvMass"] *= factor
+        if "MixingSettings" in process:
+            from .mixing import average_mixing
+            mixing = dict(process["MixingSettings"])
+            if mixing["volume_mode"] == "fixed":
+                mixing["volume_ml"] *= conditions.get("volume_factor", 1.)
+            experiment.pop("AddedAntisolventData", None)
+            process = average_mixing(experiment, process, mixing,
+                                    mean_rpm=process.get("StirringRPM", 1.) * conditions.get("stirring_factor", 1.))
+        elif "stirring_factor" in conditions:
             process["PowerRatio"] = stirring_power_ratio(process["PowerRatio"], conditions["stirring_factor"], 1.)
         return _predict(parameters, experiment, process, solubility, settings, cancelled=cancelled), ""
     except TRIAL_ERRORS as error:
@@ -287,6 +300,8 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
     if progress is not None:
         progress("Preparing sample inputs…")
     conditions = conditions or {}
+    if "volume_factor" in conditions and "volume" not in editable_groups(case, model_index, simulated_profile):
+        raise ValueError("Initial volume can vary in SA only when it was varied in the initial campaign.")
     if not use_parameters and not conditions:
         raise ValueError("Select parameter uncertainty, operating conditions, or both.")
     if ("stirring_factor" in conditions or "stirring_rpm" in (simulated_profile or {})):

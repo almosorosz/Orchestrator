@@ -8,7 +8,7 @@ from .physical_fit import read_spec
 FORMAT = "crystalloop-bo"
 VERSION = 4
 OUTPUTS = ("yield", "d10", "d50", "d90")
-STAGE_CHANNELS = ("temperature", "feed")
+STAGE_CHANNELS = ("temperature", "feed", "stirring")
 
 
 def empty_settings():
@@ -38,6 +38,7 @@ def validate_settings(value):
     defaults = empty_settings()
     for key in ("output_bounds", "exploration", "output_margin", "physical_profiles", "loop_stages", "batch_horizon_s"):
         data.setdefault(key, defaults[key])
+    data["tolerances"].setdefault("volume", defaults["tolerances"]["volume"])
     data.pop("vae_checkpoints", None)
     try:
         if data["yield_basis"] not in ("theoretical", "actual") or not isinstance(data["source"], str):
@@ -99,7 +100,7 @@ def validate_settings(value):
                 raise ValueError("Invalid decision-variable overrides.")
         for channel, spec in data["physical_profiles"].items():
             if channel not in STAGE_CHANNELS:
-                raise ValueError("Stage lists apply to temperature and antisolvent.")
+                raise ValueError("Stage lists apply to temperature, antisolvent and stirring.")
             read_spec(channel, spec)
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("The BO settings file is incomplete.") from error

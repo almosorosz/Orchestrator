@@ -34,6 +34,7 @@ class SettingsPage(QWidget):
     start_independent_doe_requested = Signal()
     export_doe_requested = Signal()
     recording_requested = Signal()
+    reservoirs_requested = Signal()
     save_preset_requested = Signal()
     load_preset_requested = Signal()
 
@@ -162,6 +163,9 @@ class SettingsPage(QWidget):
         )
 
         config_layout.setColumnStretch(0, 0)
+        self.reservoirs_button = QPushButton("Reservoir amounts…")
+        self.reservoirs_button.clicked.connect(self.reservoirs_requested.emit)
+        config_layout.addWidget(self.reservoirs_button, 6, 0, 1, 2)
         config_layout.setColumnStretch(1, 1)
 
         config_box.setLayout(config_layout)

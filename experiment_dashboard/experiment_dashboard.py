@@ -56,11 +56,12 @@ class ExperimentWorker(QObject):
     recording_started = Signal(str)
 
     def __init__(self, devices: dict, device_configs: dict, experiments: list[pd.DataFrame], poll_interval: float = 1.0,
-                 *, clock=time.monotonic, speed=1.0, end_hold_s=5.0, campaign=None, recording=None):
+                 *, clock=time.monotonic, speed=1.0, end_hold_s=5.0, campaign=None, recording=None, reservoirs=None):
         super().__init__()
 
         self.devices = devices
         self.device_configs = device_configs
+        self.reservoirs = reservoirs
 
         if not experiments:
             raise ValueError("At least one experiment is required")
@@ -404,6 +405,12 @@ class ExperimentWorker(QObject):
 
                 run = self.runs[exp_idx]
                 definition = self.definitions[exp_idx]
+                if self.reservoirs is not None:
+                    try:
+                        self.reservoirs.begin(definition, end_hold_s=self.end_hold_s)
+                    except ValueError as error:
+                        run.status, run.error = RunStatus.FAILED, str(error)
+                        raise
                 trace = None
                 if definition.imed_simulation:
                     from imed_python.demo_campaign import SimulationTrace
@@ -541,8 +548,11 @@ class ExperimentWorker(QObject):
                             "experiment_index"
                         ] = exp_idx
                         telemetry["profile_boundary"] = bool(next_tick[1]) if next_tick is not None else False
+                        if self.reservoirs is not None:
+                            telemetry["system_mass_g"] = self.reservoirs.advance(definition, elapsed, telemetry)
                         if self.recorder:
                             sample = {"elapsed_s": elapsed}
+                            sample["system_mass_g"] = telemetry.get("system_mass_g")
                             for key in self.devices:
                                 sample[f"{key}.target"] = float(interpolated_row[key]) if key in interpolated_row else None
                                 status = telemetry.get(key, {})
@@ -603,6 +613,9 @@ class ExperimentWorker(QObject):
                         "experiment_id": run.experiment_id, "experiment_number": exp_idx + 1,
                         "batch_name": run.run_id, "status": run.status.value})
                 logger.info("Experiment %d %s", exp_idx + 1, run.status.value)
+                if self.reservoirs is not None:
+                    self.reservoirs.save()
+                    logger.info("Reservoir amounts after experiment %d: %s", exp_idx + 1, self.reservoirs.rows())
 
                 _debug(
                     f"FINISHED EXPERIMENT "
@@ -640,6 +653,8 @@ class ExperimentWorker(QObject):
                 if run.status == RunStatus.RUNNING:
                     run.status = self.outcome
             self._return_hardware_to_idle()
+            if self.reservoirs is not None:
+                self.reservoirs.save()
             for device, previous in self._simulation_clocks:
                 device.restore_simulation_clock(previous)
             self._simulation_clocks.clear()
@@ -1260,6 +1275,9 @@ class ExperimentDashboard(QMainWindow):
         if campaign is not None:
             layout.addWidget(QLabel(f"{campaign.name}: {len(campaign.experiments)} experiments"))
         self.run_status_label = QLabel("Ready")
+        self.system_mass_label = QLabel("System mass: —")
+        self.system_mass_label.setToolTip("Estimated liquid + seed mass from the starting charge and incoming deliveries. Resets when the drain valve opens. Full values are recorded in execution.csv.")
+        layout.addWidget(self.system_mass_label)
         simulated = sum(bool(getattr(dev, "simulated", False)) for dev in devices.values())
         self.mode_label = QLabel(f"Devices: {simulated} simulated / {len(devices) - simulated} real")
         layout.addWidget(self.mode_label)
@@ -2143,6 +2161,7 @@ class ExperimentDashboard(QMainWindow):
                 poll_interval=2.0,
                 campaign=self.campaign,
                 recording=getattr(self, "recording_settings", None),
+                reservoirs=getattr(self, "reservoirs", None),
                 speed=(float(getattr(self, "simulation_speed", 1.0))
                        if self.devices and all(getattr(d, "simulated", False) for d in self.devices.values()) else 1.0),
             )
@@ -2166,6 +2185,7 @@ class ExperimentDashboard(QMainWindow):
                 self.on_experiment_finished
             )
             self.worker.run_finished.connect(self.on_run_result)
+            self.worker.status_updated.connect(self.update_system_mass)
             self.worker.recording_started.connect(self.recording_started.emit)
             self.worker.finished.connect(self.worker.deleteLater)
 
@@ -2288,6 +2308,13 @@ class ExperimentDashboard(QMainWindow):
         self.last_result = result
         self.campaign_finished.emit(result)
         self.run_status_label.setText(result["status"].capitalize() + (f": {result['error']}" if result["error"] else ""))
+        if "Insufficient reservoir stock" in result.get("error", ""):
+            QMessageBox.warning(self, "Refill reservoir before continuing", result["error"])
+
+    @Slot(dict)
+    def update_system_mass(self, packet):
+        value = packet.get("system_mass_g")
+        self.system_mass_label.setText(f"System mass: {value:.3f} g" if value is not None else "System mass: — (check pump calibration / connections)")
 
     @Slot()
     def update_recording_status(self):

@@ -26,6 +26,7 @@ def value_text(value):
 
 
 def used_loop_values(setup, backend, context, design_labels):
+    setup = context.get("effective_setup", setup)
     campaign, roles, case = (context[key] for key in ("campaign", "roles", "case"))
     experiments = campaign.experiments if campaign else ()
     simulation = experiments[0].imed_simulation if experiments else None
@@ -50,7 +51,7 @@ def used_loop_values(setup, backend, context, design_labels):
         status = "connected" if device in connected else "disconnected" if config else "missing"
         caption = campaign.line_roles[role]["name"] if campaign and role in campaign.line_roles else ROLES[role].label if role in ROLES else role
         name = config.get("name", device)
-        assignments.append((caption, f"{device} · {name} · {status}", label))
+        assignments.append((caption, f"{device} · {name} · {status}", context.get("resolution", {}).get("origins", {}).get(role, label)))
         if calibration := config.get("pump_calibration"):
             assignments.append((f"{caption} calibration", calibration.get("source_name", "Loaded"), "Control Panel"))
     if not assignments:
@@ -84,6 +85,9 @@ def used_loop_values(setup, backend, context, design_labels):
     else:
         values = starting_process_defaults(setup, case)
     for key, title in process_labels.items():
+        if key == "PowerRatio" and backend == "imed":
+            inputs.append((title, "Calculated per experiment from averages" if setup["mixing"]["enabled"] else 1., "Average mixing option"))
+            continue
         if simulation:
             origin = "PBM simulation"
         elif key in setup["process"]:
@@ -147,7 +151,13 @@ def used_loop_values(setup, backend, context, design_labels):
         support.append((ROLES[role].label, f"{len(times)} points · {min(targets):g}–{max(targets):g} {ROLES[role].unit}",
                         "Support profile override"))
     if pump := setup["seed_pump"]:
-        support.append(("Calibrated seed delivery", f"{pump['rpm']:g} RPM · {pump['grams_per_second']:g} g/s", "Devices"))
+        try:
+            from experiment.pump_calibration_files import seed_delivery_rate
+            rate = seed_delivery_rate(configs.get(roles.get("seed"), {}), pump)
+            support.append(("Calibrated seed delivery", f"{pump['rpm']:g} RPM · {rate:g} g/s",
+                            "Loaded seed pump calibration" if pump.get("use_device_calibration") else "Devices"))
+        except (ValueError, KeyError, TypeError) as error:
+            support.append(("Check seed calibration", str(error), "Devices"))
 
     model = groups["Modeling"] = []
     if backend == "bo" and (bo := context["bo"]) is not None:
@@ -167,6 +177,12 @@ def used_loop_values(setup, backend, context, design_labels):
                 name, unit, _ = TARGETS[key]
                 model.append((f"{name} output bounds ({unit})", bounds, "BO page"))
     elif backend == "imed":
+        mixing = setup["mixing"]
+        model.append(("Average mixing power", "Calculated per experiment from average RPM and volume" if mixing["enabled"] else "PowerRatio = 1", "IMED design"))
+        if mixing["enabled"]:
+            model.extend((("Impeller power number", mixing["power_number"], "Campaign constant"),
+                          ("Impeller diameter (mm)", mixing["diameter_m"] * 1000, "Campaign constant"),
+                          ("Volume basis", mixing["volume_ml"] if mixing["volume_mode"] == "fixed" else "Charges + recorded AS additions", "IMED design")))
         stored = case.get(PE_WEIGHTS_KEY, case.get("objweightfactor", {}))
         stored = stored if isinstance(stored, dict) else {}
         options = setup["imed"]

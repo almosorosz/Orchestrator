@@ -1679,6 +1679,7 @@ class MainWindow(QMainWindow):
         if source is None:
             source = "doe" if doe is not None or not panel.experiments else "manual"
         messages = []
+        resolution = None
         if doe is not None and panel.experiments:
             messages.append("Choose the starting batch on Dashboard Start. This selector only changes the preview.")
         if source == "doe":
@@ -1691,18 +1692,26 @@ class MainWindow(QMainWindow):
             elif self._doe_devices_changed(configs):
                 messages.append("Device configuration changed. Apply the DoE assignments again before starting.")
         else:
-            roles = setup["manual_assignments"]
             monitors = tuple(key for key in configs if key in connected and is_monitor_only(configs[key]))
             label = "Control Panel assignments"
             campaign = None
             if panel.experiments:
                 try:
+                    raw = self._manual_loop_campaign(configs, monitors)
+                    setup, resolution = self._resolved_loop_setup(setup, configs, raw, strict=False)
+                    messages.extend(resolution["messages"])
                     campaign = self._manual_loop_campaign(configs, monitors, simulation=setup["manual_simulation"],
                                                           setup=setup)
                 except (ValueError, TypeError, KeyError, StopIteration) as error:
                     messages.append(f"Control Panel profiles need attention. {error}")
             else:
                 messages.append("No starting experiments are loaded in the Control Panel.")
+            roles = setup["manual_assignments"]
+        if source == "doe":
+            setup, resolution = self._resolved_loop_setup(setup, configs, campaign, doe=True, strict=False)
+            messages.extend(resolution["messages"])
+        elif resolution is None:
+            setup, resolution = self._resolved_loop_setup(setup, configs, campaign, strict=False)
         bo_settings = None
         if backend == "bo":
             try:
@@ -1718,9 +1727,24 @@ class MainWindow(QMainWindow):
             recipe = self.experiment_service.exp_par.timeline
             stages = recipe_run_stages(recipe, {key: item["value"] for key, item in recipe_parameters(recipe)})
         return {"source": source, "label": label, "campaign": campaign, "roles": roles, "monitors": monitors, "run_stages": stages,
+                "topology": panel.current_system_topology(), "resolution": resolution, "effective_setup": setup,
                 "configs": configs, "connected": connected, "messages": messages, "case": imed.checkpoint_case(),
                 "bo": bo_settings, "size_term": self.settings_page.pbm_size_samples.currentText(),
                 "folders": (experiment_folder, model_folder), "workers": imed.cpu_workers()}
+
+    def _resolved_loop_setup(self, setup, configs, campaign=None, *, doe=False, strict=True):
+        from experiment.loop_assignments import resolve_loop_setup
+        topology = self.control_panel.current_system_topology()
+        units = {unit["code"]: unit for unit in topology.get("unit_operations", [])}
+        for cfg in configs.values():
+            source = cfg.get("connectivity", {}).get("source")
+            if units.get(source, {}).get("density_g_ml") is not None:
+                cfg["reservoir_density_g_ml"] = units[source]["density_g_ml"]
+        applied = {item.role: item.device_id for item in self._doe_assignments}
+        if not doe and self._assigned_doe_campaign is not None and self._doe_devices_changed(configs):
+            applied = {}
+        return resolve_loop_setup(setup, topology, configs, campaign=campaign,
+                                  applied=applied if doe else None, fallback=applied if not doe else None, strict=strict)
 
     def _recipe_compiler(self, mode, setup, configs, connected):
         from experiment.doe_campaign import ProfileAssignment
@@ -1734,10 +1758,14 @@ class MainWindow(QMainWindow):
         if source == "doe" or (source is None and doe):
             if doe is None or self._doe_devices_changed(configs):
                 raise ValueError("Apply the current DoE device assignments before executing the recipe.")
+            setup, _ = self._resolved_loop_setup(setup, configs, doe, doe=True)
             return RecipeCompiler(setup, doe, configs, self.create_experiments.exp_storage,
                                   self._doe_assignments, doe.monitor_device_ids, mode)
+        raw = self._manual_loop_campaign(configs, ()) if self.control_panel.experiments else None
+        setup, _ = self._resolved_loop_setup(setup, configs, raw)
+        manual = setup["manual_assignments"]
         if not manual:
-            raise ValueError("Assign recipe devices in Automatic loop setup → Devices or apply DoE assignments.")
+            raise ValueError("Define MSI roles/connections or choose recipe devices in Automatic loop setup → Devices.")
         monitors = {key for key in connected if is_monitor_only(configs.get(key, {}))} | set(previous_monitors)
         for column in setup["channels"].values():
             device, _, _ = column.rpartition(".")
@@ -1748,7 +1776,7 @@ class MainWindow(QMainWindow):
             if not self.control_panel.experiments:
                 raise ValueError("Load the simulated Control Panel profiles before executing this recipe.")
         monitor_ids = tuple(sorted(monitors))
-        template = (self._manual_loop_campaign(configs, monitor_ids, simulation=setup["manual_simulation"])
+        template = (self._manual_loop_campaign(configs, monitor_ids, simulation=setup["manual_simulation"], setup=setup)
                     if self.control_panel.experiments else None)
         assignments = tuple(ProfileAssignment(role, device) for role, device in manual.items())
         return RecipeCompiler(setup, template, configs, self.experiment_service.exp_storage,
@@ -1766,11 +1794,14 @@ class MainWindow(QMainWindow):
             configs, _ = panel.collect_current_configuration()
             connected = self._connected_loop_devices()
             compiler = self._recipe_compiler(mode, setup, configs, connected)
+            setup = compiler.setup
             compiler.check_support(compiler.template)
             imed = self.imed_page.panel
             imed_case = imed.checkpoint_case()
             defaults = compiler.process_defaults(imed_case)
             recipe_process = {**defaults, **(process or {})}
+            if mode == "imed":
+                recipe_process["MixingSettings"] = setup["mixing"]
             if mode == "bo" and (seed := profiles.get("seed")) is not None:
                 recipe_process["SeedMass"] = float(seed.values[0])
             campaign, window = compiler.build(profiles, recipe_process, name=f"{mode.upper()} recipe",
@@ -1905,13 +1936,14 @@ class MainWindow(QMainWindow):
             if self._pending_recipe_feedback is not None:
                 raise ValueError("Wait for the previous recipe's recordings to finish saving and importing.")
             setup = validate_setup(settings.loop_setup)
+            configs, _ = self.control_panel.collect_current_configuration()
+            setup, resolution = self._resolved_loop_setup(setup, configs, campaign, doe=campaign is self._assigned_doe_campaign)
             if campaign is self._assigned_doe_campaign:
                 assignments = self._doe_assignments
                 calibration_storage = self.create_experiments.exp_storage
             else:
                 assignments = tuple(ProfileAssignment(role, device) for role, device in setup["manual_assignments"].items())
                 calibration_storage = self.experiment_service.exp_storage
-            configs, _ = self.control_panel.collect_current_configuration()
             imed = self.imed_page.panel
             session = AdaptiveLoop(mode, setup, campaign, configs,
                                    self._connected_loop_devices(), calibration_storage,
@@ -1932,6 +1964,8 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_omni_count(0)
         self.dashboard_page.set_model_count(0)
         self._adaptive_loop = session
+        for role, origin in resolution["origins"].items():
+            self.log_message(f"Loop assignment {role}: {session.roles.get(role, '')} ({origin}).", "INFO")
         for experiment in session.template.experiments:
             window = experiment.model_window
             if window is not None:
@@ -2276,6 +2310,10 @@ class MainWindow(QMainWindow):
 
         self.settings_page.set_controls_enabled( enabled)
 
+    @Slot()
+    def refresh_reservoir_amounts(self):
+        self.dashboard_page.set_reservoirs(self.control_panel.reservoirs.rows())
+
     @Slot(dict)
     def update_system_cards(self, data):
         # Extract values directly from the dictionary emitted by the worker
@@ -2476,6 +2514,7 @@ class MainWindow(QMainWindow):
             from imed_python.demo_campaign import CONTROL_TYPES, VERSION, compile_simulation
 
             setup = validate_setup(self.settings_page.loop_setup if setup is None else setup)
+            setup, _ = self._resolved_loop_setup(setup, configs, Campaign("Control Panel experiments", experiments))
             controls, simulation = setup["manual_assignments"], setup["manual_simulation"]
             if not set(CONTROL_TYPES) <= controls.keys():
                 raise ValueError("Map all PBM simulation actuator roles to Control Panel devices.")
@@ -2739,6 +2778,9 @@ class MainWindow(QMainWindow):
         self.settings_page.start_independent_doe_requested.connect(self.start_independent_doe)
         self.settings_page.export_doe_requested.connect(self.export_doe_csv)
         self.settings_page.recording_requested.connect(self.configure_recording)
+        self.settings_page.reservoirs_requested.connect(self.control_panel.edit_reservoirs)
+        self.control_panel.reservoirs.changed.connect(self.refresh_reservoir_amounts)
+        self.refresh_reservoir_amounts()
         self.settings_page.save_preset_requested.connect(self.save_setup_preset)
         self.settings_page.load_preset_requested.connect(self.load_setup_preset)
         self.control_panel.control_output_path.editingFinished.connect(self._update_archive_roots)

@@ -13,6 +13,7 @@ CHANNELS = {
     "feed": ("Antisolvent", "g/s", .001),
     "seed": ("Seed mass", "g", 0.),
     "stirring": ("Stirring", "RPM", 1.),
+    "volume": ("Initial charge volume", "mL", .01),
 }
 CONSTRAINTS = {
     "duration": ("Batch duration", "s"),
@@ -74,7 +75,7 @@ class Profile:
         return Profile(time - start, self.sample(time), self.source, self.step)
 
     def payload(self):
-        return {"points": [self.time.tolist(), self.values.tolist()], "source": self.source, "step": self.step}
+        return {"points": [self.time.tolist(), self.values.tolist()], "source": self.source, "step": bool(self.step)}
 
 
 def make_profile(points, source, *, step=False):
@@ -98,6 +99,8 @@ def campaign_profiles(experiment, process, definition, controls=None):
     recording = experiment.get("RecordingFile")
     if not isinstance(recording, str):
         return {}
+    if not Path(recording).with_name("run.json").is_file():
+        return {}
     metadata = read_json(Path(recording).with_name("run.json"))
     experiment_id = metadata.get("experiment_id")
     spec = next((entry for entry in definition.get("campaign", {}).get("experiments", [])
@@ -105,7 +108,12 @@ def campaign_profiles(experiment, process, definition, controls=None):
     demo = spec.get("imed_simulation") or {}
     devices = definition.get("devices", {})
     lanes = definition.get("campaign", {}).get("line_roles", {})
-    inherited = {key: lane["device_id"] for key, lane in lanes.items() if key in {"T", "AS", "stirring_rate"}}
+    by_role = {}
+    for key, lane in lanes.items():
+        role = lane.get("role", key)
+        if role in {"T", "AS", "stirring_rate"}:
+            by_role.setdefault(role, set()).add(lane["device_id"])
+    inherited = {role: next(iter(ids)) for role, ids in by_role.items() if len(ids) == 1}
     controls = {**inherited, **(controls or {}), **demo.get("controls", {})}
     recorded_temp = pairs(experiment.get("TemperatureData"))
     duration = float(recorded_temp[0, -1]) if recorded_temp is not None else 0.
@@ -116,10 +124,22 @@ def campaign_profiles(experiment, process, definition, controls=None):
                       and (not antisolvent or "AS" in p["device_id"].upper())]
         return candidates[0] if len(candidates) == 1 else None
 
+    def main_stirrer():
+        explicit = [device for device, cfg in devices.items()
+                    if cfg.get("type") == "jkem" and cfg.get("connectivity", {}).get("experiment_role") == "stirring_rate"]
+        if len(explicit) == 1:
+            return explicit[0]
+        temperature = controls.get("T") or unique_device(("huber",))
+        unit = devices.get(temperature, {}).get("connectivity", {}).get("unit")
+        attached = [entry["device_id"] for entry in spec.get("profiles", [])
+                    if devices.get(entry["device_id"], {}).get("type") == "jkem" and unit
+                    and devices[entry["device_id"]].get("connectivity", {}).get("unit") == unit]
+        return attached[0] if len(attached) == 1 else unique_device(("jkem",))
+
     associations = {
         "temperature": controls.get("T") or unique_device(("huber",)),
         "feed": controls.get("AS") or unique_device(("ismatec", "masterflex"), antisolvent=True),
-        "stirring": controls.get("stirring_rate") or unique_device(("jkem",)),
+        "stirring": controls.get("stirring_rate") or main_stirrer(),
     }
     found = {}
     for entry in spec.get("profiles", []):
@@ -142,6 +162,10 @@ def campaign_profiles(experiment, process, definition, controls=None):
                                 [p["target"] * scale for p in entry["points"]]],
                                f"Command · {entry['device_id']}", step=entry.get("interpolation") == "step")
         end = start + duration
+        if profile and profile.time[-1] < end:
+            # Execution holds each device's final target through end_hold_s.
+            # Imported telemetry can therefore legitimately outlast planned knots.
+            profile = Profile(np.r_[profile.time, end], np.r_[profile.values, profile.values[-1]], profile.source, profile.step)
         if profile and profile.time[0] <= start + 1e-6 and profile.time[-1] >= end - 1e-6:
             profile = profile.window(start, end)
             if name == "temperature" or np.all(profile.values >= 0):
@@ -163,6 +187,11 @@ def case_runs(case, folder=None, *, controls=None):
             continue
         end = float(temperature.time[-1])
         profiles = {"temperature": temperature.window(0, end)}
+        for key, data in exp.get("CommandedProfiles", {}).items():
+            if key in CHANNELS:
+                saved = make_profile(data.get("points"), data.get("source", "Saved device commands"), step=data.get("step", False))
+                if saved is not None:
+                    profiles[key] = saved
         for key, field in (("feed", "FlowRateData"), ("stirring", "StirringRateData")):
             profile = make_profile(exp.get(field), "Recorded or imported profile")
             if profile and profile.time[0] == 0 and (len(profile.time) == 1 or profile.time[-1] >= end):
@@ -171,6 +200,9 @@ def case_runs(case, folder=None, *, controls=None):
         if seed is not None and seed >= 0:
             profiles["seed"] = Profile(np.array([0.]), np.array([seed]),
                                        "Seed at batch start" if seed else "Unseeded")
+        volume = scalar(process.get("InitialVolume_ml"))
+        if volume is not None and volume > 0:
+            profiles["volume"] = Profile(np.array([0.]), np.array([volume]), "Initial liquid charge")
         if "stirring" not in profiles:
             rpm = next((value for key in STIRRING_FIELDS
                         if (value := scalar(process.get(key))) is not None and value >= 0), None)

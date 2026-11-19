@@ -292,7 +292,7 @@ class BOWindow(QWidget):
         self.fit_tabs.addTab(self.fit_summary, "Fit by experiment")
         self.fit_tabs.addTab(self.variables, "Decision controls")
         compare_layout.addWidget(self.fit_tabs, 1)
-        hint = QLabel("Choose temperature and antisolvent controls under Edit stages. "
+        hint = QLabel("Choose temperature, antisolvent and stirring controls under Edit stages. "
                       "Fixed means the fitted values are the same across the selected experiments.")
         hint.setWordWrap(True)
         compare_layout.addWidget(hint)
@@ -534,7 +534,7 @@ class BOWindow(QWidget):
             case = import_simulated_campaign(folder)
             if case is None:
                 template = self.imed_case() if self.imed_case is not None else {}
-                dialog = CampaignImportDialog(campaign_runs(folder), template, self)
+                dialog = CampaignImportDialog(campaign_runs(folder), template, self, require_process=False)
                 dialog.setWindowTitle("BO | Import CrystalLoop campaign")
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     return
@@ -546,6 +546,10 @@ class BOWindow(QWidget):
 
     def set_case(self, case, source, *, folder=None):
         runs = case_runs(case, folder)
+        self.state.pop("initial_input_groups", None)
+        groups = case.get("PythonWorkflow", {}).get("initial_input_groups")
+        if groups is not None:
+            self.state["initial_input_groups"] = [str(value) for value in np.asarray(groups).reshape(-1)]
         self.state.update(source=source, runs=runs, selected=list(range(len(runs))), overrides={},
                           physical_profiles={})
         self.load_stage_templates()
@@ -612,7 +616,10 @@ class BOWindow(QWidget):
     def refresh_horizon(self):
         try:
             horizon = self.profile_horizon()
-            detail = f"Effective horizon {horizon:g} s · Seed is added at 0 s." if horizon else ""
+            seeds = [self.state["runs"][i]["profiles"].get("seed") for i in self.state["selected"]]
+            seeded = any(seed and seed["points"][1][0] > 0 for seed in seeds)
+            note = "Seeded runs start with seed at 0 s." if seeded else "Unseeded (0 g seed)." if any(seeds) else ""
+            detail = f"Effective horizon {horizon:g} s · {note}" if horizon else ""
         except ValueError as error:
             horizon, detail = None, str(error)
         self.stage_editor.set_horizon(horizon)
@@ -933,8 +940,8 @@ class BOWindow(QWidget):
             if "temperature" not in profiles:
                 raise ValueError("Add temperature stages before saving a recipe.")
             reference = state["runs"][self.run_choice.currentData()]
-            for key in ("seed", "stirring"):
-                if key in reference["profiles"]:
+            for key in ("seed", "stirring", "volume"):
+                if key in reference["profiles"] and key not in profiles:
                     profile = run_profile(reference, key)
                     profiles[key] = fixed_horizon(profile, horizon) if key == "stirring" else profile
             failed = input_checks(profiles, horizon, state["constraints"])

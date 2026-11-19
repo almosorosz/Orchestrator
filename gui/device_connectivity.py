@@ -2,6 +2,8 @@
 from copy import deepcopy
 from PySide6.QtWidgets import QWidget, QFormLayout, QComboBox
 from experiment.system_topology import PUMPS, READ_ONLY
+from experiment.doe_campaign import ROLES
+from experiment.loop_assignments import QUANTITIES
 
 
 class DeviceConnectivity(QWidget):
@@ -35,7 +37,21 @@ class DeviceConnectivity(QWidget):
             self.target.setToolTip("Target container for positive / clockwise flow; may belong to any module.")
         else:
             form.addRow("Connected unit:", self.unit)
-        for combo in (self.role, self.module, self.unit, self.source, self.target):
+        self.experiment_role = QComboBox()
+        self.experiment_role.addItem("Automatic from connections", "")
+        for key, details in ROLES.items():
+            if config["type"] in details.compatible_types:
+                self.experiment_role.addItem(details.label, key)
+        self.experiment_role.setCurrentIndex(max(0, self.experiment_role.findData(config.get("connectivity", {}).get("experiment_role", ""))))
+        self.quantity = QComboBox()
+        for key in QUANTITIES:
+            self.quantity.addItem(key or "Automatic / unspecified", key)
+        self.quantity.setCurrentIndex(max(0, self.quantity.findData(config.get("connectivity", {}).get("quantity", ""))))
+        form.addRow("Experiment role:", self.experiment_role)
+        form.addRow("Measured quantity:", self.quantity)
+        self.experiment_role.setToolTip("Used by DoE/BO/IMED. Pump material roles can also come from the source container. Positive flow must lead to the model reactor.")
+        self.quantity.setToolTip("Identify the measurement so loop channel mappings can follow the MSI vessel connections without relying on device names.")
+        for combo in (self.role, self.module, self.unit, self.source, self.target, self.experiment_role, self.quantity):
             combo.currentIndexChanged.connect(self.changed)
         self.role.setCurrentIndex(max(0, self.role.findData(config.get("connectivity", {}).get("role", "excluded"))))
         self.loading = False
@@ -71,7 +87,8 @@ class DeviceConnectivity(QWidget):
             saved = self.config.get("connectivity", {})
             self.loading = True
             for combo, key in ((self.role, "role"), (self.module, "module"), (self.unit, "unit"),
-                               (self.source, "source"), (self.target, "target")):
+                               (self.source, "source"), (self.target, "target"),
+                               (self.experiment_role, "experiment_role"), (self.quantity, "quantity")):
                 combo.setCurrentIndex(max(0, combo.findData(saved.get(key, "excluded" if key == "role" else ""))))
             self.loading = False
             self.setToolTip("End the experiment session / connection operation before changing the physical setup.")
@@ -86,4 +103,5 @@ class DeviceConnectivity(QWidget):
             self.module.setCurrentIndex(max(0, self.module.findData(module)))
             self.module.blockSignals(False)
         self.config["connectivity"] = {"role": self.role.currentData(), "module": self.module.currentData() or "",
-            "unit": self.unit.currentData() or "", "source": self.source.currentData() or "", "target": self.target.currentData() or ""}
+            "unit": self.unit.currentData() or "", "source": self.source.currentData() or "", "target": self.target.currentData() or "",
+            "experiment_role": self.experiment_role.currentData() or "", "quantity": self.quantity.currentData() or ""}

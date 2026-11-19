@@ -1,6 +1,7 @@
 """Inputs for new PBM predictions built from a recorded DoE experiment."""
 
 import numpy as np
+import re
 
 from .campaign_import import seed_distribution
 from .solver import model_parameters, profile
@@ -66,7 +67,8 @@ def editable_groups(case, model_index, saved_profile=None):
     workflow = case.get("PythonWorkflow", {})
     factors = workflow.get("doe_factors", case.get("active_doe_factors", workflow.get("profile_doe_factors")))
     if factors is not None:
-        selected = {str(value).strip().casefold() for value in np.asarray(factors).reshape(-1)}
+        selected = {part for value in np.asarray(factors).reshape(-1)
+                    for part in [str(value).strip().casefold(), *re.split(r"[:.]", str(value).strip().casefold())]}
         groups = {group for group, keys in FACTOR_GROUPS.items() if selected & keys}
     else:
         experiments, processes = case["ExpData"], case["ProcInf"]
@@ -86,6 +88,10 @@ def editable_groups(case, model_index, saved_profile=None):
     # A saved recipe can still be edited after its original DoE is closed.
     groups.update(group for group, fields in PROFILE_GROUPS.items()
                   if any(field in (saved_profile or {}) for field in fields))
+    if "initial_input_groups" in workflow:
+        for key in ("stirring", "volume"):
+            groups.discard(key)
+        groups.update(str(value) for value in np.asarray(workflow["initial_input_groups"]).reshape(-1))
     if not power_dependent(case["ModelParameter"][model_index]):
         groups.discard("stirring")
     return groups

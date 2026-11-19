@@ -19,6 +19,7 @@ from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
 from gui.loop_setup_preview import used_loop_values, value_text
 from gui.experiment_period_widget import ExperimentPeriodWidget
+from imed_python.mixing import DEFAULT_MIXING
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
@@ -66,13 +67,28 @@ def integer_field(value, minimum, maximum):
 
 def text_choice(choices, value):
     field = QComboBox()
-    field.setEditable(True)
+    field.setEditable(False)
     field.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
     field.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
     field.setMinimumContentsLength(12)
     field.addItems(choices)
+    if value and value not in choices:
+        field.addItem(value)
+        field.setItemData(field.count() - 1, "Saved selection is unavailable. Choose a currently configured device/channel.", Qt.ItemDataRole.ToolTipRole)
     field.setCurrentText(value)
     return field
+
+
+def explanation(layout, text):
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+    if isinstance(layout, QFormLayout):
+        layout.addRow(label)
+    else:
+        layout.addWidget(label)
+    return label
 
 
 def toggle_group(title, enabled):
@@ -109,6 +125,8 @@ class SupportProfiles(QWidget):
         self.roles = QComboBox()
         self.pages = QStackedWidget()
         layout = QVBoxLayout(self)
+        explanation(layout, "Support profiles supply fixed device schedules in simple profile-based follow-ups. "
+                    "Stage-based runs inherit preparation, seeding, stirring and cleanup from the starting timeline.")
         header = QFormLayout()
         header.addRow("Profile role", self.roles)
         layout.addLayout(header)
@@ -193,6 +211,7 @@ class LoopSetupDialog(QDialog):
         self.followup_start.setToolTip("Used for profiles without a defined experiment period. Stage-based follow-ups keep the preparation duration from the starting run.")
         form.addRow("Follow-up experiments", self.max_followups)
         form.addRow("Follow-up crystallization start (s)", self.followup_start)
+        explanation(form, "Follow-up experiments counts recommendations after the starting batch. Stage-based runs retain their preparation prefix; the start offset applies to simpler profiles.")
         layout.addWidget(run)
         self.tabs = QTabWidget()
         self.tabs.addTab(self.recording_page(), "Recording")
@@ -259,6 +278,16 @@ class LoopSetupDialog(QDialog):
         try:
             context = self.preview(self.backend, self.collect(validate_period=False), self.preview_source.currentData())
             self.period.set_context(context)
+            if hasattr(self, "reactor"):
+                selected = self.reactor.currentData()
+                with QSignalBlocker(self.reactor):
+                    self.reactor.clear()
+                    self.reactor.addItem("Automatic from MSI / assignments", "")
+                    for unit in context.get("topology", {}).get("unit_operations", []):
+                        self.reactor.addItem(f"{unit['code']}: {unit['name']}", unit["code"])
+                    if selected and self.reactor.findData(selected) < 0:
+                        self.reactor.addItem(f"{selected} [missing]", selected)
+                    self.reactor.setCurrentIndex(max(0, self.reactor.findData(selected)))
             draft = self.collect()
             labels = {**DESIGN_VALUES, **{key: values[0] for key, values in DESIGN_PAIRS.items()}}
             groups = used_loop_values(draft, self.backend, context, labels)
@@ -305,6 +334,8 @@ class LoopSetupDialog(QDialog):
 
     def recording_page(self):
         page, form = self.scroll_form()
+        explanation(form, "Experiment period selects the data used for modeling; the complete run is still recorded. "
+                    "Channel menus select actual device signals. Automatic uses MSI measurement labels, then conventional channel IDs.")
         recording = self.setup["recording"]
         self.recording_numbers = {}
         for key, label, hint in (
@@ -342,18 +373,31 @@ class LoopSetupDialog(QDialog):
 
     def process_page(self):
         page, form = self.scroll_form()
+        explanation(form, "Process values describe the beginning of the selected experiment period, after preparation. "
+                    "Blank fields inherit the IMED case. These values do not themselves command charging pumps.")
+        self.derive_charges = QCheckBox("Derive initial liquid charges from preparation pump profiles")
+        self.derive_charges.setChecked(self.setup["derive_initial_charges"])
+        form.addRow(self.derive_charges)
+        explanation(form, "Defined solvent, solution and AS charges before the experiment period supply the per-experiment starting masses. "
+                    "Loaded pump calibrations / liquid densities convert delivery into grams. Named experiment overrides take precedence.")
         self.process = {}
         for key, title in PROCESS_INPUTS.items():
             self.process[key] = number_field(self.setup["process"].get(key), "Use case or recording setting")
             form.addRow(title, self.process[key])
+        if self.backend == "imed":
+            self.process["PowerRatio"].setEnabled(False)
+            self.process["PowerRatio"].setToolTip("IMED uses calculated average mixing power, or 1 when that option is unchecked.")
         seed = self.setup["recording"]["seed_percentiles"]
         self.seed_sizes = [number_field(value, label) for label, value in zip(("D10", "D50", "D90"), seed or [None] * 3)]
         row = QHBoxLayout()
         for field in self.seed_sizes:
             row.addWidget(field)
         form.addRow("Seed D10 / D50 / D90 (µm)", row)
+        explanation(form, "An unseeded experiment uses Seed mass = 0 g and seed D10/D50/D90 = 0/0/0 (or blank). Positive seed mass requires a positive seed distribution.")
         group = QGroupBox("Starting experiment overrides")
         overrides = QVBoxLayout(group)
+        explanation(overrides, "Override a common model input for a named starting experiment, for example exp3 → Seed mass. "
+                    "The physical experiment must deliver the matching charge; this table changes modeling inputs only.")
         self.overrides, buttons = edit_table(("Experiment name", "Process input", "Value"), "Add override",
                                              lambda: self.add_override())
         self.overrides.setMinimumHeight(125)
@@ -380,23 +424,38 @@ class LoopSetupDialog(QDialog):
 
     def devices_page(self):
         page, form = self.scroll_form()
+        self.reactor = QComboBox()
+        self.reactor.addItem("Automatic from MSI / assignments", "")
+        if self.setup["reactor_unit"]:
+            self.reactor.addItem(self.setup["reactor_unit"], self.setup["reactor_unit"])
+            self.reactor.setCurrentIndex(1)
+        form.addRow("Model reactor", self.reactor)
         saved = self.setup["manual_assignments"]
         manual = QGroupBox("Control Panel profile assignments")
         controls = QFormLayout(manual)
+        explanation(controls, "Automatic follows MSI vessel connections, source-container material roles and device experiment roles. "
+                    "Matching applied DoE assignments are reused. Choose a device explicitly only for an unresolved or ambiguous role.")
         self.assignments = {}
         for role, details in ROLES.items():
             devices = sorted(device for device, cfg in self.configs.items()
                              if cfg.get("type") in details.compatible_types and not is_monitor_only(cfg))
-            self.assignments[role] = text_choice(["", *devices], saved.get(role, ""))
+            self.assignments[role] = text_choice(["Automatic", *devices], saved.get(role) or "Automatic")
             controls.addRow(details.label, self.assignments[role])
         form.addRow(manual)
         pump = self.setup["seed_pump"]
         self.pump_group = toggle_group("Use calibrated seed pump delivery", pump is not None)
         pump_form = QFormLayout(self.pump_group)
+        explanation(pump_form, "Converts requested seed mass into pulse duration. Reuse the calibration loaded on the assigned seed pump; "
+                    "enter a separate g/s rate only when using a manual calibration. A defined timeline seeding stage remains authoritative.")
+        self.use_seed_calibration = QCheckBox("Use the seed pump's loaded calibration")
+        self.use_seed_calibration.setChecked((pump or {}).get("use_device_calibration", pump is None))
+        pump_form.addRow(self.use_seed_calibration)
         self.pump_rpm = number_field((pump or {}).get("rpm"))
         self.pump_rate = number_field((pump or {}).get("grams_per_second"))
         pump_form.addRow("Seed pump speed (RPM)", self.pump_rpm)
         pump_form.addRow("Seed delivery rate (g/s)", self.pump_rate)
+        self.pump_rate.setEnabled(not self.use_seed_calibration.isChecked())
+        self.use_seed_calibration.toggled.connect(lambda checked: self.pump_rate.setEnabled(not checked))
         form.addRow(self.pump_group)
         simulation = self.setup["manual_simulation"]
         self.simulation_group = toggle_group("Generate PBM telemetry for simulated Control Panel runs", simulation is not None)
@@ -405,6 +464,8 @@ class LoopSetupDialog(QDialog):
         self.simulated_end = number_field((simulation or {}).get("end_s"))
         simulated_form.addRow("Equilibration start (s)", self.simulated_hold)
         simulated_form.addRow("Recording end (s)", self.simulated_end)
+        explanation(simulated_form, "Only for the built-in PBM test simulator: the modeled run starts at 0 s; equilibration start begins "
+                    "the final constant-temperature hold; recording end finishes that hold. Discharge and cleaning follow afterward. Leave off for real measurements.")
         self.simulated_monitors = {}
         for role, kind in MONITOR_TYPES.items():
             devices = sorted(device for device, cfg in self.configs.items()
@@ -418,6 +479,26 @@ class LoopSetupDialog(QDialog):
     def design_page(self):
         page, form = self.scroll_form()
         imed = self.setup["imed"]
+        self.mixing_group = toggle_group("Calculate average mixing power for IMED", self.setup["mixing"]["enabled"])
+        mixing = QFormLayout(self.mixing_group)
+        explanation(mixing, "Uses average RPM and average liquid volume over the selected experiment period. "
+                    "One scalar Np × (average RPM/60)³ × diameter⁵ / average volume is passed as PowerRatio to each PBM; unchecked = 1. "
+                    "No stirring or volume profile is added to the numerical solver.")
+        self.power_number = number_field(self.setup["mixing"]["power_number"])
+        self.impeller_diameter = number_field(self.setup["mixing"]["diameter_m"] * 1000)
+        self.mixing_volume = number_field(self.setup["mixing"]["volume_ml"])
+        self.volume_mode = QComboBox()
+        self.volume_mode.addItem("Fixed campaign volume", "fixed")
+        self.volume_mode.addItem("From charges and antisolvent additions", "charged")
+        self.volume_mode.setCurrentIndex(self.volume_mode.findData(self.setup["mixing"]["volume_mode"]))
+        for label, field in (("Impeller power number Np", self.power_number), ("Impeller diameter (mm)", self.impeller_diameter),
+                             ("Volume basis", self.volume_mode), ("Fixed liquid volume (mL)", self.mixing_volume)):
+            mixing.addRow(label, field)
+        self.volume_mode.currentIndexChanged.connect(lambda: self.mixing_volume.setEnabled(self.volume_mode.currentData() == "fixed"))
+        self.mixing_volume.setEnabled(self.volume_mode.currentData() == "fixed")
+        explanation(mixing, "Charged volume prefers the AS scale; otherwise calibrated pump delivery is used. "
+                    "Component densities supply an estimated additive liquid volume. Power number and diameter are constant per campaign.")
+        form.addRow(self.mixing_group)
         self.delta_aic = number_field(imed["delta_aic"])
         self.iterations = integer_field(imed["iterations"], 0, 1000)
         self.samples = integer_field(imed["covariance_samples"], 2, 10000)
@@ -449,6 +530,8 @@ class LoopSetupDialog(QDialog):
 
     def collect(self, *, validate_period=True):
         draft = deepcopy(self.setup)
+        draft["reactor_unit"] = self.reactor.currentData()
+        draft["derive_initial_charges"] = self.derive_charges.isChecked()
         draft["experiment_period"] = self.period.values() if validate_period else {"mode": "definition", "stage_ids": []}
         draft["max_followups"] = self.max_followups.value()
         draft["followup_start_s"] = entered_number(self.followup_start, "follow-up crystallization start")
@@ -483,9 +566,12 @@ class LoopSetupDialog(QDialog):
             fields[key] = entered_number(self.overrides.cellWidget(row, 2), PROCESS_INPUTS[key])
         draft["initial_processes"] = {name: values for name, values in overrides.items() if values}
         draft["manual_assignments"] = self.selected_text(self.assignments)
-        draft["seed_pump"] = {"rpm": entered_number(self.pump_rpm, "seed pump speed"),
-                              "grams_per_second": entered_number(self.pump_rate, "seed delivery rate")
-                              } if self.pump_group.isChecked() else None
+        draft["seed_pump"] = None
+        if self.pump_group.isChecked():
+            draft["seed_pump"] = {"rpm": entered_number(self.pump_rpm, "seed pump speed"),
+                                  "grams_per_second": entered_number(self.pump_rate, "seed delivery rate", optional=self.use_seed_calibration.isChecked())}
+            if self.use_seed_calibration.isChecked():
+                draft["seed_pump"]["use_device_calibration"] = True
         draft["manual_simulation"] = {
             "hold_start_s": entered_number(self.simulated_hold, "simulated equilibration start"),
             "end_s": entered_number(self.simulated_end, "simulated recording end"),
@@ -493,6 +579,11 @@ class LoopSetupDialog(QDialog):
         } if self.simulation_group.isChecked() else None
         draft["support_profiles"] = self.support.values()
         if self.backend == "imed":
+            draft["mixing"] = {**self.setup["mixing"], "enabled": False}
+            if self.mixing_group.isChecked():
+                draft["mixing"] = {"enabled": True, "power_number": entered_number(self.power_number, "impeller power number"),
+                               "diameter_m": entered_number(self.impeller_diameter, "impeller diameter") / 1000,
+                               "volume_mode": self.volume_mode.currentData(), "volume_ml": entered_number(self.mixing_volume, "fixed liquid volume")}
             draft["imed"].update(delta_aic=entered_number(self.delta_aic, "model survival threshold"),
                                  iterations=self.iterations.value(), covariance_samples=self.samples.value(),
                                  equilibration_s=entered_number(self.equilibration, "final equilibration"))
@@ -509,7 +600,7 @@ class LoopSetupDialog(QDialog):
 
     @staticmethod
     def selected_text(controls):
-        return {key: text for key, field in controls.items() if (text := field.currentText().strip())}
+        return {key: text for key, field in controls.items() if (text := field.currentText().strip()) and text != "Automatic"}
 
     def accept(self):
         try:

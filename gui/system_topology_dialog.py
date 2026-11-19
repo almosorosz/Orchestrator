@@ -5,7 +5,8 @@ import json
 import html
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QTabWidget, QWidget, QPlainTextEdit, QFileDialog, QApplication, QCheckBox)
+    QTableWidget, QTableWidgetItem, QTabWidget, QWidget, QPlainTextEdit, QFileDialog, QApplication, QCheckBox, QComboBox)
+from experiment.loop_assignments import MATERIAL_ROLES
 from experiment.system_topology import validate_topology, system_graph
 from gui.system_graph_view import SystemGraphView
 from gui.flow_layout import FlowLayout
@@ -40,8 +41,8 @@ class SystemTopologyDialog(QDialog):
         module_actions.addWidget(remove_module)
         rows.addLayout(module_actions)
         rows.addWidget(QLabel("Unit operations — containers, crystallizers, distillers, MSMPR stages, or any other type"))
-        self.units = QTableWidget(0, 4)
-        self.units.setHorizontalHeaderLabels(["Identifier code", "Name", "Type (any text)", "Module code"])
+        self.units = QTableWidget(0, 5)
+        self.units.setHorizontalHeaderLabels(["Identifier code", "Name", "Type (any text)", "Module code", "Material / model role"])
         self.units.horizontalHeader().setStretchLastSection(True)
         rows.addWidget(self.units)
         unit_actions = QHBoxLayout()
@@ -118,8 +119,9 @@ class SystemTopologyDialog(QDialog):
                 self.add_row(self.sensors, [sensor['code'], sensor['name'], module['code']])
         for unit in definition["unit_operations"]:
             self.add_row(self.units, [unit["code"], unit["name"], unit["kind"], unit["module"]])
+            self.add_material_role(self.units.rowCount() - 1, unit.get("material_role", ""))
         add_module.clicked.connect(lambda: self.add_row(self.modules, [self.next_code(self.modules, "M"), "Module"]))
-        add_unit.clicked.connect(lambda: self.add_row(self.units, [self.next_code(self.units, "U"), "Unit operation", "Container", self.text(self.modules, 0, 0)]))
+        add_unit.clicked.connect(self.add_unit)
         remove_module.clicked.connect(lambda: self.remove_rows(self.modules))
         remove_unit.clicked.connect(lambda: self.remove_rows(self.units))
         self.modules.itemChanged.connect(self.invalidate)
@@ -152,6 +154,19 @@ class SystemTopologyDialog(QDialog):
         for column, value in enumerate(values):
             table.setItem(row, column, QTableWidgetItem(value))
 
+    def add_material_role(self, row, value=""):
+        choice = QComboBox()
+        for key, label in MATERIAL_ROLES.items():
+            choice.addItem(label, key)
+        choice.setCurrentIndex(max(0, choice.findData(value)))
+        choice.currentIndexChanged.connect(self.invalidate)
+        choice.setToolTip("Labels the contents or model reactor for automatic loop assignment. This does not change the physical MSI flow graph.")
+        self.units.setCellWidget(row, 4, choice)
+
+    def add_unit(self):
+        self.add_row(self.units, [self.next_code(self.units, "U"), "Unit operation", "Container", self.text(self.modules, 0, 0)])
+        self.add_material_role(self.units.rowCount() - 1)
+
     def next_code(self, table, prefix):
         existing = {self.text(table, row, 0) for row in range(table.rowCount())}
         number = 1
@@ -180,7 +195,14 @@ class SystemTopologyDialog(QDialog):
         for row in range(self.units.rowCount()):
             values = [self.text(self.units, row, col) for col in range(4)]
             if any(values):
-                definition["unit_operations"].append(dict(zip(("code", "name", "kind", "module"), values)))
+                unit = dict(zip(("code", "name", "kind", "module"), values))
+                previous = next((u for u in self.definition["unit_operations"] if u["code"] == unit["code"]), {})
+                unit = {**previous, **unit}
+                choice = self.units.cellWidget(row, 4)
+                unit.pop("material_role", None)
+                if choice and choice.currentData():
+                    unit["material_role"] = choice.currentData()
+                definition["unit_operations"].append(unit)
         by_module = {module['code']: module for module in definition['modules']}
         for row in range(self.sensors.rowCount()):
             code, name, module = [self.text(self.sensors, row, col) for col in range(3)]

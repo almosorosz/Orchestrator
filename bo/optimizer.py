@@ -50,7 +50,7 @@ class Channel:
         if self.stirring_times is not None:
             return [Profile(self.stirring_times * duration, values, self.description, self.reference.step)
                     for duration, values in zip(durations, features)]
-        if self.key == "seed":
+        if self.key in {"seed", "volume"}:
             amounts = features[:, 0] if self.variables else np.full(len(durations), self.reference.values[0])
             return [Profile(np.array([0.]), np.array([amount]), self.description) for amount in amounts]
         if self.variables:
@@ -62,7 +62,7 @@ class Channel:
 def run_profile(run, channel):
     data = run["profiles"][channel]
     profile = make_profile(data["points"], data["source"], step=data["step"])
-    if channel == "seed":
+    if channel in {"seed", "volume"}:
         return Profile(np.array([0.]), profile.values[:1], profile.source)
     return profile
 
@@ -82,7 +82,7 @@ def prepare_channel(state, runs, channel, report, *, horizon=None):
             raise ValueError("Antisolvent has negative recorded rates. Import the dosing rate in g/s "
                              "with pump return or other signed commands identified separately.")
         raise ValueError(f"{label} includes values outside the physical range.")
-    if channel == "seed":
+    if channel in {"seed", "volume"}:
         values = np.array([profile.values[0] for profile in profiles])
     else:
         if any(len(profile.time) < 2 or profile.time[0] != 0
@@ -106,7 +106,7 @@ def prepare_channel(state, runs, channel, report, *, horizon=None):
                        stages=rows, stage_controls=controls, fit_errors=np.asarray(errors))
 
     tolerance = state["tolerances"][channel]
-    if channel == "seed" or all(np.ptp(profile.values) <= tolerance for profile in profiles):
+    if channel in {"seed", "volume"} or all(np.ptp(profile.values) <= tolerance for profile in profiles):
         if np.ptp(values) > tolerance:
             return Channel(channel, reference, (Variable(f"{channel}:scalar", label, unit),),
                            values[:, None], "Scalar")
@@ -329,6 +329,9 @@ def propose(state, report=lambda _: None):
     observed = np.column_stack(columns)
     active = variable_activity(observed)
     vary = active & np.array([state["overrides"].get(variable.key, True) for variable in variables], dtype=bool)
+    initial_groups = state.get("initial_input_groups")
+    if initial_groups is not None:
+        vary &= np.array([not var.key.startswith(("stirring:", "volume:")) or var.key.split(':')[0] in initial_groups for var in variables])
     if not vary.any():
         raise ValueError("Choose at least one stage control, setpoint or seed mass that varies across the runs.")
     # Keep measured variation in the GP even when a decision variable is held fixed for the search.

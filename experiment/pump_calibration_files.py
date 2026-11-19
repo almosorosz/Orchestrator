@@ -88,3 +88,18 @@ def convert_flow(calibration, device_type, values):
     if np.any(np.abs(values) > points[-1, 0] + 1e-9):
         raise ValueError(f"Requested flow exceeds calibration range 0–{points[-1, 0]:g} g/h. Load a calibration covering the requested range.")
     return np.sign(values) * np.interp(np.abs(values), points[:, 0], points[:, 1])
+
+
+def delivered_flow(config, targets):
+    """Invert the loaded calibration: device commands → delivered mass in g/h."""
+    points = validate_calibration(config.get("pump_calibration", {}), config["type"])
+    targets = np.asarray(targets, dtype=float)
+    if not np.isfinite(targets).all() or np.any(np.abs(targets) > points[-1, 1] + 1e-9):
+        raise ValueError("Pump commands exceed the loaded calibration range; extrapolation is not supported.")
+    return np.sign(targets) * np.interp(np.abs(targets), points[:, 1], points[:, 0])
+
+
+def seed_delivery_rate(config, settings):
+    if settings.get("use_device_calibration", False):
+        return float(delivered_flow(config, [settings["rpm"]])[0]) / 3600.
+    return settings["grams_per_second"]

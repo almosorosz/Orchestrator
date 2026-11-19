@@ -1563,6 +1563,8 @@ class ControlPanel(QWidget):
         self.manual_run_stages = []
         from experiment.system_topology import empty_topology
         self.system_topology = empty_topology()
+        from experiment.reservoirs import ReservoirBook
+        self.reservoirs = ReservoirBook(self, DATA_DIR / "reservoir_inventory.json")
 
         self.connection_thread = None
         self.connection_worker = None
@@ -1730,6 +1732,9 @@ class ControlPanel(QWidget):
         self.msi_button.clicked.connect(lambda: self.edit_system_topology(True))
         system_row.addWidget(self.unit_operations_button)
         system_row.addWidget(self.msi_button)
+        self.reservoir_button = QPushButton("Reservoir amounts…")
+        self.reservoir_button.clicked.connect(self.edit_reservoirs)
+        system_row.addWidget(self.reservoir_button)
         top_section.addLayout(system_row)
         
         main_layout.addLayout(top_section)
@@ -1855,7 +1860,7 @@ class ControlPanel(QWidget):
 
     def current_system_topology(self):
         from experiment.system_topology import encode_msi
-        definition = deepcopy(self.system_topology)
+        definition = self.reservoirs.topology(self.system_topology)
         definition.pop("msi_code", None)
         configs, _ = self.collect_current_configuration()
         try:
@@ -1873,8 +1878,25 @@ class ControlPanel(QWidget):
         dialog = SystemTopologyDialog(self.current_system_topology(), configs, self, generate=generate, initial_tab=tab)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.system_topology = deepcopy(dialog.definition)
+            self.reservoirs.configure(self.system_topology, configs)
             self.refresh_connectivity_fields()
         dialog.deleteLater()
+
+    def edit_reservoirs(self):
+        if self.hardware_manager.is_busy or self.experiment_window_attached():
+            QMessageBox.warning(self, "Session open", "End the experiment session before entering refill amounts.")
+            return
+        from gui.reservoir_dialog import ReservoirDialog
+        definition = self.current_system_topology()
+        if not definition["unit_operations"]:
+            QMessageBox.information(self, "Define containers", "Add containers in Unit operations / modules, then assign each pump's source and target before defining reservoir amounts.")
+            return
+        dialog = ReservoirDialog(definition, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.system_topology = dialog.definition
+            configs, _ = self.collect_current_configuration()
+            self.reservoirs.configure(dialog.definition, configs)
+            self.reservoirs.save()
 
     def refresh_connectivity_fields(self):
         for widget in self.device_widgets.values():
@@ -2126,6 +2148,7 @@ class ControlPanel(QWidget):
         self.update_experiment_controls()
         self.update_profile_status()
         self.update_global_status()
+        self.reservoirs.configure(self.system_topology, self.devices)
         return True
 
     def load_configuration(self):
@@ -2621,6 +2644,9 @@ class ControlPanel(QWidget):
             for experiment in experiments:
                 frame = experiment.to_frame() if isinstance(experiment, ExperimentDefinition) else experiment
                 ExperimentDefinition.from_frame(frame, device_configs)
+            self.reservoirs.configure(self.current_system_topology(), device_configs)
+            first = experiments[0] if isinstance(experiments[0], ExperimentDefinition) else ExperimentDefinition.from_frame(experiments[0], device_configs)
+            self.reservoirs.check(first, end_hold_s=5.)
             if campaign is not None:
                 if any(not is_monitor_only(device_configs[key]) for key in campaign.monitor_device_ids):
                     raise ValueError("Only read-only devices may be added as campaign monitors")
@@ -2654,6 +2680,7 @@ class ControlPanel(QWidget):
             )
 
             dashboard.hardware_manager = self.hardware_manager
+            dashboard.reservoirs = self.reservoirs
             from gui.recording_settings_dialog import load_recording_settings
             dashboard.recording_settings = load_recording_settings()
             dashboard.recording_settings["system_topology"] = self.current_system_topology()

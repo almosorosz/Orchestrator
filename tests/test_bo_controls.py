@@ -44,6 +44,9 @@ class BOControlTests(unittest.TestCase):
             expected = {"temperature": [f"stage:{i}:end" for i in range(12)],
                         "feed": [f"stage:{i}:start" for i in range(12)]}
             for channel, profile_editor in editor.editors.items():
+                if channel not in expected:
+                    self.assertEqual(profile_editor.controls.rowCount(), 0)
+                    continue
                 for row in range(profile_editor.controls.rowCount()):
                     item = profile_editor.controls.item(row, 0)
                     if item.data(Qt.ItemDataRole.UserRole) in expected[channel]:

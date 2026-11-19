@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.interpolate import PchipInterpolator
+from scipy.integrate import cumulative_trapezoid
 
 
 CHANNELS = ("Temperature", "Concentration", "FBRM", "D10", "D50", "D90", "AS scale")
@@ -89,6 +90,8 @@ def scale_to_feed(scale, *, direction, smoothing):
 
 def seed_distribution(percentiles):
     d10, d50, d90 = percentiles
+    if d10 == d50 == d90 == 0:
+        return EMPTY.copy()
     if not 0 < d10 < d50 < d90:
         raise ValueError("Enter positive, increasing seed D10, D50 and D90.")
     anchors = np.array([0.5 * d10, d10, d50, d90, 2 * d90])
@@ -101,7 +104,7 @@ def seed_distribution(percentiles):
 
 def import_run(file, mapping, *, start, end, concentration_multiplier, scale_direction,
                smoothing, initial_concentration, seed_percentiles, no_feed,
-               feed_channel=None, feed_multiplier=1., require_initial_concentration=True):
+               feed_channel=None, feed_multiplier=1., feed_transform=None, require_initial_concentration=True):
     if feed_channel:
         mapping = {**mapping, "AS flow": feed_channel}
     selected = {role: {} for role in (*CHANNELS, "AS flow")}
@@ -156,11 +159,12 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
         added = feed = np.array([[0., duration], [0., 0.]])
     elif feed_channel:
         feed = within_window("AS flow")
-        feed[1] *= feed_multiplier
+        feed[1] = feed_transform(feed[1]) if feed_transform is not None else feed[1] * feed_multiplier
         if (feed.shape[1] < 2 or feed[0, 0] != 0 or feed[0, -1] != duration
-                or np.any(feed[1] < 0) or scale.shape[1] < 2):
-            raise ValueError("Assigned AS flow and reservoir scale must cover the crystallization window.")
-        added = np.vstack((scale[0], scale_direction * (scale[1] - scale[1, 0])))
+                or np.any(feed[1] < 0)):
+            raise ValueError("Assigned AS flow must cover the crystallization window.")
+        added = (np.vstack((scale[0], scale_direction * (scale[1] - scale[1, 0]))) if scale.shape[1] >= 2
+                 else np.vstack((feed[0], cumulative_trapezoid(feed[1], feed[0], initial=0))))
     else:
         if scale.shape[1] < 2:
             raise ValueError("Map an AS scale with two or more readings, or select no AS feed.")
@@ -187,6 +191,6 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
         "CountsData": within_window("FBRM"),
         "FlowRateData": feed, "AntisolventScaleData": scale, "AddedAntisolventData": added,
         "InitialCSDsData": seed_distribution(seed_percentiles) if seed_percentiles else EMPTY.copy(),
-        "InitialD10D50D90": np.asarray(seed_percentiles or []), "FinalCSDsData": EMPTY.copy(),
+        "InitialD10D50D90": np.asarray(seed_percentiles if seed_percentiles is not None else [0., 0., 0.]), "FinalCSDsData": EMPTY.copy(),
         "FinalD10D50D90": np.asarray(final), **{role + "Data": data for role, data in sizes.items()},
     }

@@ -196,7 +196,7 @@ class ProfileStageEditor(QWidget):
         elif remaining < 0:
             self.time_note.setText(f"Stages exceed the {self.horizon:g} s batch horizon by {-remaining:g} s.")
         else:
-            ending = "Hold the final temperature" if self.channel == "temperature" else "Keep feed off"
+            ending = "Hold the final temperature" if self.channel == "temperature" else "Hold the final RPM" if self.channel == "stirring" else "Keep feed off"
             self.time_note.setText(f"{ending} for the remaining {remaining:g} s.")
 
     def update_control_note(self):
@@ -302,7 +302,7 @@ class StageEditor(QWidget):
         super().__init__(parent)
         self.tabs = QTabWidget()
         self.editors = {}
-        for channel in ("temperature", "feed"):
+        for channel in ("temperature", "feed", "stirring"):
             editor = ProfileStageEditor(channel, self)
             editor.changed.connect(self.changed)
             self.editors[channel] = editor

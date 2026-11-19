@@ -151,6 +151,16 @@ def _candidate_recipe(candidate, *, experiment, process, conditions, addition):
                 "InitialConcentration": concentration}
     design_process = {**process, "SeedMass": seed_mass, "SolvMass": solvent,
                       "AntiSolvMass": antisolvent}
+    if "InitialVolume_ml" in process:
+        carrier = process["SolvMass"] + process["AntiSolvMass"]
+        same_composition = carrier > 0 and np.isclose(process["AntiSolvMass"] / carrier, antisolvent / (solvent + antisolvent))
+        initial_volume = (process["InitialVolume_ml"] * (solvent + antisolvent) / carrier if same_composition
+                          else solvent / process["SolventDensity"] + antisolvent / process["AntiSolventDensity"])
+        design_process.update(InitialVolume_ml=initial_volume, RequestedInitialVolume_ml=initial_volume, VolumeFromDesignConditions=True)
+    proposed.pop("AddedAntisolventData", None)
+    if "MixingSettings" in process:
+        from .mixing import average_mixing
+        design_process = average_mixing(proposed, design_process, process["MixingSettings"], mean_rpm=process.get("StirringRPM"))
     return proposed, design_process
 
 

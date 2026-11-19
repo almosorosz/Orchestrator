@@ -317,6 +317,9 @@ class ProbabilisticDialog(QDialog):
         for widget in self.condition_controls["stirring_factor"]:
             widget.setEnabled(stir_enabled)
             widget.setToolTip("" if stir_enabled else "Requires a DoE stirring factor and a power-dependent kinetic term.")
+        for widget in self.condition_controls["volume_factor"]:
+            widget.setEnabled("volume" in groups)
+            widget.setToolTip("Available when the initial campaign varied liquid charge volume.")
 
     def edit_profile(self):
         model, experiment = self.profile_selection()

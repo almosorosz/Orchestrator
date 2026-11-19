@@ -267,7 +267,7 @@ class DashboardPage(QWidget):
         # ----------------------------------------------------------
 
         devices_box = QGroupBox(
-            "🔌 Connected Devices"
+            "Reservoir amounts"
         )
 
         devices_layout = QVBoxLayout()
@@ -286,13 +286,11 @@ class DashboardPage(QWidget):
             "❌ MODEL Worker: Not Ready"
         )
 
-        devices_layout.addWidget(
-            self.device_omni_label
-        )
-
-        devices_layout.addWidget(
-            self.device_model_label
-        )
+        self.device_omni_label.hide()
+        self.device_model_label.hide()
+        self.reservoir_values = QLabel("")
+        self.reservoir_values.setWordWrap(True)
+        devices_layout.addWidget(self.reservoir_values)
 
         devices_box.setLayout(
             devices_layout
@@ -342,6 +340,9 @@ class DashboardPage(QWidget):
         )
     
     
+    def set_reservoirs(self, rows):
+        self.reservoir_values.setText("\n".join(f"{row['name']}: {row['remaining_g']:.3f} g" for row in rows))
+
     def set_theme(self, dark_mode):
         self.dark_mode = dark_mode
     

@@ -28,8 +28,8 @@ class PhysicalControl:
 
 def validate_stages(channel, stages, horizon=None):
     """Validate units, continuity, and the fixed horizon for physical stages."""
-    if channel not in ("temperature", "feed"):
-        raise ValueError("Physical stages apply to temperature or antisolvent.")
+    if channel not in ("temperature", "feed", "stirring"):
+        raise ValueError("Physical stages apply to temperature, antisolvent or stirring.")
     stages = tuple(stages)
     if not stages:
         raise ValueError("Add at least one stage to the profile.")
@@ -44,8 +44,8 @@ def validate_stages(channel, stages, horizon=None):
             raise ValueError(f"Stage {index} duration must be positive.")
         if channel == "temperature" and min(stage.start, stage.end) <= -273.15:
             raise ValueError(f"Stage {index} temperature must exceed absolute zero.")
-        if channel == "feed" and min(stage.start, stage.end) < 0:
-            raise ValueError(f"Stage {index} antisolvent rate cannot be negative.")
+        if channel in {"feed", "stirring"} and min(stage.start, stage.end) < 0:
+            raise ValueError(f"Stage {index} {CHANNELS[channel][0].lower()} cannot be negative.")
     if channel == "temperature" and any(a.end != b.start for a, b in zip(stages, stages[1:])):
         raise ValueError("Each temperature stage must start at the previous stage’s end temperature.")
     if horizon is not None:
@@ -94,7 +94,7 @@ def profile_stages(profile, count=8, *, channel=None):
                 ts.append(time[-1])
                 ys.append(values[-1])
             time, values = np.asarray(ts), np.asarray(ys)
-        return _stages_at_breakpoints(time, values, feed=channel == "feed")
+        return _stages_at_breakpoints(time, values, feed=channel in {"feed", "stirring"})
 
     # Add knots where the current linear approximation has the largest residual.
     kept = [0, len(time) - 1]
@@ -139,7 +139,7 @@ def physical_profile(channel, stages, horizon):
     if np.any(np.diff(boundaries) <= 0):
         raise ValueError("A stage duration is too short to resolve on this time axis.")
     times, values = [0.], [stages[0].start]
-    step = channel == "feed" and all(stage.start == stage.end for stage in stages)
+    step = channel in {"feed", "stirring"} and all(stage.start == stage.end for stage in stages)
     for index, stage in enumerate(stages):
         end_time = float(boundaries[index + 1])
         next_start = stages[index + 1].start if index + 1 < len(stages) else stage.end
@@ -170,10 +170,10 @@ def physical_controls(channel, stages):
         label = f"Stage {index + 1}"
         key = f"stage:{index}"
         controls.append(PhysicalControl(f"{key}:duration", f"{label} duration", "s", "duration", index))
-        if channel == "feed" and stage.start == stage.end:
-            controls.append(PhysicalControl(f"{key}:start", f"{label} feed rate", unit, "start", index))
+        if channel in {"feed", "stirring"} and stage.start == stage.end:
+            controls.append(PhysicalControl(f"{key}:start", f"{label} rate", unit, "start", index))
             continue
-        if index == 0 or channel == "feed":
+        if index == 0 or channel in {"feed", "stirring"}:
             controls.append(PhysicalControl(f"{key}:start", f"{label} start", unit, "start", index))
         controls.append(PhysicalControl(f"{key}:end", f"{label} end", unit, "end", index))
     return tuple(controls)
@@ -183,6 +183,8 @@ def grouped_controls(channel, stages):
     """Describe whole-profile controls supported by the supplied stage shapes."""
     stages = validate_stages(channel, stages)
     _, unit, _ = CHANNELS[channel]
+    if channel == "stirring":
+        return ()
     if channel == "temperature":
         final = PhysicalControl("final_temperature", "Final temperature", unit, "final", None, channel)
         if _initial_holds(channel, stages) == len(stages):
@@ -295,7 +297,7 @@ def apply_controls(channel, stages, controls, values):
         if control.kind == "end" and value != stages[index].end:
             explicit_ends.add(index)
         stage = replace(stages[index], **{field: value})
-        if channel == "feed" and control.kind == "start" and index in holds:
+        if channel in {"feed", "stirring"} and control.kind == "start" and index in holds:
             stage = replace(stage, end=value)
         stages[index] = stage
     if channel == "temperature":

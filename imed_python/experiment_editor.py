@@ -303,7 +303,8 @@ class ExperimentEditor(QDialog):
         sizes = {}
         for key, row in zip(PERCENTILES, self.sizes.rows()):
             values = np.asarray([number(value, key) for value in row] if any(row) else [])
-            if values.size and (values[0] <= 0 or np.any(np.diff(values) < 0)):
+            unseeded = key == "InitialD10D50D90" and proc["SeedMass"] == 0 and np.all(values == 0)
+            if values.size and not unseeded and (values[0] <= 0 or np.any(np.diff(values) < 0)):
                 raise ValueError("Enter ordered positive D10, D50 and D90 values.")
             sizes[key] = values
         if not sizes[PERCENTILES[1]].size:
@@ -317,6 +318,11 @@ class ExperimentEditor(QDialog):
             if not sizes[PERCENTILES[0]].size:
                 raise ValueError("Positive seed mass requires a seed distribution or seed percentiles.")
             traces["InitialCSDsData"] = seed_distribution(sizes[PERCENTILES[0]])
+            if not traces["InitialCSDsData"].size:
+                raise ValueError("Positive seed mass requires positive seed percentiles or a seed CSD.")
+        if proc["SeedMass"] == 0:
+            sizes["InitialD10D50D90"] = np.zeros(3)
+            traces["InitialCSDsData"] = np.empty((2, 0))
         self.records[self.index] = ({**exp, **traces, **sizes, "Name": name, "InitialConcentration": initial},
                                     {**process, **proc})
         self.changed = True

@@ -32,6 +32,8 @@ def read_spec(channel, spec, horizon=None):
 
 def choose_controls(channel, stages):
     available = {c.key: c for c in (*grouped_controls(channel, stages), *physical_controls(channel, stages))}
+    if channel == "stirring":
+        return list(available)
     if channel == "temperature":
         ramps = [i for i, stage in enumerate(stages) if stage.start != stage.end]
         requested = ["initial_delay", "final_temperature"]
@@ -61,7 +63,7 @@ def trace_spec(channel, profile, *, exact=False):
 
 def default_spec(channel, profile):
     """Use a compact starting template for sampled traces, keeping commanded stages."""
-    if profile.step or len(profile.time) <= 9:
+    if channel == "stirring" or profile.step or len(profile.time) <= 9:
         return trace_spec(channel, profile)
     duration = float(profile.time[-1])
     start, finish = float(profile.values[0]), float(profile.values[-1])

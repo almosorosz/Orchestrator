@@ -96,9 +96,9 @@ def modeling_campaign(campaign, setup):
 
 
 def frame_metadata(frame):
-    return {key: frame.attrs[key] for key in ("run_stages", "model_window") if key in frame.attrs}
+    return {key: frame.attrs[key] for key in ("run_stages", "model_window", "initial_mass_g") if key in frame.attrs}
 
 
 def apply_frame_metadata(frame, metadata):
-    frame.attrs.update({key: metadata[key] for key in ("run_stages", "model_window") if key in metadata})
+    frame.attrs.update({key: metadata[key] for key in ("run_stages", "model_window", "initial_mass_g") if key in metadata})
     return frame

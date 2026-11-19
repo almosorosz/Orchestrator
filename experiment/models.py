@@ -69,6 +69,7 @@ class ExperimentDefinition:
     control_modes: tuple[ControlModePoint, ...] = ()
     model_window: tuple[float, float] | None = None
     run_stages: tuple = ()
+    initial_mass_g: float | None = None
 
     def __post_init__(self):
         ids = [profile.device_id for profile in self.profiles]
@@ -76,6 +77,8 @@ class ExperimentDefinition:
             raise ValueError("An experiment needs a name and unique device profiles")
         duration = max(profile.points[-1].time_s for profile in self.profiles)
         object.__setattr__(self, "run_stages", stages_from_payload(self.run_stages, duration))
+        if self.initial_mass_g is not None and (not math.isfinite(self.initial_mass_g) or self.initial_mass_g < 0):
+            raise ValueError("The initial system mass must be finite, nonnegative grams.")
         if any(point.device_id not in ids or point.time_s > duration for point in self.control_modes):
             raise ValueError("Control-mode events must refer to assigned devices within the experiment timeline.")
         if self.model_window is not None:
@@ -106,7 +109,8 @@ class ExperimentDefinition:
                 raise ValueError(f"Valve {device_id} requires binary targets")
             profiles.append(DeviceProfile(device_id, points, "step" if config["type"] == "nidaq_valve" else "linear", unit))
         return cls(name=name, profiles=tuple(profiles), source=source,
-                   run_stages=frame.attrs.get("run_stages", ()), model_window=frame.attrs.get("model_window"))
+                   run_stages=frame.attrs.get("run_stages", ()), model_window=frame.attrs.get("model_window"),
+                   initial_mass_g=frame.attrs.get("initial_mass_g"))
 
     def to_frame(self):
         import numpy as np
@@ -129,6 +133,8 @@ class ExperimentDefinition:
             frame.attrs["run_stages"] = [asdict(stage) for stage in self.run_stages]
         if self.model_window is not None:
             frame.attrs["model_window"] = self.model_window
+        if self.initial_mass_g is not None:
+            frame.attrs["initial_mass_g"] = self.initial_mass_g
         return frame
 
 
