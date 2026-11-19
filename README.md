@@ -554,13 +554,28 @@ can be saved with rates above the configured limits; their warnings appear in th
 application log. Generating the DoE checks those limits and reports the requested
 temperature change, actual rate and minimum required duration.
 
-Temperature Start/End fields have **Equal to previous** checkboxes. Each linked
+Device Start/End fields have **Equal to previous** checkboxes for temperature,
+pumps, stirrers and valves. Each linked
 value resolves from the preceding section's final target separately for each
 generated experiment (the first section uses the line's Initial target). For
 example, alternate the cooling End between 15 and 20 °C and check Equal to previous
 on the equilibration Hold: it stays at 15 or 20 °C in the matching experiment.
-Linked values do not add independent DoE dimensions. New temperature ramps link
-their Start by default; the Equilibration palette action links its temperature.
+Linked values do not add independent DoE dimensions. New ramps link
+their Start by default; the Equilibration palette action links its target.
+For a linked Mass addition, the preceding pump flow is maintained and its mass
+is calculated from the new section's duration. Valve links retain a binary state.
+
+The editor has a wrapping toolbar, a scrolling stage sidebar and a larger
+timeline. Each distinct section boundary has enough vertical space to show its
+actions, including short independent sections. The window can be resized or
+maximized; long definitions scroll instead of compressing the stage controls.
+
+Click **Check one representative experiment** at any time to plot the current
+definition before saving or generating the full DoE. It uses Value for Fixed/DoE
+controls and Minimum for Alternate controls (experiment 1), resolves linked
+targets, and uses the selected time unit. Rate warnings remain visible while the
+draft is plotted. Changing the definition and clicking again refreshes the plot;
+the saved definition and previously generated experiments remain unchanged.
 
 An action's **Action lasts until** can span several shared stages, or continue to
 **End of experiment (longest profile)**. Define a constant stirrer once in the

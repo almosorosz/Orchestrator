@@ -10,8 +10,8 @@ COLORS = {"T": "#95979c", "AS": "#ef4444", "seed": "#3b82f6", "solution": "#f59e
 STYLES = {"AS": "--", "solution": "-.", "solvent": "-.", "clean_sol": "-."}
 
 
-def profile_figure(signals, index=1, name=""):
-    """Signals carry their own times (hours), units, labels and semantic roles."""
+def profile_figure(signals, index=1, name="", *, time_unit="h"):
+    """Signals carry times in time_unit, units, labels and semantic roles."""
     figure = Figure(figsize=(max(10, 6 + .6 * len(signals)), 4), dpi=100)
     figure.patch.set_facecolor("none")
     main = figure.add_subplot(111)
@@ -40,7 +40,7 @@ def profile_figure(signals, index=1, name=""):
         handles.append(line)
     main.grid(True, which="major", axis="both", color="#24364d", linestyle="--", linewidth=.7, alpha=.7)
     main.set_axisbelow(True)
-    main.set_xlabel("Time (h)", color="#95979c", fontsize=9, labelpad=8)
+    main.set_xlabel(f"Time ({time_unit})", color="#95979c", fontsize=9, labelpad=8)
     main.text(1., 1.04, f"EXP {index:02d}" + (f" · {name}" if name else ""), transform=main.transAxes,
               ha="right", va="bottom", color="#94a3b8", fontsize=8, fontweight="bold")
     legend = main.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, 1.25), ncol=4,

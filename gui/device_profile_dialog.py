@@ -77,7 +77,7 @@ class DeviceProfileDialog(QDialog):
         section = {"id": identifier(), "name": f"Section {len(self.sections) + 1}", "kind": "Hold",
                    "duration": parameter(duration), "start": parameter(self.lane["initial"]),
                    "end": parameter(self.lane["initial"]), "control_mode": "Process"}
-        if self.lane["role"] == "T" and self.sections:
+        if self.sections:
             section["start"]["equal_previous"] = True
             section["end"]["equal_previous"] = True
         return section
@@ -127,10 +127,13 @@ class DeviceProfileDialog(QDialog):
         if section["kind"] == "Ramp":
             entries.append((f"Start ({unit})", section["start"]))
         entries.append((f"End ({unit})", section["end"]))
-        self.table = ParameterTable(entries, temperature=self.lane["role"] == "T", time_unit=self.time_unit)
+        self.table = ParameterTable(entries, allow_previous=True, time_unit=self.time_unit, previous_hint=(
+            "Keep the preceding pump flow; the mass for this section is calculated from its duration."
+            if section["kind"] == "Dose" else None))
         self.details.addWidget(self.table, 1)
         self.summary.setText("Profile duration uses the sum of its section durations in each generated experiment. "
-                             "For temperature, Equal to previous uses the preceding section's final temperature; the first uses Initial target.")
+                             "Equal to previous uses this device's preceding final target; the first uses Initial target. "
+                             "For mass additions, it keeps the previous flow and calculates the required mass.")
 
     def change_kind(self):
         if self.current < 0:

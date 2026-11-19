@@ -84,7 +84,7 @@ def validate_recipe(recipe):
                 raise ValueError("Mass additions need a solution, solvent, antisolvent or cleaning pump line.")
             if action["kind"] == "Dose":
                 amount = action["end"]
-                if (amount["value"] if amount["mode"] == "Fixed" else amount["min"]) < 0:
+                if not amount.get("equal_previous") and (amount["value"] if amount["mode"] == "Fixed" else amount["min"]) < 0:
                     raise ValueError("A mass addition must be nonnegative.")
             if role == "T" and action.get("control_mode") not in {"Jacket", "Process"}:
                 raise ValueError("Choose jacket or internal vessel (Process) temperature control.")
@@ -106,10 +106,9 @@ def validate_recipe(recipe):
         if name.endswith(".duration") and low <= 0:
             raise ValueError("Stage durations must be positive in every experiment.")
         lane_id = name.split(".")[1] if not name.endswith(".duration") else None
-        if not isinstance(item.get("equal_previous", False), bool) or (item.get("equal_previous")
-                                                                       and (not lane_id or by_id[lane_id]["role"] != "T")):
-            raise ValueError("Equal to previous is available for temperature values.")
-        if lane_id and by_id[lane_id]["role"] == "valve_state" and (low not in (0, 1) or high not in (0, 1)
+        if not isinstance(item.get("equal_previous", False), bool) or (item.get("equal_previous") and not lane_id):
+            raise ValueError("Equal to previous is available for device values, not durations.")
+        if lane_id and not item.get("equal_previous") and by_id[lane_id]["role"] == "valve_state" and (low not in (0, 1) or high not in (0, 1)
                                                                  or item["mode"] == "DoE"):
             raise ValueError("Valve states must be fixed at 0/1 or alternate between 0 and 1.")
     return recipe
@@ -165,14 +164,22 @@ def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=
                 def resolved(key):
                     path = f"{prefix}.{lane['id']}.{key}"
                     result = current if action[key].get("equal_previous") else values[path]
+                    if action["kind"] == "Dose" and action[key].get("equal_previous"):
+                        # Dose fields are grams; preceding pump targets are g/h.
+                        # Derive the mass needed to keep that flow for this section.
+                        result *= (end - begin) / 3600
                     values[path] = float(result)
                     return result
                 finish = resolved("end")
                 if action["kind"] == "Dose":
+                    if finish < 0:
+                        raise ValueError(f"{name}: a mass addition cannot inherit a negative pump flow.")
                     finish *= 3600 / (end - begin)
                 start = resolved("start") if action["kind"] == "Ramp" else finish
             else:
                 start = finish = current if lane["role"] == "T" or lane["role"].startswith("stirring") else 0.
+            if lane["role"] == "valve_state" and (start not in (0, 1) or finish not in (0, 1)):
+                raise ValueError(f"{name}: valve targets, including inherited values, must be 0 or 1.")
             if ROLES[lane["role"]].unit == "g/h":
                 limit = 60 * (system.AS_add_max if lane["role"] == "AS" else system.sol_add_max)
                 if max(start, finish) > limit + 1e-10:
