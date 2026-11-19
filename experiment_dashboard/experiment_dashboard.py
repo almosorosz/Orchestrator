@@ -429,6 +429,7 @@ class ExperimentWorker(QObject):
 
                 total_steps = len(profile)
                 current_step_idx = -1
+                current_stage_id = None
 
                 times = profile[
                     "time_s"
@@ -446,6 +447,17 @@ class ExperimentWorker(QObject):
                     ) * self.speed
                     if self._event_simulation:
                         self._simulation_time = simulation_base + elapsed
+
+                    stage = next((stage for stage in definition.run_stages
+                                  if stage.start_s <= elapsed < stage.end_s), None)
+                    if stage is not None and stage.id != current_stage_id:
+                        current_stage_id = stage.id
+                        window = definition.model_window
+                        modeled = window is not None and window[0] <= stage.start_s and stage.end_s <= window[1]
+                        logger.info("Run %s stage %s (%s), %g–%g s; %s", run.run_id, stage.name, stage.purpose,
+                                    stage.start_s, stage.end_s, "modeling experiment period" if modeled else "support phase")
+                        if self.recorder:
+                            self.recorder.submit("run_stage", run.run_id, {**asdict(stage), "modeling_period": modeled})
 
                     # ------------------------------------------
                     # Determine current profile interval

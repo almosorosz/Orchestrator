@@ -44,6 +44,7 @@ def default_setup():
                       "initial_concentration": None, "scale_direction": -1, "smoothing": 5,
                       "seed_percentiles": [], "no_feed": False},
         "manual_assignments": {}, "manual_simulation": None, "followup_start_s": 0,
+        "experiment_period": {"mode": "definition", "stage_ids": []},
         "support_profiles": {}, "seed_pump": None,
         "imed": {"delta_aic": 2, "iterations": 5, "covariance_samples": 8,
                  "equilibration_s": 5, "conditions": {}},
@@ -72,6 +73,13 @@ def _merge(defaults, updates, label):
 def validate_setup(updates):
     defaults = default_setup()
     data = _merge(defaults, updates, "automatic loop settings")
+    period = data["experiment_period"] = _merge(defaults["experiment_period"], data["experiment_period"], "experiment period")
+    if (period["mode"] not in {"definition", "stages", "manual"} or not isinstance(period["stage_ids"], list)
+            or any(not isinstance(key, str) or not key for key in period["stage_ids"])
+            or len(set(period["stage_ids"])) != len(period["stage_ids"])):
+        raise ValueError("Choose a valid experiment period and distinct stage IDs.")
+    if period["mode"] == "stages" and not period["stage_ids"]:
+        raise ValueError("Select at least one stage for the experiment period.")
     _integer(data["max_followups"], "maximum follow-up experiments", 1, 1000)
     _number(data["followup_start_s"], "follow-up crystallization start")
     manual = data["manual_assignments"]
@@ -170,11 +178,26 @@ def _process(values):
     return values
 
 
-def _role_active(campaign, device_id):
-    return campaign is not None and any(
-        point.target != 0 for exp in campaign.experiments for profile in exp.profiles
-        if profile.device_id == device_id for point in profile.points
-    )
+def _role_active(campaign, device_id, *, modeling_only=False):
+    if campaign is None:
+        return False
+    for exp in campaign.experiments:
+        for profile in exp.profiles:
+            if profile.device_id != device_id:
+                continue
+            if not modeling_only or exp.model_window is None:
+                if any(point.target != 0 for point in profile.points):
+                    return True
+                continue
+            begin, end = exp.model_window
+            times = np.array([point.time_s for point in profile.points])
+            targets = np.array([point.target for point in profile.points])
+            sample_times = np.union1d([begin, np.nextafter(end, begin)], times[(times >= begin) & (times < end)])
+            values = (targets[np.clip(np.searchsorted(times, sample_times, side="right") - 1, 0, len(targets) - 1)]
+                      if profile.interpolation == "step" else np.interp(sample_times, times, targets))
+            if np.any(values != 0):
+                return True
+    return False
 
 
 def device_configuration_changed(previous, current):
@@ -212,6 +235,9 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
     if demo is not None:
         return demo["ExpData"], demo["ProcInf"], runs
     experiments, processes = [], []
+    definition_file = Path(folder) / "definition.json"
+    definitions = read_json(definition_file).get("campaign", {}).get("experiments", []) if definition_file.is_file() else []
+    definitions = {item["experiment_id"]: item for item in definitions}
     for (number, name, file), experiment_id in zip(runs, run_ids):
         process = processes_by_id[experiment_id]
         start, end = windows.get(experiment_id, (recording["start_s"], recording["end_s"]))
@@ -224,6 +250,11 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
             no_feed=recording["no_feed"], require_initial_concentration=require_initial_concentration,
         )
         experiment.update(Name=name, RecordingFile=str(file))
+        definition = definitions.get(experiment_id, {})
+        if definition.get("run_stages"):
+            experiment["ModelingWindow_s"] = [start, end]
+            experiment["ModelingStages"] = [stage for stage in definition["run_stages"]
+                                            if start <= stage["start_s"] and (end is None or stage["end_s"] <= end)]
         experiments.append(experiment)
         processes.append({**process, "No": number or len(processes) + 1})
     return experiments, processes, runs
@@ -233,7 +264,8 @@ class RecipeCompiler:
     """Resolve process profiles to the assigned devices for LOOP and one-off execution."""
 
     def __init__(self, setup, template, configs, calibration_storage, assignments, monitors, mode):
-        self.setup, self.template, self.mode = setup, template, mode
+        from experiment.run_stages import modeling_campaign
+        self.setup, self.template, self.mode = setup, modeling_campaign(template, setup), mode
         self.calibration_storage = calibration_storage
         self.assignments = {item.role: item for item in assignments}
         self.line_roles = template.line_roles if template else {}
@@ -275,7 +307,7 @@ class RecipeCompiler:
             raise ValueError("Support profiles need distinct assigned DoE roles: " + ", ".join(sorted(bad_roles)))
         for role, profile in support.items():
             self._support_profile(role, profile)
-        if self.line_roles:
+        if self.line_roles or (self.template and self.template.experiments[0].model_window is not None):
             return  # Timeline charging and support stages are carried into follow-up recipes.
         required = {role for role in self.roles if role not in {"T", "AS", "seed"}
                     and _role_active(campaign, self.roles[role])}
@@ -355,10 +387,11 @@ class RecipeCompiler:
         if stirring is not None and "stirring_rate" in self.roles:
             device_profiles["stirring_rate"] = self.device_profile("stirring_rate", stirring)
         if ("stirring_rate" in self.roles and _role_active(self.template, self.roles["stirring_rate"])
-                and "stirring_rate" not in device_profiles and "stirring_rate" not in support and not self.line_roles):
+                and "stirring_rate" not in device_profiles and "stirring_rate" not in support and not self.line_roles
+                and not (self.template and self.template.experiments[0].model_window is not None)):
             raise ValueError("Provide a recorded or configured main stirrer profile for the follow-up.")
         seed_mass = _number(process.get("SeedMass", default_seed), "seed mass")
-        if self.line_roles and not self.demo:
+        if not self.demo and (self.line_roles or (self.template and self.template.experiments[0].model_window is not None)):
             return self._timeline_followup(device_profiles, process, name, source, default_seed, duration)
         if self.demo:
             for role, profile in support.items():
@@ -424,8 +457,13 @@ class RecipeCompiler:
             profiles.append(DeviceProfile(profile.device_id, points, profile.interpolation, profile.unit))
         modes = tuple(replace(mode, time_s=mode.time_s + shift if mode.time_s >= end else mode.time_s)
                       for mode in original.control_modes)
+        from experiment.run_stages import RunStage
+        stages = tuple(stage for stage in original.run_stages if stage.end_s <= begin + 1e-7)
+        stages += (RunStage("modeled-experiment", f"{self.mode.upper()} proposed experiment", "Experiment", begin, begin + duration),)
+        stages += tuple(replace(stage, start_s=stage.start_s + shift, end_s=stage.end_s + shift)
+                        for stage in original.run_stages if stage.start_s >= end - 1e-7)
         experiment = ExperimentDefinition(name, tuple(profiles), source=source, control_modes=modes,
-                                          model_window=(begin, begin + duration))
+                                          model_window=(begin, begin + duration), run_stages=stages)
         ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
         return Campaign(name, (experiment,), monitor_device_ids=self.monitors, line_roles=self.line_roles), experiment.model_window
 
@@ -479,6 +517,7 @@ class AdaptiveLoop:
         self.setup = validate_setup(setup)
         self.compiler = RecipeCompiler(self.setup, campaign, configs, calibration_storage, assignments,
                                        campaign.monitor_device_ids, mode)
+        campaign = self.compiler.template
         self.roles = self.compiler.roles
         self.configs = self.compiler.configs
         self.demo = self.compiler.demo
@@ -540,8 +579,8 @@ class AdaptiveLoop:
             self._require_channels("Concentration")
         if not recording["no_feed"]:
             self._require_channels("AS scale")
-        elif "AS" in self.roles and _role_active(campaign, self.roles["AS"]):
-            raise ValueError("Clear no_feed or remove antisolvent delivery from the initial runs.")
+        elif "AS" in self.roles and _role_active(campaign, self.roles["AS"], modeling_only=True):
+            raise ValueError("Clear no_feed or remove antisolvent delivery from the selected modeling period.")
 
     def _require_channels(self, *roles):
         missing = [role for role in roles if not self.demo and not self.mapping.get(role)]
@@ -638,6 +677,10 @@ class AdaptiveLoop:
                 raise ValueError("Fix simulated IMED seed mass to a dose available in the validation DoE.")
 
     def _read_batch(self, manifest, target, report):
+        for experiment_id in manifest["experiments"]:
+            if window := self.windows.get(experiment_id):
+                report(f"Importing only the modeling experiment period {window[0]:g}–{window[1]:g} s; "
+                       "full preparation and cleanup recordings are retained.")
         experiments, processes, runs = read_completed_recordings(
             Path(manifest["campaign_folder"]), manifest["experiments"], self.setup["recording"],
             self.mapping, self.process_by_id, self.windows)

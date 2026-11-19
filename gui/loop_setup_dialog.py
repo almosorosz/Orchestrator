@@ -18,6 +18,7 @@ from imed_python.campaign_dialog import PROCESS_FIELDS
 from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
 from gui.loop_setup_preview import used_loop_values, value_text
+from gui.experiment_period_widget import ExperimentPeriodWidget
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
@@ -189,6 +190,7 @@ class LoopSetupDialog(QDialog):
         self.max_followups.setMaximumWidth(140)
         self.max_followups.setToolTip("Number of recommended experiments to execute after the starting batch.")
         self.followup_start = number_field(self.setup["followup_start_s"])
+        self.followup_start.setToolTip("Used for profiles without a defined experiment period. Stage-based follow-ups keep the preparation duration from the starting run.")
         form.addRow("Follow-up experiments", self.max_followups)
         form.addRow("Follow-up crystallization start (s)", self.followup_start)
         layout.addWidget(run)
@@ -200,6 +202,10 @@ class LoopSetupDialog(QDialog):
         self.tabs.addTab(self.support, "Support profiles")
         if backend == "imed":
             self.tabs.addTab(self.design_page(), "IMED design")
+        self.period = ExperimentPeriodWidget(self.setup["experiment_period"])
+        self.tabs.insertTab(0, self.period, "Experiment period")
+        self.period.mode.currentIndexChanged.connect(self._period_mode_changed)
+        self._period_mode_changed()
         if self.preview is not None:
             self.used_values_tab = self.preview_page()
             self.tabs.insertTab(0, self.used_values_tab, "Used values")
@@ -251,7 +257,9 @@ class LoopSetupDialog(QDialog):
 
     def refresh_preview(self):
         try:
-            context = self.preview(self.backend, draft := self.collect(), self.preview_source.currentData())
+            context = self.preview(self.backend, self.collect(validate_period=False), self.preview_source.currentData())
+            self.period.set_context(context)
+            draft = self.collect()
             labels = {**DESIGN_VALUES, **{key: values[0] for key, values in DESIGN_PAIRS.items()}}
             groups = used_loop_values(draft, self.backend, context, labels)
         except (ValueError, KeyError, TypeError, OSError) as error:
@@ -276,6 +284,12 @@ class LoopSetupDialog(QDialog):
                     row.setToolTip(column, row.text(column))
             group.setExpanded(expanded.get(title, title in {"Device assignments", "Starting process inputs"}))
 
+    def _period_mode_changed(self):
+        manual = self.period.mode.currentData() == "manual"
+        for key in ("start_s", "end_s"):
+            self.recording_numbers[key][0].setEnabled(manual)
+            self.recording_numbers[key][0].setToolTip("Used when Experiment period is set to Manual start / end.")
+
     @staticmethod
     def scroll_form():
         content = QWidget()
@@ -294,8 +308,8 @@ class LoopSetupDialog(QDialog):
         recording = self.setup["recording"]
         self.recording_numbers = {}
         for key, label, hint in (
-            ("start_s", "Crystallization start (s)", ""),
-            ("end_s", "Crystallization end (s)", "Last recorded sample"),
+            ("start_s", "Manual experiment start (s)", ""),
+            ("end_s", "Manual experiment end (s)", "Last recorded sample"),
             ("concentration_multiplier", "Concentration multiplier to g/g solution", ""),
             ("initial_concentration", "Initial concentration (g/g solution)", "Use the recording"),
         ):
@@ -433,8 +447,9 @@ class LoopSetupDialog(QDialog):
         form.addRow(self.design_group)
         return page
 
-    def collect(self):
+    def collect(self, *, validate_period=True):
         draft = deepcopy(self.setup)
+        draft["experiment_period"] = self.period.values() if validate_period else {"mode": "definition", "stage_ids": []}
         draft["max_followups"] = self.max_followups.value()
         draft["followup_start_s"] = entered_number(self.followup_start, "follow-up crystallization start")
         recording = draft["recording"]
@@ -498,7 +513,11 @@ class LoopSetupDialog(QDialog):
 
     def accept(self):
         try:
-            self.setup = self.collect()
+            draft = self.collect()
+            if self.preview is not None:
+                self.period.set_context(self.preview(self.backend, draft, self.preview_source.currentData()))
+            self.period.validate(draft)
+            self.setup = draft
         except ValueError as error:
             self.error.setText(str(error))
             self.error.show()

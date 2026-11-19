@@ -7,9 +7,9 @@ import pandas as pd
 
 from experiment.doe.doe_creator import ExperimentCreator
 from experiment.doe_campaign import ROLES, ProfileRole
+from experiment.run_stages import PURPOSES, recipe_run_stages, definition_window
 
 
-PURPOSES = ("Charging", "Experiment", "Equilibration", "Cleaning", "Rinse", "Discharge", "Wait")
 TIME_UNITS = {"s": 1., "min": 60., "h": 3600.}
 SYSTEM_FIELDS = ("v_heat_max", "v_cool_max", "AS_add_max", "T_room", "sol_add_max",
                  "time_to_wait_prior_exp", "aceton_boil_out_T", "wait_after_exp", "t_before_open_valve")
@@ -254,10 +254,8 @@ def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=
         traces[lane["id"]] = (np.asarray(x), np.asarray(y))
     union = np.unique(np.concatenate([trace[0] for trace in traces.values()]))
     frame = pd.DataFrame({"t": union / 3600., **{key: np.interp(union, *trace) for key, trace in traces.items()}})
-    active = [i for i, stage in enumerate(recipe["stages"]) if stage["purpose"] in {"Experiment", "Equilibration"}]
-    if active and active != list(range(min(active), max(active) + 1)):
-        raise ValueError("Keep Experiment and Equilibration stages together so modeling uses one continuous window.")
-    window = [float(times[min(active)]), float(times[max(active) + 1])] if active else None
+    selected = definition_window(recipe_run_stages(recipe, values))
+    window = list(selected) if selected else None
     return frame, modes, window
 
 
@@ -345,6 +343,7 @@ class RecipeCreator(ExperimentCreator):
                 getattr(self.exp_storage, field)[name] = frame.copy()
             self.exp_storage.DoE[name] = pd.DataFrame({key: [values[key]] for key in self.DoE_val})
             self.parameter_snapshots[name] = {"control_modes": modes, "model_window": window,
+                                               "run_stages": [vars(stage) for stage in recipe_run_stages(self.recipe, values)],
                                                **{key: {"value": value} for key, value in values.items()}}
         self.actually_sampled_experiments = len(points)
 

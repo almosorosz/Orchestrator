@@ -100,7 +100,11 @@ class ExternalModelInfoTests(unittest.TestCase):
                 info = window.settings_page.show_external_model_info()
                 self.assertEqual(info.path_fields["experiment_root"].text(), str(root))
                 self.assertIn("next_experiments.json", info.pages["Files and folders"].toPlainText())
-                self.assertIn("proposed extension", info.pages["Automatic connector"].toPlainText())
+                self.assertNotIn("Automatic connector", info.pages)
+                info.copy_prompt()
+                self.assertIn("next_experiments.json is not automatically imported", APP.clipboard().text())
+                self.assertIn("Do not request, disclose or modify CrystalLoop's codebase", APP.clipboard().text())
+                self.assertNotIn("proposed extension", " ".join(page.toPlainText() for page in info.pages.values()))
                 filename = root / "next_experiments.json"
                 with patch("gui.external_model_info.QFileDialog.getSaveFileName", return_value=(str(filename), "")), \
                      patch("gui.external_model_info.QMessageBox.information"):

@@ -203,6 +203,8 @@ def case_runs(case, folder=None, *, controls=None):
         metrics.update(yields(case.get("Solubility"), process, initial, final, temperature.values[-1], feed))
         run = {"name": display_name(exp, f"Experiment {index + 1}"), "metrics": metrics,
                "profiles": {channel: profile.payload() for channel, profile in profiles.items()}}
+        if "ModelingWindow_s" in exp:
+            run.update(modeling_window_s=exp["ModelingWindow_s"], modeling_stages=exp.get("ModelingStages", []))
         if isinstance(exp.get("RecordingFile"), str):
             run["recording"] = exp["RecordingFile"]
         runs.append(run)

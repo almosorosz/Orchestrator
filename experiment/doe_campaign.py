@@ -164,10 +164,18 @@ class DoeCampaignService:
                 simulation = compile_simulation(simulation, role_devices, configs,
                                                 monitor_device_ids, imed_monitors, profiles)
             snapshot = self.creator.parameter_snapshots.get(name, {})
+            stages = snapshot.get("run_stages", ())
+            if not stages and self.recipe_lanes:
+                from experiment.run_stages import recipe_run_stages
+                # Older exact snapshots already saved sampled stage durations.
+                stages = recipe_run_stages(self.creator.recipe,
+                                          {key: entry["value"] for key, entry in snapshot.items()
+                                           if key.endswith(".duration")})
             modes = tuple(ControlModePoint(item["time_s"], role_devices[item["lane"]], item["mode"])
                           for item in snapshot.get("control_modes", []) if item["lane"] in role_devices)
             definition = ExperimentDefinition(name, tuple(profiles), source="doe", imed_simulation=simulation,
-                                              control_modes=modes, model_window=snapshot.get("model_window"))
+                                              control_modes=modes, model_window=snapshot.get("model_window"),
+                                              run_stages=stages)
             # The shared validator applies the currently configured device limits.
             ExperimentDefinition.from_frame(definition.to_frame(), configs)
             experiments.append(definition)

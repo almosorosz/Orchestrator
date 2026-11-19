@@ -552,9 +552,22 @@ exports the assigned DoE or current Control Panel batch as a Control Panel JSON
 configuration. External programs can edit its experiments in device command units
 and save next_experiments.json beside campaign_input.json. Publish MODEL.json last
 to mark calculations complete; in this version, load the next-experiment file
-through Control Panel → Load Configuration and start it explicitly. The guide also
-describes the proposed watched-folder adapter for fully automatic external recipes;
-that adapter is not enabled yet.
+through Control Panel → Load Configuration and start it explicitly. **Copy AI review
+prompt** gives a prompt for reviewing the method, recordings and exported configuration
+with an AI. It describes this file handoff and asks for data/configuration checks.
+
+Experiment Definition stage purposes include **Preparing for experiment**, **Dissolution**
+and **Seeding**, as well as Charging, Experiment, Equilibration, Wait and cleanup phases.
+For manual profiles, use **Control Panel → Run stages…** before generating each experiment.
+Save/load configuration and full setup presets preserve the stage labels and intervals.
+In **Automatic loop setup → Experiment period**, keep the definition's Experiment and
+Equilibration period, select adjacent named run stages, or enter manual start/end seconds
+in Recording. The selection applies to both BO and IMED. Sampled durations resolve to
+each experiment's own boundaries. Modeling time starts at zero at the selected start;
+full recordings and stage-change logs still include the entire run. Follow-up recipes
+retain the first starting run's preparation and cleanup around the proposed modeling
+period. Supply process masses, concentration and seed information for the start of that
+period, after any charging/dissolution/seeding outside it.
 
 The DoE assignment preview explicitly lists read-only monitors included for
 recording/live plots and any disconnected probes it excludes. A saved empty

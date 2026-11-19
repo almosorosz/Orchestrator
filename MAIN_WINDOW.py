@@ -73,6 +73,7 @@ from app.controller                       import Controller, Stage
 from app.logging_config import attach_gui_logging
 from experiment.doe_campaign import DoeCampaignService
 from experiment.models import Campaign, ExperimentDefinition
+from experiment.run_stages import frame_metadata
 from hardware_devices.capabilities import is_monitor_only
 from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
@@ -1606,7 +1607,7 @@ class MainWindow(QMainWindow):
         if mode != "external" and self._adaptive_loop is None:
             if not self._prepare_adaptive_loop(mode, campaign):
                 return False
-            campaign = replace(campaign, campaign_id=uuid4().hex)
+            campaign = replace(self._adaptive_loop.template, campaign_id=uuid4().hex)
         if self._adaptive_loop is None:
             self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
         dashboard = self.control_panel.start_campaign(campaign, {"enabled": True, "output_folder": self.CONTROLLER.omni_folder})
@@ -1667,6 +1668,7 @@ class MainWindow(QMainWindow):
                 "recording_root": load_recording_settings()["output_folder"],
                 "control_root": panel.control_output_path.text().strip(), "devices": configs,
                 "experiments": [frame.to_dict(orient="split") for frame in frames],
+                "experiment_metadata": [frame_metadata(frame) for frame in frames],
                 "system_topology": panel.current_system_topology(), "simulation_speed": panel.simulation_speed.value()}
 
     def _loop_setup_context(self, backend, setup, source):
@@ -1709,7 +1711,13 @@ class MainWindow(QMainWindow):
                 messages.append(f"BO settings need attention. {error}")
         imed = self.imed_page.panel
         experiment_folder, model_folder, _ = self.settings_page.get_environment_inputs()
-        return {"source": source, "label": label, "campaign": campaign, "roles": roles, "monitors": monitors,
+        stages = campaign.experiments[0].run_stages if campaign is not None else ()
+        if not stages and source == "doe" and self.experiment_service.exp_par.timeline:
+            from experiment.run_stages import recipe_run_stages
+            from experiment.recipe import recipe_parameters
+            recipe = self.experiment_service.exp_par.timeline
+            stages = recipe_run_stages(recipe, {key: item["value"] for key, item in recipe_parameters(recipe)})
+        return {"source": source, "label": label, "campaign": campaign, "roles": roles, "monitors": monitors, "run_stages": stages,
                 "configs": configs, "connected": connected, "messages": messages, "case": imed.checkpoint_case(),
                 "bo": bo_settings, "size_term": self.settings_page.pbm_size_samples.currentText(),
                 "folders": (experiment_folder, model_folder), "workers": imed.cpu_workers()}
@@ -1924,6 +1932,13 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_omni_count(0)
         self.dashboard_page.set_model_count(0)
         self._adaptive_loop = session
+        for experiment in session.template.experiments:
+            window = experiment.model_window
+            if window is not None:
+                names = [stage.name for stage in experiment.run_stages
+                         if window[0] <= stage.start_s and stage.end_s <= window[1]]
+                self.log_message(f"{mode.upper()} modeling period for {experiment.name}: {window[0]:g}–{window[1]:g} s"
+                                 f" ({', '.join(names) or 'manual time window'}). Other run stages execute and remain recorded.", "INFO")
         self._recipe_sources[mode] = ("doe" if campaign is self._assigned_doe_campaign else "manual",
                                       campaign.monitor_device_ids)
         return True
@@ -2081,6 +2096,9 @@ class MainWindow(QMainWindow):
             devices, profiles = self.control_panel.collect_current_configuration()
             panel = {"devices": devices, "profiles": profiles,
                      "experiments": [frame.to_dict(orient="split") for frame in self.control_panel.experiments],
+                     "run_stages": self.control_panel.manual_run_stages,
+                     "experiment_metadata": [frame_metadata(frame)
+                                             for frame in self.control_panel.experiments],
                      "recording_folder": self.control_panel.control_output_path.text(),
                      "system_topology": self.control_panel.current_system_topology(),
                      "simulation_speed": self.control_panel.simulation_speed.value()}
@@ -2150,7 +2168,8 @@ class MainWindow(QMainWindow):
                 panel = {**panel, "recording_folder": str(experiments)}
                 data["recording"] = {"enabled": True, "sql_enabled": False, "output_folder": str(experiments)}
             if not self.control_panel.apply_loaded_configuration(panel["devices"], panel.get("profiles", {}),
-                    panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology")):
+                    panel.get("experiments", []), panel.get("recording_folder"), panel.get("system_topology"),
+                    experiment_metadata=panel.get("experiment_metadata"), run_stages=panel.get("run_stages")):
                 return
             self.execution.reset()
             self.CONTROLLER = self.create_experiments = None

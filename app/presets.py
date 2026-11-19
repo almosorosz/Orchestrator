@@ -9,6 +9,7 @@ from experiment.profiles.profile_gen import ExperimentProfileParameters, DefineP
 from experiment.doe_campaign import ProfileAssignment, ROLES
 from experiment.models import ExperimentDefinition
 from experiment.recording import validate_settings
+from experiment.run_stages import apply_frame_metadata, stages_from_payload
 
 
 PRESET_FORMAT = "crystalloop-setup"
@@ -16,8 +17,13 @@ PRESET_FORMAT = "crystalloop-setup"
 
 def validate_manual_experiments(panel):
     devices = panel["devices"]
+    stages_from_payload(panel.get("run_stages", ()))
+    metadata = panel.get("experiment_metadata") or [{} for _ in panel.get("experiments", [])]
+    if len(metadata) != len(panel.get("experiments", [])):
+        raise ValueError("Saved run stage metadata must match the experiments.")
     for index, saved in enumerate(panel.get("experiments", []), 1):
         frame = pd.DataFrame(**saved)
+        apply_frame_metadata(frame, metadata[index - 1])
         missing = [column for column in frame if column != "time_s" and column not in devices]
         if missing:
             raise ValueError(f"Saved Control Panel experiment {index} references missing devices: "

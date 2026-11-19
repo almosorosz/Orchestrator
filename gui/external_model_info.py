@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QPushButton, QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 from app.presets import validate_manual_experiments
@@ -17,6 +17,7 @@ def experiment_template(context):
     """Export existing, already defined experiments in the loadable CP format."""
     payload = {"version": 3, "devices": deepcopy(context.get("devices", {})), "profiles": {},
                "experiments": deepcopy(context.get("experiments", [])),
+               "experiment_metadata": deepcopy(context.get("experiment_metadata", [{} for _ in context.get("experiments", [])])),
                "simulation_speed": context.get("simulation_speed", 1.),
                "recording_folder": context.get("experiment_root", "")}
     if context.get("system_topology") is not None:
@@ -28,6 +29,26 @@ def experiment_template(context):
     return payload
 
 
+def ai_review_prompt(context):
+    return f"""Review my external-model approach for the currently implemented CrystalLoop MODEL-phase file handoff.
+
+I will supply campaign_input.json, a loadable next-experiment template, relevant execution.csv recordings, and my modeling method. Ask for missing files or assumptions; do not invent measurements, device IDs, calibration factors or capabilities.
+
+Experiment output root: {context.get('experiment_root') or '[set in Settings]'}
+Model output root: {context.get('model_root') or '[set in Settings]'}
+Current MODEL iteration folder: {context.get('active_model_folder') or '[read from CrystalLoop after the batch finishes]'}
+
+Current interface:
+1. CrystalLoop executes the starting batch and publishes campaign_input.json in its MODEL iteration folder. My external program runs separately and reads the manifest and each completed run's execution.csv.
+2. My program writes next_experiments.json as a FULL Control Panel configuration using CrystalLoop's exported template. experiments is a list of pandas split-format tables (columns, index, data). Each table uses time_s in seconds and actual configured actuator IDs. Targets are numeric and finite; times are nonnegative and strictly increasing. Preserve device configuration and required read-only monitors. Command units are temperature °C, stirrer/Masterflex RPM, Ismatec mL/min, valve 0/1. Convert mass flows using the actual pump calibration.
+3. Preserve or update experiment_metadata for each experiment when changing timing: run_stages have id/name/purpose/start_s/end_s and model_window is [start_s,end_s]. The modeling period is continuous and must be inside the full run. Distinguish measured outputs from commanded targets; preparation and cleanup data must not be treated as the modeling experiment.
+4. When all calculations and files are complete, publish a nonempty MODEL.json beside campaign_input.json, writing a temporary file and renaming it last. This marker signals completion; its contents do not execute recipes. next_experiments.json is not automatically imported.
+5. The user ends the previous experiment session and stops LOOP monitoring, uses Control Panel → Load Configuration for next_experiments.json, connects devices, reviews View Experiment Profiles, then Dashboard Start → Control Panel profiles to execute the new batch.
+
+Evaluate whether my method uses the recorded data correctly, handles uncertainty and failed/incomplete runs, and produces feasible next experiments within configured device limits and stated scientific constraints. Check the full file format, units, pump calibration, stage timing, modeling window and required assignments. Report concrete issues and corrections supported by the supplied files, then describe the exact file-write and user load/review/start sequence. Work only with data/configuration files. Do not request, disclose or modify CrystalLoop's codebase, and do not assume an API, MCP service or automatic recipe-import connector exists.
+"""
+
+
 class ExternalModelInfoDialog(QDialog):
     def __init__(self, context_provider, parent=None):
         super().__init__(parent)
@@ -36,12 +57,12 @@ class ExternalModelInfoDialog(QDialog):
         self.context_provider = context_provider
         layout = QVBoxLayout(self)
         intro = QLabel("Use your own MATLAB, Python or other model with CrystalLoop's experiment execution and recording. "
-                       "This guide distinguishes the current file handoff from a proposed fully automatic connector.")
+                       "Follow the MODEL-phase file handoff below to prepare and start the next experiments.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
         self.tabs = QTabWidget()
         self.pages = {}
-        for title in ("Workflow", "Files and folders", "New experiments", "Automatic connector"):
+        for title in ("Workflow", "Files and folders", "New experiments", "AI review prompt"):
             page = QTextBrowser()
             page.setOpenExternalLinks(False)
             self.tabs.addTab(page, title)
@@ -63,7 +84,9 @@ class ExternalModelInfoDialog(QDialog):
         self.open_model_button.clicked.connect(self.open_model_folder)
         self.export_button = QPushButton("Save next-experiment template…")
         self.export_button.clicked.connect(self.export_template)
-        for button in (refresh, self.open_model_button, self.export_button):
+        self.copy_prompt_button = QPushButton("Copy AI review prompt")
+        self.copy_prompt_button.clicked.connect(self.copy_prompt)
+        for button in (refresh, self.open_model_button, self.export_button, self.copy_prompt_button):
             actions.addWidget(button)
         actions.addStretch()
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -78,12 +101,10 @@ class ExternalModelInfoDialog(QDialog):
             field.setText(str(context.get(key) or "Not created / configured yet"))
         self.open_model_button.setEnabled(bool(context.get("active_model_folder") or context.get("model_root")))
         self.pages["Workflow"].setHtml("""
-            <h3>Current external-model workflow</h3>
-            <ol><li>Set existing Experiment and MODEL folders in Settings. Choose <b>External MODEL file</b>.
-            Prepare a DoE and apply device assignments, or generate Control Panel experiments. Connect the devices
-            and the read-only monitors you want recorded. Start from the Dashboard.</li>
-            <li>CrystalLoop executes and saves the batch, then creates a unique MODEL subfolder and
-            <code>campaign_input.json</code>. Run your external modeling program separately.</li>
+            <h3>When CrystalLoop enters the MODEL phase</h3>
+            <ol><li>With <b>External MODEL file</b> selected, the completed batch has a unique MODEL subfolder
+            containing <code>campaign_input.json</code>. Find it using the active MODEL folder below.
+            Run your external modeling program separately.</li>
             <li>Your program reads that manifest, finds the recorded campaign, and analyzes each completed run's
             <code>execution.csv</code>. Keep measured outputs such as FBRM and D10/D50/D90 separate from commanded inputs.</li>
             <li>Write the next experiments as <code>next_experiments.json</code> using the template on this window.
@@ -113,13 +134,8 @@ class ExternalModelInfoDialog(QDialog):
             <p>Only the completion marker is watched in the current version. The next-experiment JSON can be stored
             elsewhere if you select it using Load Configuration. Dropping a CSV or JSON into the Experiment folder
             does not queue or execute a new experiment.</p>
-            <h3>One set of output locations</h3><ul>
-            <li><b>Control Panel Start:</b> Settings → Experiment output folder.</li>
-            <li><b>Start DoE independent from loop:</b> the same Experiment output folder.</li>
-            <li><b>Dashboard LOOP:</b> recordings in Experiment output folder; fits, stages and handoff files in Model output folder.</li>
-            <li><b>BO/IMED Execute recipe:</b> recordings in Experiment output folder; recipe/dataset snapshots in Model output folder.</li></ul>
-            <p>Each campaign has its own subfolder. A run without modeling does not need to create a modeling stage.
-            Legacy per-mode folders in older configurations do not override the general Settings locations.</p>
+            <p>The Settings Experiment output folder contains the full recordings. The manifest identifies the
+            completed campaign so your external program can locate the correct data.</p>
         """)
         device_rows = []
         for device_id, config in context.get("devices", {}).items():
@@ -146,22 +162,19 @@ class ExternalModelInfoDialog(QDialog):
             valves hold the previous binary state. Shorter device profiles hold their final target.</p>
             <p>Read-only FBRM, D-value probes and balances remain in the devices configuration and are recorded as
             monitors. Do not add fake measured values as experiment target columns.</p>
+            <p><code>experiment_metadata</code> has one entry per experiment. Keep stage IDs and update each
+            <code>run_stages</code> start/end and <code>model_window</code> when changing the timeline. Stage times
+            are seconds; the modeling window must remain inside the full run. Preparation and cleanup stay recorded.</p>
             <h3>Configured command devices</h3><table border="1" cellpadding="5"><tr>
             <th>ID</th><th>Name</th><th>Target unit</th><th>Configured limits</th></tr>
             """ + "".join(device_rows) + "</table>")
-        self.pages["Automatic connector"].setHtml("""
-            <h3>Recommended next integration: a watched exchange folder</h3>
-            <p><b>This automatic adapter is a proposed extension, not an enabled feature in this version.</b></p>
-            <ol><li>CrystalLoop publishes <code>campaign_input.json</code> with the campaign ID and recorded-data paths.</li>
-            <li>Your program writes <code>next_experiments.json</code> in the exported format, then atomically publishes
-            <code>MODEL.json</code> with a unique response ID, source campaign ID, and a run/stop decision.</li>
-            <li>The adapter checks the IDs to reject duplicate or stale responses, validates device assignments,
-            units, limits and connectivity, then submits the batch through the existing experiment runner.</li>
-            <li>CrystalLoop records the new batch, publishes the next manifest and repeats until stop or the
-            configured experiment limit. Errors and every handoff are logged.</li></ol>
-            <p>This is convenient for Python, MATLAB and other tools: they only read and write data files.
-            A REST or MCP interface can be added later using the same validated request format.</p>
-        """)
+        self.pages["AI review prompt"].setPlainText(ai_review_prompt(context))
+
+    def copy_prompt(self):
+        prompt = ai_review_prompt(self.context_provider())
+        self.pages["AI review prompt"].setPlainText(prompt)
+        QApplication.clipboard().setText(prompt)
+        self.tabs.setCurrentWidget(self.pages["AI review prompt"])
 
     def open_model_folder(self):
         context = self.context_provider()

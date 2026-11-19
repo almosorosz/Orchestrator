@@ -4,6 +4,7 @@ from numbers import Real
 from bo.profiles import CONSTRAINTS, TARGETS, selected_horizon
 from experiment.adaptive_loop import recording_mapping
 from experiment.doe_campaign import ROLES
+from experiment.run_stages import modeling_campaign
 from experiment.loop_process import LOOP_WEIGHT_DEFAULTS, PROCESS_DEFAULTS, VALIDATION_PE_SETTINGS, starting_process_defaults
 from imed_python.campaign_dialog import PROCESS_FIELDS
 from imed_python.campaign_import import CHANNELS
@@ -103,14 +104,24 @@ def used_loop_values(setup, backend, context, design_labels):
                 inputs.append((f"{name} · {process_labels.get(key, key)}", value, "Starting experiment override"))
 
     recorded = groups["Recording"] = []
+    period = groups["Modeling experiment period"] = []
+    try:
+        selected_campaign = modeling_campaign(campaign, setup)
+        for exp in selected_campaign.experiments if selected_campaign else ():
+            window = exp.model_window
+            if window is None:
+                window = (recording["start_s"], recording["end_s"] or max(p.points[-1].time_s for p in exp.profiles))
+            names = [s.name for s in exp.run_stages if window[0] <= s.start_s and s.end_s <= window[1]]
+            period.append((exp.name, f"{window[0]:g}–{window[1]:g} s · " + (", ".join(names) or "time window"),
+                           "Experiment period"))
+    except ValueError as error:
+        period.append(("Check selected stages", str(error), "Experiment period"))
     if simulation:
         windows = sorted({(exp.imed_simulation["start_s"], exp.imed_simulation["end_s"]) for exp in experiments})
         recorded.append(("Crystallization windows (s)", ", ".join(f"{start:g}–{end:g}" for start, end in windows), "PBM simulation"))
         mapping = {**simulation["monitors"], "Temperature": f"{roles.get('T', '')}.temp_external"}
     else:
         recorded.extend((
-            ("Crystallization start (s)", recording["start_s"], "Recording tab"),
-            ("Crystallization end (s)", "Last recorded sample" if recording["end_s"] is None else recording["end_s"], "Recording tab"),
             ("Concentration multiplier", recording["concentration_multiplier"], "Recording tab"),
             ("No antisolvent feed", recording["no_feed"], "Recording tab"),
             ("Antisolvent scale direction", "Decreasing" if recording["scale_direction"] == -1 else "Increasing", "Recording tab"),
@@ -129,7 +140,7 @@ def used_loop_values(setup, backend, context, design_labels):
         recorded.append(("Seed D10 / D50 / D90 (µm)", recording["seed_percentiles"], "Process inputs"))
 
     support = groups["Follow-up support"] = []
-    if campaign and campaign.line_roles:
+    if campaign and (campaign.line_roles or experiments[0].run_stages):
         support.append(("Charging and cleanup", "Inherited from the starting timeline", "Experiment Definition"))
     for role, profile in setup["support_profiles"].items():
         times, targets = profile["points"]

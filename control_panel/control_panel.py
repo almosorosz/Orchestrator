@@ -12,6 +12,7 @@ from hardware_devices.capabilities import is_monitor_only
 from hardware_devices.simulated import SimulatedDevice
 from hardware_devices.limits import DEFAULT_LIMITS, target_limits
 from experiment.models import Campaign, ExperimentDefinition
+from experiment.run_stages import frame_metadata
 from asyncua.sync import Client
 
 from PySide6.QtCore import Qt, QTimer, QObject, QThread, Signal, Slot, QEvent
@@ -1559,6 +1560,7 @@ class ControlPanel(QWidget):
         
         self.device_widgets = {}
         self.experiments = []
+        self.manual_run_stages = []
         from experiment.system_topology import empty_topology
         self.system_topology = empty_topology()
 
@@ -1628,6 +1630,8 @@ class ControlPanel(QWidget):
         self.limits_button = QPushButton("Device Limits")
         
         self.generate_experiment_button = QPushButton("Generate Experiment")
+        self.run_stages_button = QPushButton("Run stages…")
+        self.run_stages_button.clicked.connect(self.edit_run_stages)
         self.view_experiment_profiles_button = QPushButton("View Experiment Profiles")
         self.view_experiment_profiles_button.setToolTip("Preview all generated manual experiments in the DoE viewer")
         self.view_experiment_profiles_button.clicked.connect(self.show_experiment_profiles)
@@ -1685,6 +1689,7 @@ class ControlPanel(QWidget):
         bottom_row.addSpacing(25)
         
         bottom_row.addWidget(self.generate_experiment_button)
+        bottom_row.addWidget(self.run_stages_button)
         bottom_row.addWidget(self.view_experiment_profiles_button)
         bottom_row.addWidget(self.start_experiment_button)
         bottom_row.addWidget(QLabel("Simulation speed"))
@@ -1964,6 +1969,8 @@ class ControlPanel(QWidget):
         experiments_data,
         recording_folder=None,
         system_topology=None,
+        experiment_metadata=None,
+        run_stages=None,
     ):
 
         from experiment.system_topology import empty_topology, validate_topology
@@ -2103,6 +2110,14 @@ class ControlPanel(QWidget):
             )
             for experiment in experiments_data
         ]
+        from experiment.run_stages import apply_frame_metadata, stages_from_payload
+        metadata = experiment_metadata or [{} for _ in self.experiments]
+        if len(metadata) != len(self.experiments):
+            raise ValueError("Saved stage metadata must match the number of experiments.")
+        for frame, values in zip(self.experiments, metadata):
+            apply_frame_metadata(frame, values)
+            ExperimentDefinition.from_frame(frame, self.devices)
+        self.manual_run_stages = [vars(stage) for stage in stages_from_payload(run_stages or ())]
     
         # ----------------------------------------------------------
         # Refresh UI
@@ -2189,13 +2204,16 @@ class ControlPanel(QWidget):
                     "Configuration contains no devices."
                 )
     
-            validate_manual_experiments({"devices": devices, "experiments": experiments_data})
+            validate_manual_experiments({"devices": devices, "experiments": experiments_data,
+                                         "run_stages": data.get("run_stages", []),
+                                         "experiment_metadata": data.get("experiment_metadata", [])})
             speed = float(data.get("simulation_speed", 1))
             if not self.simulation_speed.minimum() <= speed <= self.simulation_speed.maximum():
                 raise ValueError("Invalid Control Panel simulation speed.")
             if not self.apply_loaded_configuration(
                 devices, profiles_data, experiments_data,
                 data.get("recording_folder"), data.get("system_topology"),
+                experiment_metadata=data.get("experiment_metadata"), run_stages=data.get("run_stages"),
             ):
                 return
             self.simulation_speed.setValue(speed)
@@ -2238,7 +2256,9 @@ class ControlPanel(QWidget):
                     orient="split"
                 )
                 for experiment in self.experiments
-            ]
+            ],
+            "run_stages": self.manual_run_stages,
+            "experiment_metadata": [frame_metadata(frame) for frame in self.experiments],
         }
     
         file_path, _ = QFileDialog.getSaveFileName(
@@ -2751,6 +2771,15 @@ class ControlPanel(QWidget):
         self.experiment_profiles_dialog.show()
         return self.experiment_profiles_dialog
 
+    def edit_run_stages(self):
+        from gui.run_stages_dialog import RunStagesDialog
+        if self.experiment_running():
+            QMessageBox.information(self, "Run stages", "Finish the active experiment before changing stage definitions.")
+            return
+        dialog = RunStagesDialog(self.manual_run_stages, self)
+        if dialog.exec():
+            self.manual_run_stages = dialog.stages
+
     def generate_experiment(self):
     
         profiles = {}
@@ -2926,6 +2955,17 @@ class ControlPanel(QWidget):
                     profile_values
                 )
     
+        if self.manual_run_stages:
+            from experiment.run_stages import stages_from_payload, definition_window
+            try:
+                stages = stages_from_payload(self.manual_run_stages, final_time)
+                experiment.attrs["run_stages"] = [vars(stage) for stage in stages]
+                window = definition_window(stages)
+                if window is not None:
+                    experiment.attrs["model_window"] = window
+            except ValueError as error:
+                QMessageBox.warning(self, "Check run stages", str(error))
+                return
         self.experiments.append(
             experiment
         )

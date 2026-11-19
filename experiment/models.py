@@ -7,6 +7,7 @@ import math
 import pandas as pd
 from hardware_devices.limits import DEFAULT_LIMITS, target_limits, target_allowed
 from hardware_devices.capabilities import is_monitor_only
+from experiment.run_stages import stages_from_payload
 
 DEVICE_LIMITS = DEFAULT_LIMITS
 
@@ -67,17 +68,19 @@ class ExperimentDefinition:
     imed_simulation: dict | None = None
     control_modes: tuple[ControlModePoint, ...] = ()
     model_window: tuple[float, float] | None = None
+    run_stages: tuple = ()
 
     def __post_init__(self):
         ids = [profile.device_id for profile in self.profiles]
         if not self.name or not ids or len(ids) != len(set(ids)):
             raise ValueError("An experiment needs a name and unique device profiles")
         duration = max(profile.points[-1].time_s for profile in self.profiles)
+        object.__setattr__(self, "run_stages", stages_from_payload(self.run_stages, duration))
         if any(point.device_id not in ids or point.time_s > duration for point in self.control_modes):
             raise ValueError("Control-mode events must refer to assigned devices within the experiment timeline.")
         if self.model_window is not None:
             begin, end = self.model_window
-            if not 0 <= begin < end <= duration:
+            if not 0 <= begin < end <= duration + 1e-7:
                 raise ValueError("The modeling window must lie inside the experiment timeline.")
 
     @classmethod
@@ -102,12 +105,15 @@ class ExperimentDefinition:
             if config["type"] == "nidaq_valve" and any(p.target not in (0, 1) for p in points):
                 raise ValueError(f"Valve {device_id} requires binary targets")
             profiles.append(DeviceProfile(device_id, points, "step" if config["type"] == "nidaq_valve" else "linear", unit))
-        return cls(name=name, profiles=tuple(profiles), source=source)
+        return cls(name=name, profiles=tuple(profiles), source=source,
+                   run_stages=frame.attrs.get("run_stages", ()), model_window=frame.attrs.get("model_window"))
 
     def to_frame(self):
         import numpy as np
         times = sorted({p.time_s for profile in self.profiles for p in profile.points}
-                       | {point.time_s for point in self.control_modes})
+                       | {point.time_s for point in self.control_modes}
+                       | {time for stage in self.run_stages for time in (stage.start_s, stage.end_s)}
+                       | set(self.model_window or ()))
         result = {"time_s": times}
         for profile in self.profiles:
             x = [p.time_s for p in profile.points]
@@ -117,7 +123,13 @@ class ExperimentDefinition:
                 result[profile.device_id] = np.asarray(y)[idx]
             else:
                 result[profile.device_id] = np.interp(times, x, y)
-        return pd.DataFrame(result)
+        frame = pd.DataFrame(result)
+        if self.run_stages:
+            from dataclasses import asdict
+            frame.attrs["run_stages"] = [asdict(stage) for stage in self.run_stages]
+        if self.model_window is not None:
+            frame.attrs["model_window"] = self.model_window
+        return frame
 
 
 @dataclass(frozen=True)
