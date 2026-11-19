@@ -152,7 +152,7 @@ class TimelineView(QGraphicsView):
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.setBackgroundBrush(QColor("#07111f"))
-        self.setMinimumSize(500, 360)
+        self.setMinimumSize(360, 180)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(MIME):
@@ -188,6 +188,7 @@ class RecipeEditor(QWidget):
         self.scene = QGraphicsScene(self)
         self.view = TimelineView(self)
         layout = QVBoxLayout(self)
+        self.toolbar_buttons = []
         toolbar = FlowLayout()
         for label, callback in (("Add stage", self.add_stage), ("Edit stage", self.edit_stage),
                                 ("Delete stage", self.delete_stage), ("Add device line", self.add_line),
@@ -196,6 +197,7 @@ class RecipeEditor(QWidget):
             button = QPushButton(label)
             button.setStyleSheet("QPushButton { padding: 6px 12px; min-height: 22px; }")
             button.clicked.connect(callback)
+            self.toolbar_buttons.append(button)
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
         side = QVBoxLayout()
@@ -218,12 +220,15 @@ class RecipeEditor(QWidget):
         side.addWidget(self.notice)
         left = QWidget()
         left.setLayout(side)
-        left.setMinimumWidth(300)
+        self.sidebar_content = left
+        self.sidebar_layout = side
+        left.setMinimumWidth(240)
         self.sidebar = QScrollArea()
         self.sidebar.setWidgetResizable(True)
-        self.sidebar.setMinimumWidth(330)
+        self.sidebar.setMinimumWidth(260)
         self.sidebar.setWidget(left)
         split = QSplitter()
+        self.splitter = split
         split.setChildrenCollapsible(False)
         split.addWidget(self.sidebar)
         split.addWidget(self.view)
@@ -564,7 +569,9 @@ class ExperimentDefinitionDialog(QDialog):
         from gui.experiment_profile_dialog import DataclassEditor
 
         self.setWindowTitle("Experiment Definition")
-        self.resize(1500, 950)
+        self.setObjectName("experimentDefinition")
+        self._content_scale = None
+        self._scaling = False
         self.setSizeGripEnabled(True)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.profile = profile
@@ -626,7 +633,10 @@ class ExperimentDefinitionDialog(QDialog):
                 field.setDecimals(9)
                 field.setValue(getattr(profile, key))
                 self.rate_original[key] = (getattr(profile, key), field.value())
-        tabs.addTab(system, "System settings")
+        system_scroll = QScrollArea()
+        system_scroll.setWidgetResizable(True)
+        system_scroll.setWidget(system)
+        tabs.addTab(system_scroll, "System settings")
         legacy_scroll = QScrollArea()
         legacy_scroll.setWidgetResizable(True)
         self.legacy = DataclassEditor(self.draft)
@@ -649,6 +659,58 @@ class ExperimentDefinitionDialog(QDialog):
         layout.addLayout(footer)
         self.time_units.currentIndexChanged.connect(self.update_time_units)
         self.update_time_units()
+        self.fit_to_screen()
+
+    def fit_to_screen(self, available=None):
+        if available is None:
+            available = (self.parentWidget() or self).screen().availableGeometry()
+        height = min(760, max(300, available.height() - 72))
+        scale = max(.70, min(1., height / 950.))
+        self.compact_contents(scale)
+        width = min(1260, max(560, available.width() - 48), round(1500 * scale))
+        self.resize(width, height)
+        self.move(available.left() + (available.width() - self.width()) // 2,
+                  available.top() + max(24, (available.height() - self.height() - 32) // 2))
+
+    def compact_contents(self, scale):
+        scale = round(max(.70, min(1., scale)), 2)
+        if self._scaling or scale == self._content_scale:
+            return
+        self._scaling = True
+        try:
+            self._content_scale = scale
+            font = max(11, round(13 * scale))
+            vertical, horizontal = max(3, round(5 * scale)), max(6, round(10 * scale))
+            self.setStyleSheet(f"""
+                QDialog#experimentDefinition QWidget {{ font-size: {font}px; }}
+                QDialog#experimentDefinition QPushButton {{ padding: {vertical}px {horizontal}px; min-height: 18px; }}
+                QDialog#experimentDefinition QComboBox,
+                QDialog#experimentDefinition QLineEdit,
+                QDialog#experimentDefinition QDoubleSpinBox {{ padding: 3px 6px; min-height: 18px; }}
+                QDialog#experimentDefinition QListWidget::item {{ padding: 3px 5px; min-height: 18px; }}
+                QDialog#experimentDefinition QTabBar::tab {{ padding: 4px 8px; }}
+            """)
+            editor = self.editor
+            editor.view.resetTransform()
+            editor.view.scale(scale, scale)
+            editor.palette.setMinimumHeight(round(120 * scale))
+            editor.palette.setMaximumHeight(round(150 * scale))
+            editor.stage_list.setMinimumHeight(round(200 * scale))
+            editor.sidebar_content.setMinimumWidth(round(300 * scale))
+            editor.sidebar.setMinimumWidth(round(330 * scale))
+            editor.sidebar_layout.setSpacing(round(10 * scale))
+            for button in editor.toolbar_buttons:
+                button.setStyleSheet(f"QPushButton {{ padding: {vertical}px {horizontal}px; min-height: 18px; }}")
+            for widget in (self, editor, editor.sidebar_content):
+                widget.layout().setContentsMargins(8, 6, 8, 6)
+                widget.layout().setSpacing(6)
+        finally:
+            self._scaling = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "editor"):
+            self.compact_contents(self.height() / 950.)
 
     def timeline_parameters(self):
         parameters = deepcopy(self.draft)
