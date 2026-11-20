@@ -59,10 +59,13 @@ def profile_figure(signals, index=1, name="", *, time_unit="h"):
 def manual_profile_figures(experiments, configs):
     """Preview saved Control Panel experiments without connecting any devices."""
     from experiment.models import ExperimentDefinition
+    from experiment.pump_corrections import apply_pump_corrections
+
     result = []
     for index, experiment in enumerate(experiments, 1):
         definition = (experiment if isinstance(experiment, ExperimentDefinition) else
                       ExperimentDefinition.from_frame(experiment, configs, name=f"Manual experiment {index}"))
+        definition = apply_pump_corrections(definition, configs)
         signals = []
         for profile in definition.profiles:
             config = configs[profile.device_id]

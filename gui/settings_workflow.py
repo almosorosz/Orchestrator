@@ -4,7 +4,7 @@ from textwrap import fill
 
 import numpy as np
 from PySide6.QtCore import QSignalBlocker, QTimer
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QPushButton, QScrollArea, QTabWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView)
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -44,6 +44,10 @@ class SettingsWorkflow:
         self.workflow_checklist = SetupChecklist()
         self.workflow_checklist.activated.connect(self._open_workflow_item)
         layout.addWidget(self.workflow_checklist)
+        self.session_notice = QLabel()
+        self.session_notice.setWordWrap(True)
+        self.session_notice.hide()
+        layout.addWidget(self.session_notice)
         layout.addWidget(self.status_label)
         layout.addWidget(self.error_label)
         self.workflow_tabs = QTabWidget()
@@ -103,52 +107,81 @@ class SettingsWorkflow:
         self.profile_placeholder = QLabel("Generate a DoE, or use Control Panel → View experiment profiles for manually defined experiments.")
         self.profile_placeholder.setWordWrap(True)
         self.profile_preview_layout.addWidget(self.profile_placeholder)
+        self.profile_preview_layout.addStretch(1)
         self.profile_canvas = None
         self.preview_tabs.addTab(profiles, "Experiment profiles")
         diagnostics = QWidget()
         charts = QVBoxLayout(diagnostics)
-        charts.addWidget(QLabel("Normalized sampling diagnostics · select the X, Y and Z factors for the 3D view"))
-        selectors = QHBoxLayout()
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Normalized sampling diagnostics"), 1)
+        self.sampling_3d_button = QPushButton("3D view and factors…")
+        self.sampling_3d_button.setEnabled(False)
+        self.sampling_3d_button.clicked.connect(self._show_sampling_3d)
+        header.addWidget(self.sampling_3d_button)
+        charts.addLayout(header)
+        sampling_scroll = QScrollArea()
+        sampling_scroll.setWidgetResizable(True)
+        sampling_scroll.setWidget(self.canvas_2d)
+        sampling_scroll.setMinimumHeight(240)
+        charts.addWidget(sampling_scroll, 1)
+        self.preview_tabs.addTab(diagnostics, "Design diagnostics")
+        self.sampling_3d_dialog = QDialog(self)
+        self.sampling_3d_dialog.setWindowTitle("DoE samples and factors")
+        detail = QVBoxLayout(self.sampling_3d_dialog)
+        selectors = QFormLayout()
         self.factor_choices = []
         for name in ("X", "Y", "Z"):
-            selectors.addWidget(QLabel(name))
             choice = QComboBox()
-            choice.setMinimumWidth(80)
-            choice.currentIndexChanged.connect(self._redraw_workflow_diagnostics)
+            choice.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            choice.currentIndexChanged.connect(self._redraw_workflow_3d)
             self.factor_choices.append(choice)
-            selectors.addWidget(choice, 1)
-        charts.addLayout(selectors)
+            selectors.addRow(f"{name} factor", choice)
+        detail.addLayout(selectors)
         self.sampling_summary = QTableWidget(0, 3)
         self.sampling_summary.setHorizontalHeaderLabels(["Factor", "Minimum separation", "Mean separation"])
         self.sampling_summary.setToolTip("Pairwise distances within each normalized factor, as in the original sampling diagnostics.")
         self.sampling_summary.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.sampling_summary.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.sampling_summary.setMaximumHeight(150)
-        charts.addWidget(self.sampling_summary)
-        sampling_scroll = QScrollArea()
-        sampling_scroll.setWidgetResizable(True)
-        sampling_scroll.setWidget(self.canvas_2d)
-        sampling_scroll.setMinimumHeight(300)
-        charts.addWidget(sampling_scroll, 1)
-        charts.addWidget(self.canvas_3d, 1)
-        self.preview_tabs.addTab(diagnostics, "Design diagnostics")
+        for column in (1, 2):
+            self.sampling_summary.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        self.sampling_summary.setMaximumHeight(170)
+        detail.addWidget(self.sampling_summary)
+        detail.addWidget(self.canvas_3d, 1)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.sampling_3d_dialog.close)
+        detail.addWidget(close)
         actions(preview, self.start_independent_doe_button)
         self.start_independent_doe_button.setText("Run DoE only")
         self.start_independent_doe_button.setToolTip("Execute the assigned starting experiments without automatic modeling or follow-ups.")
 
         loop = page("3. Automatic loop")
-        form = QFormLayout()
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        form.addRow("Modeling method", self.loop_backend)
-        form.addRow("PBM size measurements", self.pbm_size_samples)
-        loop.addLayout(form)
+        loop_form = QFormLayout()
+        loop_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        loop_form.addRow("Modeling method", self.loop_backend)
+        loop_form.addRow("PBM size measurements", self.pbm_size_samples)
+        loop_form.addRow("Final size samples to average", self.pbm_final_size_samples)
+
+        def show_size_options():
+            loop_form.setRowVisible(self.pbm_size_samples, self.loop_backend.currentData() != "bo")
+            loop_form.setRowVisible(self.pbm_final_size_samples, self.uses_final_size_samples())
+
+        self.loop_backend.currentIndexChanged.connect(show_size_options)
+        self.pbm_size_samples.currentIndexChanged.connect(show_size_options)
+        show_size_options()
+        loop.addLayout(loop_form)
         self.loop_sequence = QLabel()
         self.loop_sequence.setWordWrap(True)
         loop.addWidget(self.loop_sequence)
         actions(loop, self.loop_setup_button, self.external_model_info_button)
         self.open_model_button = QPushButton("Open modeling settings")
-        self.open_model_button.clicked.connect(lambda: self.show_external_model_info() if self.loop_backend.currentData() == "external"
-                                               else self.loop_navigation_requested.emit(self.loop_backend.currentData()))
+        def open_model_settings():
+            if self.loop_backend.currentData() == "external":
+                self.show_external_model_info()
+            elif self.loop_setup_button.isEnabled():
+                if dialog := self.edit_loop_setup():
+                    dialog.tabs.setCurrentWidget(dialog.modeling_tab)
+
+        self.open_model_button.clicked.connect(open_model_settings)
         actions(loop, self.open_model_button)
         loop.addWidget(QLabel("Save the automatic loop setup, then start the loop from Dashboard. DoE-only execution is on Preview & devices."))
         loop.addStretch()
@@ -178,6 +211,7 @@ class SettingsWorkflow:
         files.addStretch()
         old.deleteLater()
         self._workflow_creator = None
+        self._workflow_normalized = np.empty((0, 0))
         self._workflow_timer = QTimer(self)
         self._workflow_timer.setInterval(900)
         self._workflow_timer.timeout.connect(self.update_workflow_checklist)
@@ -229,6 +263,9 @@ class SettingsWorkflow:
              else ". Supply new experiments during the external model phase; stop from Dashboard."))
         if use_context and self.isVisible() and self.loop_preview and mode != "external":
             try:
+                from experiment.adaptive_loop import validate_setup
+
+                validate_setup(self.loop_setup)
                 context = self.loop_preview(mode, self.loop_setup, None)
                 checks = loop_readiness(self.loop_setup, mode, context)
                 pending = [check for check in checks if check.required and not check.ready]
@@ -277,6 +314,7 @@ class SettingsWorkflow:
     def _show_workflow_profile(self):
         if self.profile_canvas:
             self.profile_preview_layout.removeWidget(self.profile_canvas)
+            self.profile_canvas.hide()
             self.profile_canvas.deleteLater()
             self.profile_canvas = None
         creator = self._workflow_creator
@@ -287,8 +325,9 @@ class SettingsWorkflow:
         figures = getattr(self, "_workflow_profile_figures", [])
         if index < len(figures):
             self.profile_canvas = FigureCanvas(figures[index])
-            self.profile_canvas.setMinimumHeight(350)
-            self.profile_preview_layout.addWidget(self.profile_canvas, 1)
+            self.profile_canvas.setMinimumHeight(220)
+            self.profile_canvas.setMaximumHeight(320)
+            self.profile_preview_layout.insertWidget(self.profile_preview_layout.count() - 1, self.profile_canvas)
             self.profile_placeholder.hide()
 
     def _redraw_workflow_diagnostics(self):
@@ -298,17 +337,21 @@ class SettingsWorkflow:
         samples = np.asarray(creator.DoE_samples)
         keys = self._workflow_factor_keys
         self.fig_2d.clear()
-        self.fig_3d.clear()
-        if samples.ndim != 2 or not samples.shape[1]:
+        dimensions = min(samples.shape[1], len(keys)) if samples.ndim == 2 else 0
+        self.sampling_3d_button.setEnabled(dimensions > 0)
+        if not dimensions:
+            self._workflow_normalized = np.empty((0, 0))
             self.sampling_summary.setRowCount(0)
+            self.sampling_3d_dialog.close()
             for canvas in (self.canvas_2d, self.canvas_3d):
                 self._show_plot_unavailable(canvas, getattr(self, "_workflow_dark", True))
             return
-        data = creator.doe_sampler.scaler(samples)
-        self.sampling_summary.setRowCount(min(data.shape[1], len(keys)))
-        self.canvas_2d.setMinimumWidth(max(500, len(keys) * 150))
+        data = creator.doe_sampler.scaler(samples)[:, :dimensions]
+        self._workflow_normalized = data
+        self.sampling_summary.setRowCount(dimensions)
+        self.canvas_2d.setMinimumWidth(max(500, dimensions * 185))
         axes = self.fig_2d.add_subplot(111)
-        for index in range(min(data.shape[1], len(keys))):
+        for index in range(dimensions):
             label = self._factor_labels.get(keys[index], keys[index])
             axes.scatter(np.full(len(data), index), data[:, index], label=label)
             ordered = np.sort(data[:, index])
@@ -320,17 +363,38 @@ class SettingsWorkflow:
                 item = QTableWidgetItem(text)
                 item.setToolTip(text)
                 self.sampling_summary.setItem(index, column, item)
-        axes.set_xticks(range(min(data.shape[1], len(keys))))
-        axes.set_xticklabels([fill(self._factor_labels.get(k, k), 25) for k in keys[:data.shape[1]]], fontsize=8)
+        axes.set_xticks(range(dimensions))
+        axes.set_xticklabels([fill(self._factor_labels.get(k, k), 23) for k in keys[:dimensions]], fontsize=8)
         axes.set_ylabel("Normalized sampled value")
         axes.set_title(f"Sampling method: {creator.TYPE}")
         self.fig_2d.subplots_adjust(bottom=.35)
+        if self.sampling_3d_dialog.isVisible():
+            self._redraw_workflow_3d()
+        else:
+            self.update_plot_theme(getattr(self, "_workflow_dark", True))
+
+    def _show_sampling_3d(self):
+        dialog = self.sampling_3d_dialog
+        if not dialog.isVisible():
+            available = self.screen().availableGeometry()
+            dialog.resize(min(1000, int(available.width() * .9)), min(740, int(available.height() * .88)))
+        self._redraw_workflow_3d()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _redraw_workflow_3d(self, *_):
+        data = self._workflow_normalized
+        keys = self._workflow_factor_keys
+        self.fig_3d.clear()
         if data.shape[1] >= 3:
             indices = [choice.currentIndex() for choice in self.factor_choices]
             axes = self.fig_3d.add_subplot(111, projection="3d")
             axes.scatter(*(data[:, index] for index in indices))
-            for setter, index in zip((axes.set_xlabel, axes.set_ylabel, axes.set_zlabel), indices):
-                setter(fill(self._factor_labels.get(keys[index], keys[index]), 27), fontsize=8)
+            for choice, setter, index in zip(self.factor_choices, (axes.set_xlabel, axes.set_ylabel, axes.set_zlabel), indices):
+                label = self._factor_labels.get(keys[index], keys[index])
+                choice.setToolTip(label)
+                setter(fill(label, 27), fontsize=8)
         else:
             axes = self.fig_3d.add_subplot(111)
             axes.text(.5, .5, "3D diagnostics need at least three sampled factors.", ha="center", va="center", wrap=True)

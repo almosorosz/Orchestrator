@@ -5,25 +5,28 @@ from math import isfinite
 from PySide6.QtCore import QLocale, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QSpinBox, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from experiment import adaptive_loop
 from experiment.adaptive_loop import DEVICE_RECORDING_COLUMNS, validate_setup
 from experiment.doe_campaign import ROLES
 from hardware_devices.capabilities import is_monitor_only
 from bo.profiles import make_profile
-from imed_python.campaign_dialog import PROCESS_FIELDS
+from experiment.loop_process import PROCESS_FIELDS
 from imed_python.campaign_import import CHANNELS
 from imed_python.demo_campaign import MONITOR_TYPES
-from gui.loop_setup_preview import used_loop_values, value_text
+from imed_python.size_data import FINAL_SIZE_SAMPLE_TOOLTIP, FINAL_SIZE_TERM, MAX_FINAL_SIZE_SAMPLES, SIZE_SAMPLE_OPTIONS
+from gui.loop_setup_preview import PREVIEW_AMOUNTS, starting_input_rows, used_loop_values, uses_followup_offset, value_text
 from gui.experiment_period_widget import ExperimentPeriodWidget
 from gui.setup_checklist import SetupChecklist, SetupItem
 from gui.setup_readiness import loop_readiness
 
 
 PROCESS_INPUTS = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
+PROCESS_OVERRIDES = {**PROCESS_INPUTS, "InitialVolume_ml": PREVIEW_AMOUNTS["InitialVolume_ml"]}
 DESIGN_VALUES = {"batch": "Batch duration (s)", "concentration": "Initial concentration (g/g solution)",
                  "final_anti": "Final antisolvent mass fraction"}
 DESIGN_PAIRS = {
@@ -193,35 +196,51 @@ class SupportProfiles(QWidget):
 class LoopSetupDialog(QDialog):
     navigate_requested = Signal(str)
 
-    def __init__(self, setup, backend, device_configs=None, parent=None, *, preview=None):
+    def __init__(self, setup, backend, device_configs=None, parent=None, *, preview=None, size_preferences=None):
+        # The dialog is imported on first use. If the app was open during a
+        # source update, the already loaded loop module may be older.
+        setup_for_editing = getattr(adaptive_loop, "setup_for_editing", None)
+        if setup_for_editing is None:
+            raise ValueError("CrystalLoop was updated while this window was open. Close and reopen the app to load the updated loop settings.")
         super().__init__(parent)
         self.setWindowTitle("Automatic loop setup")
         available = self.screen().availableGeometry()
         self.resize(min(1000, int(available.width() * .94)), min(800, int(available.height() * .90)))
         self.setMinimumSize(550, 460)
-        self.setup = deepcopy(validate_setup(setup))
+        supported, unsupported = setup_for_editing(setup)
+        self.setup = deepcopy(supported)
         self.configs = device_configs or {}
         self.backend = backend
         self.preview = preview
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
+        if unsupported:
+            fields = ", ".join(unsupported)
+            self.compatibility_note = QLabel(f"This version does not support the saved fields {fields}. "
+                                             "Review the settings below. Save removes those fields from the active setup.")
+            self.compatibility_note.setTextFormat(Qt.TextFormat.PlainText)
+            self.compatibility_note.setWordWrap(True)
+            layout.addWidget(self.compatibility_note)
         self.readiness = SetupChecklist(parent=self)
         self.readiness.activated.connect(self._navigate_check)
         layout.addWidget(self.readiness)
         self._refreshing_checklist = False
         run = QGroupBox("Bayesian optimization" if backend == "bo" else "IMED")
         form = QFormLayout(run)
+        self.followup_form = form
         self.max_followups = integer_field(self.setup["max_followups"], 1, 1000)
         self.max_followups.setMaximumWidth(140)
         self.max_followups.setToolTip("Number of recommended experiments to execute after the starting batch.")
         self.followup_start = number_field(self.setup["followup_start_s"])
         self.followup_start.setToolTip("Used for profiles without a defined experiment period. Stage-based follow-ups keep the preparation duration from the starting run.")
         form.addRow("Follow-up experiments", self.max_followups)
-        form.addRow("Follow-up crystallization start (s)", self.followup_start)
-        explanation(form, "Follow-up experiments counts recommendations after the starting batch. Stage-based runs retain their preparation prefix; the start offset applies to simpler profiles.")
+        form.addRow("Start delay for unstaged profiles (s)", self.followup_start)
+        explanation(form, "The loop runs this many recommendations after the starting batch. Recommendations update the selected experiment period.")
         layout.addWidget(run)
         self.tabs = QTabWidget()
+        self.modeling_tab = self.modeling_page(size_preferences)
+        self.tabs.addTab(self.modeling_tab, "BO settings" if backend == "bo" else "IMED settings")
         self.tabs.addTab(self.recording_page(), "Recording")
         self.tabs.addTab(self.process_page(), "Process inputs")
         self.tabs.addTab(self.devices_page(), "Devices")
@@ -238,10 +257,14 @@ class LoopSetupDialog(QDialog):
         self.tabs.addTab(scroll, "Advanced")
         if backend == "imed":
             self.tabs.addTab(self.design_page(), "IMED design")
-        self.period = ExperimentPeriodWidget(self.setup["experiment_period"])
+        recording = self.setup["recording"]
+        self.manual_start = number_field(recording["start_s"])
+        self.manual_end = number_field(recording["end_s"], "End of programmed run")
+        self.period = ExperimentPeriodWidget(self.setup["experiment_period"],
+                                             manual_start=self.manual_start, manual_end=self.manual_end)
+        self.period.mode.currentIndexChanged.connect(self.update_followup_start)
+        self.update_followup_start()
         self.tabs.insertTab(0, self.period, "Experiment period")
-        self.period.mode.currentIndexChanged.connect(self._period_mode_changed)
-        self._period_mode_changed()
         if self.preview is not None:
             self.used_values_tab = self.preview_page()
             self.tabs.insertTab(0, self.used_values_tab, "Used values")
@@ -296,13 +319,19 @@ class LoopSetupDialog(QDialog):
         if key == "limits":
             self.max_followups.setFocus()
             return
+        if key == "pe":
+            self.navigate_requested.emit("objectives")
+            return
+        if key == "model":
+            self.navigate_requested.emit("bo_settings" if self.backend == "bo" else "imed_models")
+            return
         if tab:
             for index in range(self.tabs.count()):
                 if self.tabs.tabText(index) == tab:
                     self.tabs.setCurrentIndex(index)
                     break
         else:
-            self.navigate_requested.emit(self.backend if key == "model" else key)
+            self.navigate_requested.emit(key)
 
     def refresh_checklist(self):
         if self._refreshing_checklist:
@@ -317,9 +346,13 @@ class LoopSetupDialog(QDialog):
                 items = loop_readiness(draft, self.backend, context)
             self.readiness.set_items(items)
             if self.preview is not None:
-                self.refresh_preview()
+                self.refresh_preview(draft=draft, context=context)
         except (ValueError, KeyError, TypeError, OSError) as error:
             self.readiness.set_items([SetupItem("inputs", "Complete current values", False, str(error))])
+            if self.preview is not None:
+                self.process_value_note.setText(str(error))
+                self.process_values.setEnabled(False)
+                self.reset_starting_value.setEnabled(False)
         finally:
             self._refreshing_checklist = False
 
@@ -327,6 +360,10 @@ class LoopSetupDialog(QDialog):
         super().showEvent(event)
         if hasattr(self, "check_timer"):
             self.check_timer.start()
+
+    def update_followup_start(self):
+        self.followup_form.setRowVisible(self.followup_start,
+                                        uses_followup_offset(self.period.mode.currentData(), self.period.context))
 
     def preview_page(self):
         page = QWidget()
@@ -356,14 +393,20 @@ class LoopSetupDialog(QDialog):
         return page
 
     def _tab_changed(self, index):
-        if self.tabs.widget(index) is self.used_values_tab:
+        if self.tabs.widget(index) in (self.used_values_tab, self.process_tab):
             self.refresh_preview()
 
-    def refresh_preview(self):
+    def refresh_preview(self, *, draft=None, context=None):
         try:
-            context = self.preview(self.backend, self.collect(validate_period=False), self.preview_source.currentData())
+            if context is None:
+                try:
+                    draft = self.collect()
+                except ValueError:
+                    draft = self.collect(validate_period=False)
+                context = self.preview(self.backend, draft, self.preview_source.currentData())
             self._refresh_device_choices(context.get("configs", self.configs))
             self.period.set_context(context)
+            self.update_followup_start()
             if hasattr(self, "reactor"):
                 selected = self.reactor.currentData()
                 with QSignalBlocker(self.reactor):
@@ -374,12 +417,18 @@ class LoopSetupDialog(QDialog):
                     if selected and self.reactor.findData(selected) < 0:
                         self.reactor.addItem(f"{selected} [missing]", selected)
                     self.reactor.setCurrentIndex(max(0, self.reactor.findData(selected)))
-            draft = self.collect()
+            current = self.collect()
+            if current != draft:
+                draft = current
+                context = self.preview(self.backend, draft, context["source"])
             labels = {**DESIGN_VALUES, **{key: values[0] for key, values in DESIGN_PAIRS.items()}}
             groups = used_loop_values(draft, self.backend, context, labels)
+            self.refresh_starting_values(draft, context)
         except (ValueError, KeyError, TypeError, OSError) as error:
             self.preview_note.setText(f"Used values could not be refreshed. {error}")
             self.preview_note.show()
+            self.process_value_note.setText(str(error))
+            self.process_values.setEnabled(False)
             return
         with QSignalBlocker(self.preview_source):
             self.preview_source.setCurrentIndex(self.preview_source.findData(context["source"]))
@@ -397,7 +446,7 @@ class LoopSetupDialog(QDialog):
                 row = QTreeWidgetItem(group, [name, value_text(value), origin])
                 for column in range(3):
                     row.setToolTip(column, row.text(column))
-            group.setExpanded(expanded.get(title, title in {"Device assignments", "Starting process inputs"}))
+            group.setExpanded(expanded.get(title, title in {"DoE decision variables", "Device assignments", "Starting process inputs"}))
 
     def _refresh_device_choices(self, configs):
         """Keep a draft usable after adding a device on another page."""
@@ -424,12 +473,6 @@ class LoopSetupDialog(QDialog):
             update(field, ["", *sorted(device for device, cfg in configs.items()
                     if cfg.get("type") == MONITOR_TYPES[role] and cfg.get("simulated"))])
 
-    def _period_mode_changed(self):
-        manual = self.period.mode.currentData() == "manual"
-        for key in ("start_s", "end_s"):
-            self.recording_numbers[key][0].setEnabled(manual)
-            self.recording_numbers[key][0].setToolTip("Used when Experiment period is set to Manual start / end.")
-
     @staticmethod
     def scroll_form():
         content = QWidget()
@@ -450,10 +493,8 @@ class LoopSetupDialog(QDialog):
         recording = self.setup["recording"]
         self.recording_numbers = {}
         for key, label, hint in (
-            ("start_s", "Manual experiment start (s)", ""),
-            ("end_s", "Manual experiment end (s)", "Last recorded sample"),
             ("concentration_multiplier", "Concentration multiplier to g/g solution", ""),
-            ("initial_concentration", "Initial concentration (g/g solution)", "Use the recording"),
+            ("initial_concentration", "Initial concentration (g/g solution)", "Use process inputs or the recorded starting value"),
         ):
             field = number_field(recording[key], hint)
             self.recording_numbers[key] = field, label
@@ -461,6 +502,13 @@ class LoopSetupDialog(QDialog):
         self.no_feed = QCheckBox("This campaign has no antisolvent feed")
         self.no_feed.setChecked(recording["no_feed"])
         form.addRow(self.no_feed)
+        if self.backend == "imed":
+            objectives = QPushButton("IMED objectives…")
+            objectives.clicked.connect(lambda: self.navigate_requested.emit("objectives"))
+            form.addRow(objectives)
+            explanation(form, "Only objectives with positive weights require a measurement channel. Enter an initial "
+                        "concentration for runs without a concentration trace. When AS is added, record the scale "
+                        "or use a calibrated AS pump. Cooling-only runs can leave both unassigned.")
         self.direction = QComboBox()
         self.direction.addItem("Reservoir weight decreases", -1)
         self.direction.addItem("Added weight increases", 1)
@@ -482,15 +530,72 @@ class LoopSetupDialog(QDialog):
         form.addRow(measurements)
         return page
 
+    def modeling_page(self, size_preferences):
+        page, form = self.scroll_form()
+        explanation(form, "These editors share the settings on the BO and IMED pages. Save this window to apply the loop configuration.")
+        if self.backend == "bo":
+            buttons = (("BO targets, bounds and profiles…", "bo_settings"),
+                       ("Solubility for theoretical yield…", "solubility"))
+        else:
+            buttons = (("IMED objectives…", "objectives"), ("Solubility…", "solubility"),
+                       ("Add candidate model…", "imed_candidate"), ("Model configurations…", "imed_models"),
+                       ("PBM solver and CPU workers…", "imed_runtime"), ("PE grid and optimizer…", "imed_fit"))
+        for title, key in buttons:
+            button = QPushButton(title)
+            button.clicked.connect(lambda checked=False, key=key: self.navigate_requested.emit(key))
+            form.addRow(button)
+        if size_preferences is not None:
+            main_term, main_count = size_preferences
+            count = integer_field(main_count.value(), 1, MAX_FINAL_SIZE_SAMPLES)
+            count.setToolTip(FINAL_SIZE_SAMPLE_TOOLTIP)
+            if self.backend == "imed":
+                terms = QComboBox()
+                for label, value in SIZE_SAMPLE_OPTIONS:
+                    terms.addItem(label, value)
+                terms.setCurrentIndex(main_term.currentIndex())
+                form.addRow("PBM size measurements", terms)
+                terms.currentIndexChanged.connect(main_term.setCurrentIndex)
+                main_term.currentIndexChanged.connect(terms.setCurrentIndex)
+            form.addRow("Final size samples to average", count)
+            count.valueChanged.connect(main_count.setValue)
+            main_count.valueChanged.connect(count.setValue)
+            if self.backend == "imed":
+                def show_count():
+                    form.setRowVisible(count, terms.currentData() == FINAL_SIZE_TERM)
+
+                terms.currentIndexChanged.connect(show_count)
+                show_count()
+        return page
+
     def process_page(self):
         page, form = self.scroll_form()
+        self.process_tab = page
         explanation(form, "Process values describe the beginning of the selected experiment period, after preparation. "
-                    "Blank fields inherit the IMED case. These values do not themselves command charging pumps.")
+                    "Edits here change model inputs. Pump commands come from the experiment definition.")
         self.derive_charges = QCheckBox("Derive initial liquid charges from preparation pump profiles")
         self.derive_charges.setChecked(self.setup["derive_initial_charges"])
         form.addRow(self.derive_charges)
-        explanation(form, "Defined solvent, solution and AS charges before the experiment period supply the per-experiment starting masses. "
-                    "Loaded pump calibrations / liquid densities convert delivery into grams. Named experiment overrides take precedence.")
+        if self.preview is not None:
+            row = QHBoxLayout()
+            self.starting_experiment = QComboBox()
+            self.starting_experiment.currentIndexChanged.connect(self.show_starting_values)
+            row.addWidget(self.starting_experiment, 1)
+            self.reset_starting_value = QPushButton("Use automatic value")
+            self.reset_starting_value.setEnabled(False)
+            self.reset_starting_value.clicked.connect(self.clear_starting_override)
+            row.addWidget(self.reset_starting_value)
+            form.addRow("Starting experiment", row)
+            self.starting_values = {}
+            self.process_values = QTableWidget(0, 3)
+            self.process_values.setHorizontalHeaderLabels(["Process input", "Used value", "Source"])
+            self.process_values.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self.process_values.verticalHeader().hide()
+            self.process_values.setFixedHeight(160)
+            self.process_values.itemChanged.connect(self.edit_starting_value)
+            self.process_values.currentCellChanged.connect(self.update_reset_starting_value)
+            form.addRow(self.process_values)
+            self.process_value_note = explanation(form, "Apply device assignments to preview starting amounts.")
+        explanation(form, "Common inputs apply across the batch. Blank fields can inherit values from the case or recording settings.")
         self.process = {}
         for key, title in PROCESS_INPUTS.items():
             self.process[key] = number_field(self.setup["process"].get(key), "Use case or recording setting")
@@ -518,16 +623,117 @@ class LoopSetupDialog(QDialog):
         form.addRow(group)
         for name, values in self.setup["initial_processes"].items():
             for key, value in values.items():
-                if key in PROCESS_INPUTS:
+                if key in PROCESS_OVERRIDES:
                     self.add_override(name, key, value)
         return page
+
+    def refresh_starting_values(self, draft, context):
+        stale = context.get("assignments_stale")
+        self.starting_values = {} if stale else starting_input_rows(draft, context)
+        selected = self.starting_experiment.currentText()
+        with QSignalBlocker(self.starting_experiment):
+            self.starting_experiment.clear()
+            self.starting_experiment.addItems(self.starting_values)
+            if selected in self.starting_values:
+                self.starting_experiment.setCurrentText(selected)
+        case_record = next(iter(context["case"].get("ProcInf", [])), {})
+        for key, field in self.process.items():
+            saved = case_record.get(key)
+            if key == "InitialConcentration" and saved is None:
+                saved = draft["recording"]["initial_concentration"]
+            field.setPlaceholderText(f"Use {value_text(saved)}" if saved is not None else "Use case or recording setting")
+        self.show_starting_values()
+        if stale:
+            self.process_value_note.setText("Reapply the DoE device assignments to refresh these amounts.")
+
+    def show_starting_values(self, *_):
+        if self.process_values.state() == QAbstractItemView.State.EditingState:
+            return
+        data = self.starting_values.get(self.starting_experiment.currentText())
+        self.process_values.setEnabled(bool(data))
+        with QSignalBlocker(self.process_values):
+            self.process_values.setRowCount(len(PREVIEW_AMOUNTS) if data else 0)
+            if data:
+                values, sources, issues, editable = data
+                for row, (key, label) in enumerate(PREVIEW_AMOUNTS.items()):
+                    value = values.get(key)
+                    source = "Needs input" if key in issues else sources.get(key, "Needs input")
+                    for column, text in enumerate((label, "" if value is None else value_text(value), source)):
+                        item = QTableWidgetItem(text)
+                        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                        if column == 1 and editable:
+                            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                            item.setData(Qt.ItemDataRole.UserRole, value)
+                        detail = issues.get(key, text)
+                        if column == 2 and source == "Preparation pump profiles":
+                            charges = values.get("PreparationCharges_g", {})
+                            materials = ("AS",) if key == "AntiSolvMass" else ("solvent", "solution")
+                            detail = "\n".join(f"{role.capitalize()} charge · {charges[role]:.8g} g"
+                                               for role in materials if role in charges)
+                        item.setToolTip(detail)
+                        self.process_values.setItem(row, column, item)
+        if data:
+            self.process_value_note.setText("\n".join(issues.values()) if issues else
+                                            "Edit a value to override it for this experiment." if editable else
+                                            "The PBM validation simulator supplies these values.")
+        else:
+            self.process_value_note.setText("Apply device assignments to preview starting amounts.")
+        self.update_reset_starting_value()
+
+    def starting_override_row(self, row):
+        if not 0 <= row < len(PREVIEW_AMOUNTS):
+            return None
+        key = tuple(PREVIEW_AMOUNTS)[row]
+        name = self.starting_experiment.currentText()
+        return next((i for i in range(self.overrides.rowCount())
+                     if self.overrides.cellWidget(i, 0).text().strip() == name
+                     and self.overrides.cellWidget(i, 1).currentData() == key), None)
+
+    def update_reset_starting_value(self, *_):
+        data = self.starting_values.get(self.starting_experiment.currentText())
+        row = self.starting_override_row(self.process_values.currentRow())
+        self.reset_starting_value.setEnabled(bool(data and data[3] and row is not None))
+
+    def clear_starting_override(self):
+        row = self.starting_override_row(self.process_values.currentRow())
+        if row is not None:
+            self.overrides.removeRow(row)
+            self.refresh_checklist()
+
+    def edit_starting_value(self, item):
+        if item.column() != 1 or not item.flags() & Qt.ItemFlag.ItemIsEditable:
+            return
+        key = tuple(PREVIEW_AMOUNTS)[item.row()]
+        text = item.text().strip()
+        index = self.starting_override_row(item.row())
+        if not text:
+            if index is not None:
+                self.overrides.removeRow(index)
+            self.check_timer.start()
+            return
+        positive = key in {"SolvMass", "InitialVolume_ml"}
+        try:
+            value = float(text)
+            if not isfinite(value) or value < 0 or positive and value == 0:
+                raise ValueError
+        except ValueError:
+            with QSignalBlocker(self.process_values):
+                prior = item.data(Qt.ItemDataRole.UserRole)
+                item.setText("" if prior is None else value_text(prior))
+            self.process_value_note.setText(f"Enter a {'positive' if positive else 'nonnegative'} value for {PREVIEW_AMOUNTS[key]}.")
+            return
+        if index is None:
+            self.add_override(self.starting_experiment.currentText(), key, value)
+        else:
+            self.overrides.cellWidget(index, 2).setText(str(value))
+        self.check_timer.start()
 
     def add_override(self, name="", key="SolvMass", value=None):
         row = self.overrides.rowCount()
         self.overrides.insertRow(row)
         self.overrides.setCellWidget(row, 0, QLineEdit(name))
         field = QComboBox()
-        for candidate, label in PROCESS_INPUTS.items():
+        for candidate, label in PROCESS_OVERRIDES.items():
             field.addItem(label, candidate)
         field.setCurrentIndex(field.findData(key))
         self.overrides.setCellWidget(row, 1, field)
@@ -555,17 +761,17 @@ class LoopSetupDialog(QDialog):
             controls.addRow(details.label, self.assignments[role])
         form.addRow(manual)
         pump = self.setup["seed_pump"]
-        self.pump_group = toggle_group("Use calibrated seed pump delivery", pump is not None)
+        self.pump_group = toggle_group("Override seed pump settings", pump is not None)
         pump_form = QFormLayout(self.pump_group)
-        explanation(pump_form, "Converts requested seed mass into pulse duration. Reuse the calibration loaded on the assigned seed pump; "
-                    "enter a separate g/s rate only when using a manual calibration. A defined timeline seeding stage remains authoritative.")
+        explanation(pump_form, "A dry-seed CSV loaded on the assigned pump supplies its fixed RPM and converts grams into pulse duration. "
+                    "Leave this group unchecked to use the dry-seed CSV automatically. Use these controls for a manual dry-seed rate or an older mass-flow calibration.")
         self.use_seed_calibration = QCheckBox("Use the seed pump's loaded calibration")
         self.use_seed_calibration.setChecked((pump or {}).get("use_device_calibration", pump is None))
         pump_form.addRow(self.use_seed_calibration)
         self.pump_rpm = number_field((pump or {}).get("rpm"))
         self.pump_rate = number_field((pump or {}).get("grams_per_second"))
         pump_form.addRow("Seed pump speed (RPM)", self.pump_rpm)
-        pump_form.addRow("Seed delivery rate (g/s)", self.pump_rate)
+        pump_form.addRow("Dry seed delivery rate (g/s)", self.pump_rate)
         self.pump_rate.setEnabled(not self.use_seed_calibration.isChecked())
         self.use_seed_calibration.toggled.connect(lambda checked: self.pump_rate.setEnabled(not checked))
         form.addRow(self.pump_group)
@@ -621,6 +827,10 @@ class LoopSetupDialog(QDialog):
         form.addRow("Design search iterations", self.iterations)
         form.addRow("Covariance samples", self.samples)
         form.addRow("Final equilibration (s)", self.equilibration)
+        self.use_doe_decisions = QCheckBox("Use decision variables from the starting DoE for MD and DO")
+        self.use_doe_decisions.setChecked(imed["use_doe_decisions"])
+        form.addRow(self.use_doe_decisions)
+        explanation(form, "DoE design uses the starting profiles and scalar ranges. Clear this option to enter manual IMED design conditions.")
         conditions = imed["conditions"]
         self.design_group = toggle_group("Use these IMED design conditions", bool(conditions))
         design = QFormLayout(self.design_group)
@@ -639,6 +849,12 @@ class LoopSetupDialog(QDialog):
                 controls.append(field)
             self.design_pairs[key] = controls
             design.addRow(label, row)
+        def enable_feed_conditions(no_feed):
+            for field in (self.design_numbers["final_anti"], *self.design_pairs["antisolvent_rates"]):
+                field.setEnabled(not no_feed)
+
+        self.no_feed.toggled.connect(enable_feed_conditions)
+        enable_feed_conditions(self.no_feed.isChecked())
         form.addRow(self.design_group)
         return page
 
@@ -648,10 +864,14 @@ class LoopSetupDialog(QDialog):
         draft["derive_initial_charges"] = self.derive_charges.isChecked()
         draft["experiment_period"] = self.period.values() if validate_period else {"mode": "definition", "stage_ids": []}
         draft["max_followups"] = self.max_followups.value()
-        draft["followup_start_s"] = entered_number(self.followup_start, "follow-up crystallization start")
+        if uses_followup_offset(self.period.mode.currentData(), self.period.context):
+            draft["followup_start_s"] = entered_number(self.followup_start, "follow-up crystallization start")
         recording = draft["recording"]
+        if self.period.mode.currentData() == "manual":
+            recording["start_s"] = entered_number(self.manual_start, "experiment start time")
+            recording["end_s"] = entered_number(self.manual_end, "experiment end time", optional=True)
         for key, (field, label) in self.recording_numbers.items():
-            recording[key] = entered_number(field, label, optional=key in {"end_s", "initial_concentration"})
+            recording[key] = entered_number(field, label, optional=key == "initial_concentration")
         recording.update(no_feed=self.no_feed.isChecked(), scale_direction=self.direction.currentData(),
                          smoothing=self.smoothing.value())
         sizes = [entered_number(field, f"seed {label}", optional=True)
@@ -667,7 +887,7 @@ class LoopSetupDialog(QDialog):
                 draft["process"].pop(key, None)
             else:
                 draft["process"][key] = number
-        overrides = {name: {key: value for key, value in values.items() if key not in PROCESS_INPUTS}
+        overrides = {name: {key: value for key, value in values.items() if key not in PROCESS_OVERRIDES}
                      for name, values in draft["initial_processes"].items()}
         for row in range(self.overrides.rowCount()):
             name = self.overrides.cellWidget(row, 0).text().strip()
@@ -676,8 +896,11 @@ class LoopSetupDialog(QDialog):
                 raise ValueError(f"Enter the experiment name for override {row + 1}.")
             fields = overrides.setdefault(name, {})
             if key in fields:
-                raise ValueError(f"{name} has more than one override for {PROCESS_INPUTS[key]}.")
-            fields[key] = entered_number(self.overrides.cellWidget(row, 2), PROCESS_INPUTS[key])
+                raise ValueError(f"{name} has more than one override for {PROCESS_OVERRIDES[key]}.")
+            value = entered_number(self.overrides.cellWidget(row, 2), PROCESS_OVERRIDES[key])
+            if key == "InitialVolume_ml" and value <= 0:
+                raise ValueError(f"{name}: Enter a positive initial liquid volume (mL).")
+            fields[key] = value
         draft["initial_processes"] = {name: values for name, values in overrides.items() if values}
         draft["manual_assignments"] = self.selected_text(self.assignments)
         draft["seed_pump"] = None
@@ -700,15 +923,23 @@ class LoopSetupDialog(QDialog):
                                "volume_mode": self.volume_mode.currentData(), "volume_ml": entered_number(self.mixing_volume, "fixed liquid volume")}
             draft["imed"].update(delta_aic=entered_number(self.delta_aic, "model survival threshold"),
                                  iterations=self.iterations.value(), covariance_samples=self.samples.value(),
-                                 equilibration_s=entered_number(self.equilibration, "final equilibration"))
+                                 equilibration_s=entered_number(self.equilibration, "final equilibration"),
+                                 use_doe_decisions=self.use_doe_decisions.isChecked())
             conditions = {}
             if self.design_group.isChecked():
                 conditions = {key: entered_number(field, DESIGN_VALUES[key])
-                              for key, field in self.design_numbers.items()}
+                              for key, field in self.design_numbers.items()
+                              if key != "final_anti" or not recording["no_feed"]}
                 for key, controls in self.design_pairs.items():
+                    if key == "antisolvent_rates" and recording["no_feed"]:
+                        continue
                     label, *names = DESIGN_PAIRS[key]
                     conditions[key] = [entered_number(field, f"{label} {name.lower()}")
                                        for field, name in zip(controls, names)]
+                if recording["no_feed"]:
+                    previous = self.setup["imed"]["conditions"]
+                    conditions["final_anti"] = previous.get("final_anti", 0.)
+                    conditions["antisolvent_rates"] = previous.get("antisolvent_rates", [0., 0.])
             draft["imed"]["conditions"] = conditions
         return validate_setup(draft)
 
@@ -720,9 +951,11 @@ class LoopSetupDialog(QDialog):
         try:
             draft = self.collect()
             if self.preview is not None:
-                self.period.set_context(self.preview(self.backend, draft, self.preview_source.currentData()))
+                context = self.preview(self.backend, draft, self.preview_source.currentData())
+                self.period.set_context(context)
+                draft["doe_decisions"] = context.get("doe_decisions")
             self.period.validate(draft)
-            self.setup = draft
+            self.setup = validate_setup(draft)
         except ValueError as error:
             self.error.setText(str(error))
             self.error.show()

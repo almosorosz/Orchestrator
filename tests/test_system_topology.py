@@ -244,6 +244,75 @@ class TopologyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Read-only"):
             ExperimentDefinition.from_frame(pd.DataFrame({"time_s": [0.], "T": [25.]}), configs)
 
+    def test_control_panel_flowsheet_uses_current_msi_and_saved_calibrations(self):
+        from control_panel.control_panel import ControlPanel, HARDWARE_TYPES
+        from gui.flowsheet_dialog import FlowsheetDialog
+
+        topology, configs = fixture()
+        configs["PUMP"]["pump_calibration"] = {
+            "version": 1, "input_unit": "g/h", "output_unit": "RPM", "points": [[0., 0.], [300., 50.]],
+        }
+        configs["SEED"] = deepcopy(configs["PUMP"])
+        configs["SEED"].update(name="Seed pump", seed_calibration={
+            "version": 1, "rpm": 50., "points": [[0., 0.], [7., 0.], [16., .18]],
+            "seed_fit": {"delay_s": 7., "initial_rate_g_s": .02, "k_s_inv": 0.},
+        })
+        configs["SEED"].pop("pump_calibration")
+        panel = ControlPanel({}, HARDWARE_TYPES, {}, {})
+        try:
+            with patch("control_panel.control_panel.QMessageBox.warning") as warning:
+                panel.flowsheet_button.click()
+                self.assertIn("Add at least one module and unit operation", warning.call_args.args[2])
+            panel.apply_loaded_configuration(configs, {}, [], system_topology=topology)
+            panel.flowsheet_button.click()
+            dialog = panel.findChild(FlowsheetDialog)
+            self.assertIsNotNone(dialog)
+            self.assertEqual(dialog.routes["PUMP"], (token("U_", "AS_tank"), token("U_", "C1")))
+            dialog.inspect.click()
+            self.assertEqual(dialog.tabs.currentWidget(), dialog.calibration_page)
+            dialog.slider.setValue(800)
+            self.assertEqual(dialog.estimate.text(), "4.000 g/min estimated")
+            dialog.route_buttons["SEED"].click()
+            dialog.command.setValue(7)
+            self.assertEqual(dialog.estimate.text(), "0.000 g dry seed estimated")
+            dialog.command.setValue(22)
+            self.assertEqual(dialog.estimate.text(), "0.300 g dry seed estimated · extrapolated")
+            dialog.close()
+            fields = panel.device_widgets["PUMP"].connectivity_fields
+            fields.target.setCurrentIndex(fields.target.findData("Product"))
+            panel.flowsheet_button.click()
+            refreshed = next(item for item in panel.findChildren(FlowsheetDialog) if item.isVisible())
+            self.assertEqual(refreshed.routes["PUMP"][1], token("U_", "Product"))
+            refreshed.close()
+        finally:
+            panel.close()
+            APP.processEvents()
+
+    def test_flowsheet_opens_connectivity_for_instrumented_unit_without_pumps(self):
+        from gui.flowsheet_dialog import FlowsheetDialog
+
+        topology = {"version": 1, "modules": [{"code": "m1", "name": "Crystallization system",
+                                                "sensors": [{"code": "Door", "name": "Door sensor"}]}],
+                    "unit_operations": [{"code": "U1", "name": "Crystallization", "module": "m1",
+                                         "kind": "Crystallizer"}]}
+        configs = {
+            "T1": {"type": "huber", "name": "Temperature controller",
+                   "connectivity": {"role": "controlled", "unit": "U1", "module": "m1"}},
+            "D10_1": {"type": "opcua", "name": "D10 monitor",
+                      "connectivity": {"role": "read_only", "unit": "U1", "module": "m1"}},
+        }
+        msi, graph = system_graph(topology, configs)
+        dialog = FlowsheetDialog(graph, configs, msi_code=msi)
+        try:
+            self.assertIs(dialog.tabs.currentWidget(), dialog.connectivity_page)
+            self.assertEqual([dialog.tabs.tabText(i) for i in range(dialog.tabs.count())],
+                             ["Connectivity", "Instrumentation"])
+            nodes = {node["id"] for node in dialog.connectivity_view.network.nodes}
+            self.assertTrue({"U_U1", "C_T1", "R_D10%5F1", "S_Door"} <= nodes)
+        finally:
+            dialog.close()
+            APP.processEvents()
+
     def test_control_panel_config_and_device_fields_preserve_physical_setup(self):
         from MAIN_WINDOW import MainWindow
         topology, configs = fixture()

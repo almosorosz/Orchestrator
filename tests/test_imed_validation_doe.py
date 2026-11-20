@@ -47,7 +47,7 @@ class ImedValidationDoeTests(unittest.TestCase):
                                       recording={"enabled": True, "output_folder": output})
             worker.start_experiment()
             self.assertEqual(worker.outcome.value, "completed", worker.error_message)
-            case = import_simulated_campaign(worker.recorder.folder)
+            case = import_simulated_campaign(worker.recorder.folder, final_size_samples=3)
             self.assertEqual(len(case["ExpData"]), 3)
             for exp, proc, run in zip(case["ExpData"], case["ProcInf"], worker.runs):
                 time, temp = exp["TemperatureData"]
@@ -56,6 +56,9 @@ class ImedValidationDoeTests(unittest.TestCase):
                 np.testing.assert_allclose(temp[time >= 35], temp[-1])
                 self.assertLess(exp["ConcentrationData"][1, -1], exp["InitialConcentration"])
                 self.assertTrue(np.all(np.diff(exp["FinalD10D50D90"]) > 0))
+                self.assertEqual(exp["FinalSizeSamplesUsed"], 3)
+                np.testing.assert_allclose(exp["FinalD10D50D90"],
+                                           [exp[f"{role}Data"][1, -3:].mean() for role in ("D10", "D50", "D90")])
                 self.assertGreater(np.ptp(exp["CountsData"][1]), 0)
                 self.assertEqual(bool(exp["CountsData"][1, 0]), bool(proc["SeedMass"]))
                 flow = exp["FlowRateData"]

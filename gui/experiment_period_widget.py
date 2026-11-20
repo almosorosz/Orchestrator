@@ -1,13 +1,13 @@
 """Choose the continuous run interval sent to BO or IMED."""
 from PySide6.QtCore import Qt, QSignalBlocker
-from PySide6.QtWidgets import (QComboBox, QHeaderView, QLabel, QTableWidget, QTableWidgetItem,
+from PySide6.QtWidgets import (QComboBox, QFormLayout, QHeaderView, QLabel, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from experiment.run_stages import EXPERIMENT_PURPOSES, modeling_campaign, stage_window
 
 
 class ExperimentPeriodWidget(QWidget):
-    def __init__(self, period, parent=None):
+    def __init__(self, period, *, manual_start, manual_end, parent=None):
         super().__init__(parent)
         self.context = {}
         self.saved_ids = set(period["stage_ids"])
@@ -15,16 +15,22 @@ class ExperimentPeriodWidget(QWidget):
         layout = QVBoxLayout(self)
         self.mode = QComboBox()
         for caption, key in (("Use experiment definition", "definition"),
-                             ("Select run stages", "stages"), ("Manual start / end in Recording", "manual")):
+                             ("Select run stages", "stages"), ("Manual start / end", "manual")):
             self.mode.addItem(caption, key)
         self.mode.setCurrentIndex(self.mode.findData(period["mode"]))
         layout.addWidget(self.mode)
-        note = QLabel("All stages execute and remain in the full recording. BO/IMED only models the selected "
-                      "continuous period, starting at model time zero. Select adjacent stages; separated periods "
-                      "cannot be joined. Durations resolve separately for every generated experiment. "
-                      "Set process masses, concentration and seed information for the beginning of this period.")
+        note = QLabel("The full recipe runs and is recorded. BO and IMED use the selected continuous period for "
+                      "modeling and follow-up recommendations. Select adjacent stages. In a follow-up, all "
+                      "unselected stages keep their programmed targets and durations. Enter process inputs "
+                      "for the beginning of the selected period.")
         note.setWordWrap(True)
         layout.addWidget(note)
+        self.manual_form = QWidget()
+        form = QFormLayout(self.manual_form)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Start elapsed time (s)", manual_start)
+        form.addRow("End elapsed time (s)", manual_end)
+        layout.addWidget(self.manual_form)
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Use", "Stage", "Purpose", "Start (s)", "End (s)"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -36,6 +42,7 @@ class ExperimentPeriodWidget(QWidget):
         layout.addWidget(self.summary)
         self.table.itemChanged.connect(self.update_summary)
         self.mode.currentIndexChanged.connect(self.update_summary)
+        self.update_summary()
 
     def selected_ids(self):
         return [self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -78,16 +85,25 @@ class ExperimentPeriodWidget(QWidget):
         return {"mode": self.mode.currentData(), "stage_ids": ids}
 
     def update_summary(self, *_):
-        self.table.setEnabled(self.mode.currentData() == "stages")
-        if not self.context.get("run_stages"):
-            self.summary.setText("No named run stages. Add stages in Experiment Definition, or Control Panel → Run stages… "
-                                 "and regenerate the experiments. Existing profiles can use manual start/end times.")
-        elif self.mode.currentData() == "manual":
-            self.summary.setText("Set start/end times in Recording. These absolute seconds apply to each starting run. "
-                                 "Follow-ups retain the surrounding preparation and cleanup.")
+        mode = self.mode.currentData()
+        stages = self.context.get("run_stages", ())
+        self.manual_form.setVisible(mode == "manual")
+        self.table.setVisible(bool(stages) and mode != "manual")
+        self.table.setEnabled(mode == "stages")
+        if mode == "manual":
+            self.summary.setText("Times apply to each starting run. Leave the end blank to use the end of the programmed run.")
+        elif not stages:
+            campaign = self.context.get("campaign")
+            first = campaign.experiments[0] if campaign and campaign.experiments else None
+            if mode == "definition" and first is not None and first.model_window is not None:
+                start, end = first.model_window
+                self.summary.setText(f"First run uses its defined period of {start:g}–{end:g} s.")
+            else:
+                self.summary.setText("No named run stages are available. Add stages in Experiment Definition or Control Panel → Run stages…, "
+                                     "or choose Manual start / end to set the period here.")
         else:
             try:
-                window = stage_window(self.context["run_stages"], self.selected_ids() if self.mode.currentData() == "stages" else None)
+                window = stage_window(stages, self.selected_ids() if mode == "stages" else None)
                 text = (f"First run: {window[0]:g}–{window[1]:g} s. Start/end columns show the range across the starting batch."
                         if window else "No Experiment/Equilibration stages. Choose Select run stages and select the modeling period.")
             except ValueError as error:

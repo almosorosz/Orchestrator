@@ -67,6 +67,27 @@ class LinkedInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "direction"):
             resolve_loop_setup(setup, topology, configs, strict=True)
 
+    def test_seed_and_solution_stirrers_follow_their_own_vessels(self):
+        path = Path(__file__).resolve().parents[1] / "examples/configurations/crystallization_system_simulated.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        configs, topology = data["devices"], data["system_topology"]
+        pumps = {"T": "T1", "seed": "PSEED1", "solution": "PSOLU1"}
+        stirrers = {"stirring_rate_seed": "SSEED1", "stirring_rate_sol": "SSOLU1"}
+        setup, report = resolve_loop_setup(default_setup(), topology, configs, applied={**pumps, **stirrers}, strict=True)
+        for role, device in {**pumps, **stirrers}.items():
+            self.assertEqual(setup["manual_assignments"][role], device)
+        self.assertEqual(report["reactor"], "C1")
+
+        inferred, _ = resolve_loop_setup(default_setup(), topology, configs, applied=pumps, strict=True)
+        self.assertEqual(inferred["manual_assignments"]["stirring_rate_seed"], "SSEED1")
+        self.assertEqual(inferred["manual_assignments"]["stirring_rate_sol"], "SSOLU1")
+
+        configs["SSEED1"]["connectivity"]["unit"] = "SOLU1"
+        with self.assertRaisesRegex(ValueError, "SSEED1 must be attached to reactor C1 or its seed preparation vessel"):
+            resolve_loop_setup(default_setup(), topology, configs, applied={**pumps, **stirrers}, strict=True)
+        with self.assertRaisesRegex(ValueError, "SSEED1 .*must be attached to reactor C1"):
+            resolve_loop_setup(default_setup(), topology, configs, applied={**pumps, "stirring_rate": "SSEED1"}, strict=True)
+
     def test_matching_applied_doe_assignment_is_reused(self):
         _, configs = fixture()
         campaign = Campaign("Manual", (ExperimentDefinition("Run", (profile("T", [(0, 25), (10, 25)]),)),))
@@ -127,6 +148,27 @@ class LinkedInputTests(unittest.TestCase):
             pump = next(p for p in result.experiments[0].profiles if p.device_id == "P")
             self.assertEqual(pump.points[0].target, 120.)
             self.assertEqual(inputs["SolvMass"], 10.)
+            self.assertEqual(inputs["PreparationCharges_g"], {"solvent": 10.})
+
+    def test_pump_recommendation_keeps_the_preparation_dose_and_feed_steps(self):
+        from experiment.material_balance import pump_mass
+
+        _, configs = fixture()
+        configs["P"]["pump_calibration"] = {"version": 1, "input_unit": "g/h", "output_unit": "RPM",
+            "source_name": "fixture", "points": [[0., 0.], [1800., 10.], [3600., 20.]], "flow_fit": [180., 0.]}
+        original = ExperimentDefinition("Charge", (profile("T", [(0, 25), (5, 25), (15, 25)]),
+            profile("P", [(0, 10), (2, 10), (2.000001, 0), (np.nextafter(5., 0.), 0),
+                          (15, 0), (np.nextafter(15., np.inf), 0)])), model_window=(5., 15.))
+        compiler = RecipeCompiler(default_setup(), Campaign("DoE", (original,)), configs, None,
+                                  (ProfileAssignment("T", "T"), ProfileAssignment("AS", "P")), (), "imed")
+        inputs = process()
+        campaign, (start, end) = compiler.build(
+            {"temperature": Profile(np.array([0., 10.]), np.array([25., 20.]), "MD recipe"),
+             "feed": Profile(np.array([0., np.nextafter(3., 0.), 3., 10.]), np.array([.5, .5, 0., 0.]), "MD recipe", step=True)},
+            inputs, name="Follow-up", source="imed", default_seed=0.)
+        pump = next(p for p in campaign.experiments[0].profiles if p.device_id == "P")
+        self.assertAlmostEqual(inputs["AntiSolvMass"], pump_mass(original.profiles[1], configs["P"], end=start), places=6)
+        self.assertAlmostEqual(pump_mass(pump, configs["P"], start=start, end=end), 1.5, places=6)
 
     def test_borrowed_doe_effects_gate_sensitivity_and_power_parameters(self):
         from experiment.campaign_effects import initial_input_groups, power_effects
@@ -240,7 +282,7 @@ class LinkedInputTests(unittest.TestCase):
 
     def test_recorded_mean_rpm_and_pump_fallback_generate_scalar_inputs(self):
         from experiment.recording import atomic_json
-        cfg = {"T": {"type": "huber"}, "S": {"type": "jkem"}, "AS": {"type": "ismatec"}}
+        cfg = {"T": {"type": "huber"}, "S": {"type": "jkem"}, "AS": {"type": "ismatec", "simulated": True}}
         definition = ExperimentDefinition("Measured", (profile("T", [(0, 25), (10, 20)]),))
         with TemporaryDirectory(dir=Path.cwd()) as directory:
             folder = Path(directory)
@@ -255,11 +297,11 @@ class LinkedInputTests(unittest.TestCase):
             exps, inputs, _ = read_completed_recordings(folder, (definition.experiment_id,),
                 {**default_setup()["recording"], "initial_concentration": .1}, {"Temperature": "T.temp_external"},
                 {definition.experiment_id: process()}, {definition.experiment_id: (0., 10.)},
-                roles={"T": "T", "stirring_rate": "S", "AS": "AS"}, mixing=settings)
+                roles={"T": "T", "stirring_rate": "S", "AS": "AS"}, mixing=settings, allow_density_fallback=True)
             self.assertEqual(inputs[0]["StirringRPM"], 200.)
             self.assertEqual(inputs[0]["MixingSummary"]["average_volume_ml"], 100.5)
             self.assertAlmostEqual(exps[0]["AddedAntisolventData"][1, -1], 2.)
-            self.assertIn("Calibrated pump", exps[0]["AntisolventSource"])
+            self.assertIn("Estimated pump delivery from AS density", exps[0]["AntisolventSource"])
             self.assertNotIn("StirringRateData", exps[0])
 
     def test_worker_stops_before_understocked_second_run_and_preserves_first_status(self):

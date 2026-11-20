@@ -25,13 +25,15 @@ class RecipeFeedback:
     source: str
     seed_template: dict
     model_root: str
+    final_size_samples: int = 1
 
     def read(self, folder):
         experiments, processes, runs = read_completed_recordings(
             folder, (self.experiment_id,), self.recording, self.mapping,
             {self.experiment_id: self.process}, {self.experiment_id: self.window},
             require_initial_concentration=self.mode == "imed", roles=self.roles,
-            mixing=self.process.get("MixingSettings") if self.mode == "imed" else None)
+            mixing=self.process.get("MixingSettings") if self.mode == "imed" else None,
+            allow_density_fallback=self.mode == "imed", final_size_samples=self.final_size_samples)
         for experiment in experiments:
             experiment.update(RecipeSource=self.source)
             if self.process["SeedMass"]:

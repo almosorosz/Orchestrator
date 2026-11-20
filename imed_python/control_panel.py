@@ -18,6 +18,8 @@ from .model_file import save_checkpoint
 from .native_case import CASE_FILTER, MATLAB_FILTER, NATIVE_FILTER, read_native_case, save_native_case
 from .kernel_choice import add_kernel_choice, kernel_values
 from .parameter_labels import BREAKAGE_DISTRIBUTION, KERNEL_OPTIONS, PARAMETERS
+from .pe_settings import PE_PBM_KEY, PE_WEIGHTS_KEY, PYFIT_SETTINGS_KEY, effective_pe_pbm, pe_mesh
+from .size_data import FINAL_SIZE_TERM
 from .solver import read_model
 from .solver_choice import SolverChoice
 from .session import clear_matlab_fit_summaries, delete_models, display_name, history, loop_stages, record_step
@@ -97,6 +99,9 @@ class ControlPanel(QMainWindow):
         self.save_button = self.button("Save IMED case", self.save_case)
         self.campaign_button = self.button("Import CrystalLoop", self.choose_campaign)
         self.input_buttons = [self.button("Edit experimental inputs", self.edit_inputs)]
+        self.solubility_button = self.button("Solubility…", self.edit_solubility)
+        self.objectives_button = self.button("IMED objectives…", self.edit_objectives)
+        self.fit_settings_button = self.button("PE settings…", self.edit_fit_settings)
         self.review_inputs = self.button("Review saved inputs", self.show_inputs)
         self.candidate_button = self.button("Generate candidate model", self.generate_candidate)
         self.configurations = self.button("Model Configurations", self.show_configurations)
@@ -126,6 +131,11 @@ class ControlPanel(QMainWindow):
             wrapper = QWidget()
             rows = QVBoxLayout(wrapper)
             rows.addWidget(self.readiness)
+            inputs = QGridLayout()
+            inputs.addWidget(self.solubility_button, 0, 0)
+            inputs.addWidget(self.objectives_button, 0, 1)
+            inputs.addWidget(self.fit_settings_button, 0, 2)
+            rows.addLayout(inputs)
             original.setMinimumSize(self.WIDTH, self.HEIGHT)
             rows.addWidget(original, 1)
             self.setCentralWidget(wrapper)
@@ -140,8 +150,12 @@ class ControlPanel(QMainWindow):
     def _review_setup_item(self, key):
         if hasattr(self, "model_tabs"):
             self.model_tabs.setCurrentIndex(1 if key in {"pe", "fits"} else 0)
-        if key in {"experiments", "process", "solubility"}:
+        if key in {"experiments", "process"}:
             self.edit_inputs()
+        elif key == "solubility":
+            self.edit_solubility()
+        elif key == "objectives":
+            self.edit_objectives()
         elif key == "models":
             self.show_configurations() if self.case.get("ModelParameter") else self.generate_candidate()
         elif key in {"pe", "fits"}:
@@ -178,8 +192,10 @@ class ControlPanel(QMainWindow):
         self.model_tabs = QTabWidget()
         workflow_layout.addWidget(self.model_tabs)
         self.design.setProperty("imedPrimary", True)
-        for title, buttons in (("Inputs & models", (*self.input_buttons, self.review_inputs, self.candidate_button, self.configurations)),
-                               ("Fit & design", (*self.estimation_buttons, self.uncertainty_button, self.md_button, self.dopt_button, self.design)),
+        for title, buttons in (("Inputs & models", (self.solubility_button, self.objectives_button, *self.input_buttons,
+                                                   self.review_inputs, self.candidate_button, self.configurations)),
+                               ("Fit & design", (self.fit_settings_button, *self.estimation_buttons, self.uncertainty_button,
+                                                 self.md_button, self.dopt_button, self.design)),
                                ("Analysis & history", (self.reliability, self.sensitivity, self.history_button, self.stages_button))):
             page = QWidget()
             grid = QGridLayout(page)
@@ -319,11 +335,18 @@ class ControlPanel(QMainWindow):
         dialog.deleteLater()
 
     def use_campaign(self, folder, experiments, processes, *, doe_factors=None):
+        from experiment.doe_decisions import case_decisions, decision_summary
+
         self.campaign_path = Path(folder)
         self.case.update(ExpData=experiments, ProcInf=processes)
         history(self.case)
         workflow = self.case["PythonWorkflow"]
         workflow.pop("profile_doe_factors", None)
+        workflow.pop("doe_decisions", None)
+        workflow.pop("initial_input_groups", None)
+        decision_space = case_decisions(self.case, folder)
+        if decision_space is not None:
+            workflow["doe_decisions"] = decision_space
         if doe_factors is None:
             workflow.pop("doe_factors", None)
         else:
@@ -340,6 +363,8 @@ class ControlPanel(QMainWindow):
         record_step(self.case, "campaign_import", {"folder": str(folder), "runs": len(experiments)})
         self.refresh_status()
         message = f"Imported {len(experiments)} CrystalLoop run(s)."
+        if decision_space is not None:
+            message += f" DoE decision variables: {decision_summary(decision_space)}."
         if not self.design.isEnabled():
             message += " Open Experimental Input to inspect recordings."
         self.show_message(message)
@@ -415,8 +440,8 @@ class ControlPanel(QMainWindow):
                                     and any(item_count(model.get("covmat")) for model in fitted))
         self.dopt_button.setToolTip("Requires a fitted model with parameter covariance.")
 
-    def dialog(self, title):
-        dialog = QDialog(self)
+    def dialog(self, title, *, parent=None):
+        dialog = QDialog(parent or self)
         dialog.setWindowTitle(title)
         dialog.resize(760, 510)
         return dialog, QVBoxLayout(dialog)
@@ -437,32 +462,96 @@ class ControlPanel(QMainWindow):
 
         dialog = ExperimentEditor(self.case, self)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.changed:
-            records, solubility = dialog.result
+            records = dialog.result
             self.case["ExpData"] = [experiment for experiment, _ in records]
             self.case["ProcInf"] = [{**process, "No": index}
                                     for index, (_, process) in enumerate(records, 1)]
-            if solubility:
-                self.case["Solubility"] = solubility
-            else:
-                self.case["Solubility"] = {}
-            clear_matlab_fit_summaries(self.case)
-            history(self.case)
-            self.case["PythonWorkflow"].pop("simulation_selection", None)
-            self.parameter_edits.clear()
-            for model in self.case.get("ModelParameter", []):
-                for key in ("para", "covmat", "resnorm", "resid", "jacobian", "nvars", "SSR",
-                            "r", "FVector", "AICVector", "t_test", "Results"):
-                    model.pop(key, None)
+            self.invalidate_input_fits()
             record_step(self.case, "experiment_edit", {"runs": len(records)})
             self.refresh_status()
             self.show_message("Experimental inputs updated. Use Save IMED case to keep the changes.")
         dialog.deleteLater()
 
-    def generate_candidate(self):
+    def invalidate_input_fits(self):
+        clear_matlab_fit_summaries(self.case)
+        history(self.case)
+        self.case["PythonWorkflow"].pop("simulation_selection", None)
+        self.parameter_edits.clear()
+        for model in self.case.get("ModelParameter", []):
+            for key in ("para", "covmat", "resnorm", "resid", "jacobian", "nvars", "SSR",
+                        "r", "FVector", "AICVector", "t_test", "Results"):
+                model.pop(key, None)
+
+    def edit_solubility(self, *, parent=None):
+        from .input_settings_dialogs import SolubilityDialog
+
+        current = self.case.get("Solubility")
+        dialog = SolubilityDialog(current, parent or self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if not isinstance(current, dict) or any(current.get(key) != dialog.solubility[key] for key in "abcdefgh"):
+                self.case["Solubility"] = dialog.solubility
+                self.invalidate_input_fits()
+                record_step(self.case, "solubility_edit", {})
+                self.refresh_status()
+                self.show_message("Solubility updated. Save the IMED case or setup preset to keep it.")
+        dialog.deleteLater()
+
+    def edit_objectives(self, *, parent=None):
+        from .input_settings_dialogs import ObjectivesDialog
+
+        dialog = ObjectivesDialog(self.case, parent or self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            previous = self.case.get(PE_WEIGHTS_KEY, self.case.get("objweightfactor", {}))
+            terms = previous.get("Terms", FINAL_SIZE_TERM) if isinstance(previous, dict) else FINAL_SIZE_TERM
+            weights = {**{f"W{i}": value for i, value in enumerate(dialog.weights, 1)}, "Terms": terms}
+            self.case[PE_WEIGHTS_KEY] = weights
+            self.setting_edits[PE_WEIGHTS_KEY] = weights
+            record_step(self.case, "imed_objectives", weights)
+            self.refresh_status()
+            self.show_message("IMED objectives updated. Save the IMED case or setup preset to keep them.")
+        dialog.deleteLater()
+
+    def edit_runtime_settings(self, *, parent=None):
+        dialog = QDialog(parent or self)
+        dialog.setWindowTitle("IMED | Solver and CPU workers")
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        solver = SolverChoice(dialog)
+        solver.setCurrentIndex(self.numerics.currentIndex())
+        workers = QSpinBox()
+        workers.setRange(self.workers.minimum(), self.workers.maximum())
+        workers.setValue(self.workers.value())
+        workers.setEnabled(solver.currentData()[0] != "jax")
+        solver.currentIndexChanged.connect(lambda: workers.setEnabled(solver.currentData()[0] != "jax"))
+        form.addRow("PBM solver", solver)
+        form.addRow("CPU workers", workers)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.numerics.setCurrentIndex(solver.currentIndex())
+            self.workers.setValue(workers.value())
+        dialog.deleteLater()
+
+    def edit_fit_settings(self, *, parent=None):
+        from .estimation_dialog import AdvancedSettings
+
+        case = self.simulation_case()
+        dialog = AdvancedSettings(effective_pe_pbm(case), case.get(PYFIT_SETTINGS_KEY, {}), parent or self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            settings = {PE_PBM_KEY: pe_mesh(dialog.pbm), PYFIT_SETTINGS_KEY: dict(dialog.optimizer)}
+            self.case.update(settings)
+            self.setting_edits.update(settings)
+            self.show_message("Applied PE settings to this case.")
+        dialog.deleteLater()
+
+    def generate_candidate(self, *, parent=None):
         from .candidate_model_dialog import CandidateModelDialog
 
         models = self.case.setdefault("ModelParameter", [])
-        dialog = CandidateModelDialog({display_name(model, "").casefold() for model in models}, self)
+        dialog = CandidateModelDialog({display_name(model, "").casefold() for model in models}, parent or self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             models.append(dialog.model)
             record_step(self.case, "model_configuration", {"paraset": dialog.model["paraset"]},
@@ -495,6 +584,12 @@ class ControlPanel(QMainWindow):
 
     def checkpoint_case(self):
         case = self.simulation_case()
+        if len(case.get("ExpData", [])) >= 2 and "doe_decisions" not in case["PythonWorkflow"]:
+            from experiment.doe_decisions import case_decisions
+
+            # Freeze the imported batch before adding one-off recipe feedback.
+            space = case_decisions(case, self.campaign_path)
+            case = {**case, "PythonWorkflow": {**case["PythonWorkflow"], "doe_decisions": space}}
         case["PythonWorkflow"]["cpu_workers"] = self.workers.value()
         return case
 
@@ -574,8 +669,10 @@ class ControlPanel(QMainWindow):
         refresh()
         tabs.addTab(page, "Recorded channels")
 
-    def show_configurations(self):
-        dialog, layout = self.dialog("IMED | Model Configurations")
+    def show_configurations(self, *, parent=None):
+        if not self.case.get("ModelParameter"):
+            return self.generate_candidate(parent=parent)
+        dialog, layout = self.dialog("IMED | Model Configurations", parent=parent)
         dialog.resize(1040, 570)
         layout.addWidget(QLabel("Edit parameters or delete the selected model. "
                                 "Save applies changes to this case."))

@@ -137,7 +137,7 @@ class SimulatedDevice:
                 if self.device_type == "jkem":
                     status["torque_ozin"] = abs(value) * 0.02
             elif self.device_type == "ismatec":
-                status.update(flow=value, stage=self.stage)
+                status.update(speed_rpm=value, flow=value, stage=self.stage)
             elif self.device_type == "huber":
                 status.update(setpoint=self.target, temp_internal=value, temp_external=value - 0.2)
             elif self.device_type == "nidaq_valve":
@@ -153,15 +153,20 @@ class SimulatedDevice:
 def update_simulated_process(devices, configs, elapsed_s):
     """Simple demo coupling: integrate simulated pump delivery into balances.
 
-    Masterflex RPM uses an illustrative 0.1 mL/min/RPM conversion and density
-    1 g/mL. This is a demo model, never a physical calibration.
+    Without a calibration, Masterflex and Ismatec use illustrative conversions
+    of 0.1 and 1 g/min per virtual RPM, respectively.
     """
     flow = 0.0
     for device_id, dev in devices.items():
         if not getattr(dev, "simulated", False) or not dev.is_running:
             continue
         kind = configs[device_id]["type"]
-        if kind == "masterflex":
+        calibration = configs[device_id].get("pump_calibration")
+        if kind in {"masterflex", "ismatec"} and calibration and calibration.get("output_unit") == "RPM":
+            from experiment.pump_calibration_files import delivered_flow
+
+            flow += delivered_flow(configs[device_id], [dev.target])[0] / 60.
+        elif kind == "masterflex":
             flow += dev.target * 0.1
         elif kind == "ismatec":
             flow += dev.target

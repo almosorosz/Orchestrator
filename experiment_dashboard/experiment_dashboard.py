@@ -193,6 +193,8 @@ class ExperimentWorker(QObject):
             # SET HUBER CONTROL MODE
             # ======================================================
 
+            initial_modes = {point.device_id: point.mode for point in self.definitions[0].control_modes
+                             if point.time_s == 0.}
             for dev_id, dev in self.devices.items():
 
                 config = self.device_configs.get(
@@ -203,13 +205,7 @@ class ExperimentWorker(QObject):
                 if config.get("type") != "huber" or is_monitor_only(config):
                     continue
 
-                control_mode = config.get(
-                    "defaults",
-                    {}
-                ).get(
-                    "control_mode",
-                    "Jacket"
-                )
+                control_mode = initial_modes.get(dev_id, config.get("defaults", {}).get("control_mode", "Jacket"))
 
                 try:
 
@@ -405,6 +401,10 @@ class ExperimentWorker(QObject):
 
                 run = self.runs[exp_idx]
                 definition = self.definitions[exp_idx]
+                tubing = definition.pump_adjustments or {}
+                self._active_pump_adjustments = tubing.get("pumps", {})
+                correction_pulses = [(device, kind, actions[kind]) for device, actions in self._active_pump_adjustments.items()
+                                     for kind in ("prime", "reverse") if kind in actions]
                 if self.reservoirs is not None:
                     try:
                         self.reservoirs.begin(definition, end_hold_s=self.end_hold_s)
@@ -414,19 +414,30 @@ class ExperimentWorker(QObject):
                 trace = None
                 if definition.imed_simulation:
                     from imed_python.demo_campaign import SimulationTrace
+                    from experiment.pump_corrections import modeled_frame
                     try:
-                        trace = SimulationTrace(definition.imed_simulation, profile, self._stop_event.is_set)
+                        trace = SimulationTrace(definition.imed_simulation, modeled_frame(profile, tubing), self._stop_event.is_set,
+                                                process=definition.model_process, configs=self.device_configs)
                     except InterruptedError:
                         break
                 self._active_profiles = {p.device_id: p for p in definition.profiles}
                 self._mode_cursor = 0
                 control_modes = sorted(definition.control_modes, key=lambda point: point.time_s)
+                command_boundaries = sorted({event.time_s for event in control_modes} |
+                    {time for _, _, action in correction_pulses for time in (action["start_s"], action["end_s"])})
                 run.status = RunStatus.RUNNING
                 if self.recorder:
                     self.recorder.submit("run_start", run.run_id, {
                         "experiment_id": run.experiment_id, "experiment_number": exp_idx + 1,
                         "batch_name": run.run_id, "planned": profile.to_dict(orient="list")})
                 logger.info("Experiment %d/%d started (run %s)", exp_idx + 1, total_experiments, run.run_id)
+                for device, actions in self._active_pump_adjustments.items():
+                    if prime := actions.get("prime"):
+                        logger.info("%s line fill: %g g at %g from %g to %g s", device, prime["mass_g"], prime["target"],
+                                    prime["start_s"], prime["end_s"])
+                    if reverse := actions.get("reverse"):
+                        logger.info("%s back rotation: %g from %g to %g s", device, reverse["target"],
+                                    reverse["start_s"], reverse["end_s"])
                 start_time = self.clock()
                 self._process_time = 0.0
                 last_gui_publish = float("-inf")
@@ -445,6 +456,7 @@ class ExperimentWorker(QObject):
                 )
                 ticks = iter(simulation_ticks(profile, self.poll_interval, self.end_hold_s)) if self._event_simulation else None
                 next_tick = next(ticks) if ticks is not None else None
+                previous_elapsed = -1.
 
                 while not self._stop_event.is_set() and not self._wake_event.is_set():
 
@@ -454,6 +466,11 @@ class ExperimentWorker(QObject):
                     ) * self.speed
                     if self._event_simulation:
                         self._simulation_time = simulation_base + elapsed
+                    for device, kind, action in correction_pulses:
+                        if previous_elapsed < action["start_s"] and elapsed >= action["end_s"]:
+                            raise RuntimeError(f"{device}: the runner missed the scheduled pump {kind} pulse. "
+                                               "Use a longer pulse within the calibration range.")
+                    previous_elapsed = elapsed
 
                     stage = next((stage for stage in definition.run_stages
                                   if stage.start_s <= elapsed < stage.end_s), None)
@@ -542,7 +559,13 @@ class ExperimentWorker(QObject):
                             )
                         )
                         if trace is not None:
-                            trace.apply(telemetry, elapsed)
+                            trace.apply(telemetry, elapsed - tubing.get("lead_in_s", 0.))
+                            if actions := self._active_pump_adjustments.get(trace.spec["controls"].get("AS")):
+                                from experiment.pump_corrections import progress_fraction
+
+                                scale = trace.spec["monitors"]["AS scale"]
+                                telemetry[scale]["weight_g"] -= sum(action["mass_g"] * progress_fraction(action, elapsed)
+                                    for kind in ("prime", "reverse") if (action := actions.get(kind)) and "mass_g" in action)
 
                         telemetry[
                             "experiment_index"
@@ -593,6 +616,10 @@ class ExperimentWorker(QObject):
                         delay = max(0., wall_start + next_tick[0] / self.speed - time.monotonic())
                     else:
                         delay = self.poll_interval / self.speed
+                        next_boundary = np.searchsorted(command_boundaries, elapsed, side="right")
+                        if next_boundary < len(command_boundaries):
+                            deadline = start_time + command_boundaries[next_boundary] / self.speed
+                            delay = min(delay, max(0., deadline - self.clock()))
                     self._wake_event.wait(delay)
 
                 with self._skip_lock:
@@ -654,7 +681,13 @@ class ExperimentWorker(QObject):
                     run.status = self.outcome
             self._return_hardware_to_idle()
             if self.reservoirs is not None:
-                self.reservoirs.save()
+                try:
+                    self.reservoirs.save()
+                except OSError as error:
+                    self.outcome = RunStatus.FAILED
+                    message = f"Could not save reservoir inventory: {error}"
+                    self.error_message = " | ".join(filter(None, (self.error_message, message)))
+                    logger.error("%s", message)
             for device, previous in self._simulation_clocks:
                 device.restore_simulation_clock(previous)
             self._simulation_clocks.clear()
@@ -916,6 +949,10 @@ class ExperimentWorker(QObject):
                     if value < 0
                     else options.get("direction", "+")
                 )
+                corrections = getattr(self, "_active_pump_adjustments", {})
+                reverse = corrections.get(dev_id, {}).get("reverse")
+                if reverse and value < 0 and options.get("direction") == "-" and reverse["start_s"] <= step_row["time_s"] < reverse["end_s"]:
+                    value, direction = -value, "+"
 
                 submit_command(
                     dev_id,
@@ -940,7 +977,7 @@ class ExperimentWorker(QObject):
                     f"set_target({value}, stage={stage})",
                     dev.set_target,
                     float(value),
-                    stage=stage
+                    stage=stage,
                 )
 
             # ------------------------------------------------------

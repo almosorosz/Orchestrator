@@ -9,6 +9,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from experiment.material_balance import pump_mass, delivery_times
+from experiment.pump_corrections import progress_fraction
 from experiment.recording import atomic_json
 from experiment.system_topology import PUMPS
 
@@ -86,8 +87,8 @@ class ReservoirBook(QObject):
 
     def save(self):
         with self.lock:
-            if self._load_error:
-                return  # Preserve the unreadable file until actual amounts have been confirmed.
+            if self._load_error or not self.remaining:
+                return
             for code, amount in self.remaining.items():
                 key = self.units[code].get("inventory_id")
                 if key:
@@ -123,7 +124,16 @@ class ReservoirBook(QObject):
                     raise
                 known = False
                 continue
-            amounts[source] = amounts.get(source, 0.) + mass
+            adjustment = (experiment.pump_adjustments or {}).get("pumps", {}).get(profile.device_id, {})
+            prime = adjustment.get("prime")
+            reverse = adjustment.get("reverse")
+            tube_fill = prime["mass_g"] * float(progress_fraction(prime, elapsed)) if prime else 0.
+            tube_return = (reverse["mass_g"] * float(progress_fraction(reverse, elapsed))
+                           if reverse and "mass_g" in reverse else 0.)
+            # A reverse command may keep running after the line has emptied.
+            dry_reverse = max(0., -tube_return - reverse["return_limit_g"]) if reverse else 0.
+            amounts[source] = amounts.get(source, 0.) + mass + dry_reverse
+            mass -= tube_fill + tube_return
             if target in reactors:
                 reactor_change += mass
             if source in reactors:

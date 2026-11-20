@@ -94,6 +94,8 @@ class LoopModelViews:
             dialog = DesignDialog(value["case"], optimal, self.window, model_indices=value["survivors"],
                                   workers=job.session.workers)
             dialog.load_request(value["request"])
+            dialog.use_doe.setChecked("doe_search" in value["request"]["conditions"])
+            dialog.use_doe.setEnabled(False)
             dialog.run_button.setEnabled(False)
             dialog.stop_button.clicked.disconnect(dialog.stop_design)
             self._show_readout(dialog, f"Automatic {value['method'].lower()} is running.")

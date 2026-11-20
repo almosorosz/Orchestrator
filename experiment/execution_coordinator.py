@@ -345,7 +345,7 @@ class ExperimentCoordinator(QObject):
         manifest = {"campaign_id": self.campaign_id,
             "campaign_folder": str(folder), "experiments": sorted(completed),
             "skipped_experiments": sorted(skipped),
-            "pbm_fitting": {"size_term": self.controller.pbm_size_term}}
+            "pbm_fitting": self.controller.pbm_fitting}
         (model_path / "campaign_input.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         self.controller.current_model_folder = str(model_path)
         self.controller.omni_count += 1
@@ -430,7 +430,7 @@ class ExperimentCoordinator(QObject):
             )
         )
         (Path(model_path) / "pbm_fitting.json").write_text(
-            json.dumps({"size_term": self.controller.pbm_size_term}, indent=2), encoding="utf-8")
+            json.dumps(self.controller.pbm_fitting, indent=2), encoding="utf-8")
     
         self.controller.current_model_folder = (
             model_path

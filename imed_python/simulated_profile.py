@@ -65,6 +65,13 @@ def template_rpm(process):
 def editable_groups(case, model_index, saved_profile=None):
     """Use declared DoE factors, with comparisons across runs for older cases."""
     workflow = case.get("PythonWorkflow", {})
+    if workflow.get("doe_decisions") is not None:
+        from experiment.doe_decisions import decision_groups, validate_decisions
+
+        groups = decision_groups(validate_decisions(workflow["doe_decisions"]), imed=True)
+        if not power_dependent(case["ModelParameter"][model_index]):
+            groups.discard("stirring")
+        return groups
     factors = workflow.get("doe_factors", case.get("active_doe_factors", workflow.get("profile_doe_factors")))
     if factors is not None:
         selected = {part for value in np.asarray(factors).reshape(-1)
@@ -180,5 +187,6 @@ def prediction_inputs(case, experiment_index, simulated_profile=None):
     if "stirring_rpm" in recipe:
         process["PowerRatio"] = stirring_power_ratio(
             process["PowerRatio"], recipe["stirring_rpm"], recipe["reference_rpm"])
+        process["StirringRPM"] = float(recipe["stirring_rpm"])
     return {"TemperatureData": temperature, "FlowRateData": flow,
             "InitialConcentration": concentration, "InitialCSDsData": seed_csd}, process

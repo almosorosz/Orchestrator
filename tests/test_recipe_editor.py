@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
@@ -170,3 +170,42 @@ class RecipeEditorTests(unittest.TestCase):
             worker.start_experiment()
             self.assertTrue(process.called)
         self.assertEqual(worker.outcome.value, "completed", worker.error_message)
+
+    def test_real_huber_driver_switches_before_stage_setpoints_between_polls(self):
+        from experiment.models import ControlModePoint, DeviceProfile, ExperimentDefinition, ProfilePoint
+        from experiment_dashboard.experiment_dashboard import ExperimentWorker
+        from hardware_devices.hardware_devices import HuberController
+
+        sent = []
+
+        def write(request):
+            sent.append(request.decode("ascii").strip())
+            return len(request)
+
+        def reply():
+            command = sent[-1]
+            if "@" in command:
+                register, value = command.split("@ ", 1)
+                return f"{register} {value}\r\n".encode("ascii")
+            return f"{command[:2]} +02200\r\n".encode("ascii")
+
+        huber = HuberController("Huber", "COM1")
+        huber.is_connected = True
+        huber.ser = Mock(is_open=True)
+        huber.ser.write.side_effect = write
+        huber.ser.readline.side_effect = reply
+        config = {"TEMP": {"type": "huber", "defaults": {"control_mode": "Process"}}}
+        temperature = DeviceProfile("TEMP", (ProfilePoint(0., 22.), ProfilePoint(.15, 23.),
+                                              ProfilePoint(.4, 24.), ProfilePoint(.55, 24.)), "step", "°C")
+        modes = tuple(ControlModePoint(time, "TEMP", mode)
+                      for time, mode in ((0., "Jacket"), (.15, "Process"), (.4, "Jacket")))
+        experiment = ExperimentDefinition("Huber stage switches", (temperature,), control_modes=modes)
+        worker = ExperimentWorker({"TEMP": huber}, config, [experiment], poll_interval=.8, end_hold_s=0.)
+        worker.start_experiment()
+        self.assertEqual(worker.outcome.value, "completed", worker.error_message)
+        self.assertEqual(sent[0], "TM@ 0")
+        process = sent.index("TM@ 1")
+        jacket = sent.index("TM@ 0", process)
+        self.assertLess(process, sent.index("SP@ +02300"))
+        self.assertLess(sent.index("SP@ +02300"), jacket)
+        self.assertLess(jacket, sent.index("SP@ +02400"))

@@ -1,7 +1,7 @@
 ,Solvent_PUMP,Mass
 Time,P01:Value (Setpt),File R: Mass 
 min,,g
-0.029,20,566.2
+0,20,566.2
 0.063,20,569.8
 0.096,20,566.1
 0.129,20,566.1

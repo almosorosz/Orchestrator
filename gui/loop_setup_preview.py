@@ -2,15 +2,45 @@
 from numbers import Real
 
 from bo.profiles import CONSTRAINTS, TARGETS, selected_horizon
-from experiment.adaptive_loop import recording_mapping
+from experiment.adaptive_loop import (
+    antisolvent_recording_source, imed_objective_channels, imed_response_weights, recording_mapping,
+)
 from experiment.doe_campaign import ROLES
+from experiment.doe_decisions import LABELS, decision_groups, decision_summary, starting_run_process
 from experiment.run_stages import modeling_campaign
-from experiment.loop_process import LOOP_WEIGHT_DEFAULTS, PROCESS_DEFAULTS, VALIDATION_PE_SETTINGS, starting_process_defaults
-from imed_python.campaign_dialog import PROCESS_FIELDS
+from experiment.loop_process import PROCESS_DEFAULTS, PROCESS_FIELDS, VALIDATION_PE_SETTINGS, starting_process_defaults
 from imed_python.campaign_import import CHANNELS
-from imed_python.demo_campaign import model_inputs
-from imed_python.pe_settings import PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, effective_pe_pbm
+from imed_python.demo_campaign import legacy_simulation, model_inputs
+from imed_python.pe_settings import PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, effective_pe_pbm
 from imed_python.session import display_name
+
+
+PREVIEW_AMOUNTS = {key: PROCESS_FIELDS[key] for key in ("SolvMass", "AntiSolvMass", "SeedMass")}
+PREVIEW_AMOUNTS["InitialVolume_ml"] = "Initial liquid volume (mL)"
+
+
+def starting_input_rows(setup, context):
+    """Resolve draft values with the same starting profiles and settings as execution."""
+    setup = context.get("effective_setup", setup)
+    campaign = modeling_campaign(context.get("campaign"), setup)
+    if not campaign:
+        return {}
+    case = context["case"]
+    defaults = starting_process_defaults(setup, case)
+    base_sources = dict.fromkeys(PROCESS_DEFAULTS, "Loop default")
+    base_sources.update(dict.fromkeys(next(iter(case.get("ProcInf", [])), {}), "First IMED process record"))
+    base_sources.update(dict.fromkeys(setup["process"], "Common process input"))
+    concentration = setup["recording"]["initial_concentration"]
+    if concentration is not None and "InitialConcentration" not in defaults:
+        defaults["InitialConcentration"] = concentration
+        base_sources["InitialConcentration"] = "Recording setting"
+    rows = {}
+    for exp in campaign.experiments:
+        sources, issues = base_sources.copy(), {}
+        values = starting_run_process(exp, setup, context["roles"], context["configs"], campaign.line_roles,
+                                      defaults, sources=sources, issues=issues)
+        rows[exp.name] = values, sources, issues, legacy_simulation(exp.imed_simulation) is None
+    return rows
 
 
 def value_text(value):
@@ -25,24 +55,48 @@ def value_text(value):
     return str(value)
 
 
+def uses_followup_offset(period_mode, context):
+    campaign = context.get("campaign")
+    first = campaign.experiments[0] if campaign and campaign.experiments else None
+    return (period_mode == "definition" and not context.get("run_stages")
+            and (first is None or not (first.run_stages or first.model_window or legacy_simulation(first.imed_simulation))))
+
+
 def used_loop_values(setup, backend, context, design_labels):
     setup = context.get("effective_setup", setup)
     campaign, roles, case = (context[key] for key in ("campaign", "roles", "case"))
     experiments = campaign.experiments if campaign else ()
-    simulation = experiments[0].imed_simulation if experiments else None
+    simulation = legacy_simulation(experiments[0].imed_simulation) if experiments else None
     recording = setup["recording"]
     label = context["label"]
     source = "Automatic loop setup"
     groups = {"Run setup": [
         ("Starting campaign", f"{campaign.name} · {len(experiments)} experiments" if campaign else None, label),
         ("Follow-up experiments", setup["max_followups"], source),
-        ("Follow-up crystallization start (s)", 0 if simulation else setup["followup_start_s"],
-         "PBM simulation" if simulation else source),
         ("Experiment folder", context["folders"][0] or None, "Settings"),
         ("MODEL folder", context["folders"][1] or None, "Settings"),
     ]}
+    if uses_followup_offset(setup["experiment_period"]["mode"], context):
+        groups["Run setup"].insert(2, ("Start delay for unstaged profiles (s)", setup["followup_start_s"], source))
+    elif experiments and experiments[0].run_stages and not simulation:
+        groups["Run setup"].insert(2, ("Follow-up scope", "Selected stages only", "Experiment period"))
     if campaign and campaign.doe_factors is not None:
         groups["Run setup"].append(("Sampled DoE factors", ", ".join(campaign.doe_factors) or "None", "Settings DoE"))
+    if (decisions := context.get("doe_decisions")) is not None:
+        active = decision_groups(decisions, imed=backend == "imed")
+        if experiments and experiments[0].run_stages and not simulation:
+            active -= {"seed", "volume"}
+        if backend == "imed" and not setup["mixing"]["enabled"]:
+            active.discard("stirring")
+        groups["DoE decision variables"] = [("Varies", decision_summary(decisions, active), label)]
+        for key in (group for group in LABELS if group in active):
+            levels = decisions["levels"].get(key) if key != "stirring" or backend == "imed" else None
+            detail = (levels[0], levels[-1]) if levels else f"{len(decisions['traces'][key])} profile choices"
+            groups["DoE decision variables"].append((LABELS[key], detail, label))
+        if backend == "imed" and "stirring" in decision_groups(decisions, imed=True):
+            detail = ("Available when a surviving model uses the power term" if setup["mixing"]["enabled"]
+                      else "Fixed while average mixing is disabled")
+            groups["DoE decision variables"].append(("IMED stirring", detail, "IMED design"))
 
     configs, connected, monitors = (context[key] for key in ("configs", "connected", "monitors"))
     assignments = groups["Device assignments"] = []
@@ -54,6 +108,8 @@ def used_loop_values(setup, backend, context, design_labels):
         assignments.append((caption, f"{device} · {name} · {status}", context.get("resolution", {}).get("origins", {}).get(role, label)))
         if calibration := config.get("pump_calibration"):
             assignments.append((f"{caption} calibration", calibration.get("source_name", "Loaded"), "Control Panel"))
+        if calibration := config.get("seed_calibration"):
+            assignments.append((f"{caption} calibration", f"{calibration.get('source_name', 'Loaded')} · {calibration['rpm']:g} RPM", "Control Panel"))
     if not assignments:
         assignments.append(("Assigned devices", None, label))
 
@@ -76,6 +132,7 @@ def used_loop_values(setup, backend, context, design_labels):
     inputs = groups["Starting process inputs"] = []
     saved = next(iter(case.get("ProcInf", [])), {})
     process_labels = {**PROCESS_FIELDS, "InitialConcentration": "Initial concentration (g/g solution)"}
+    resolved = {}
     if simulation:
         _, exp, values, _, mesh = model_inputs(simulation["seeded"])
         values = {**values, "InitialConcentration": exp["ConcentrationData"][1][0]}
@@ -84,6 +141,12 @@ def used_loop_values(setup, backend, context, design_labels):
             values["SeedMass"] = f"0 / {model_inputs(True)[2]['SeedMass']:g} · depends on starting profile"
     else:
         values = starting_process_defaults(setup, case)
+        process_labels["InitialVolume_ml"] = PREVIEW_AMOUNTS["InitialVolume_ml"]
+        try:
+            resolved = starting_input_rows(setup, context)
+        except ValueError:
+            # Invalid or stale stage selections are described in the period rows below.
+            pass
     for key, title in process_labels.items():
         if key == "PowerRatio" and backend == "imed":
             inputs.append((title, "Calculated per experiment from averages" if setup["mixing"]["enabled"] else 1., "Average mixing option"))
@@ -101,14 +164,30 @@ def used_loop_values(setup, backend, context, design_labels):
             origin = "Recording override" if values[key] is not None else "Measured concentration"
         else:
             origin = "Process inputs"
-        inputs.append((title, values.get(key), origin))
+        current = values.get(key)
+        if key in PREVIEW_AMOUNTS and resolved:
+            readings = [row[0].get(key) for row in resolved.values()]
+            if all(isinstance(value, Real) for value in readings):
+                low, high = min(readings), max(readings)
+                current = low if low == high else f"{low:.8g}–{high:.8g}"
+                sources = {row[1].get(key, origin) for row in resolved.values()}
+                origin = sources.pop() if len(sources) == 1 else "Per-run process inputs"
+        inputs.append((title, current, origin))
     if not simulation:
         for name, overrides in setup["initial_processes"].items():
             for key, value in overrides.items():
                 inputs.append((f"{name} · {process_labels.get(key, key)}", value, "Starting experiment override"))
+        preparation = []
+        for name, (values, _, _, _) in resolved.items():
+            if charges := values.get("PreparationCharges_g"):
+                detail = ", ".join(f"{role} {mass:.6g} g" for role, mass in charges.items())
+                preparation.append((name, detail, "Preparation pump profiles"))
+        if preparation:
+            groups["Calibrated preparation charges"] = preparation
 
     recorded = groups["Recording"] = []
     period = groups["Modeling experiment period"] = []
+    selected_campaign = None
     try:
         selected_campaign = modeling_campaign(campaign, setup)
         for exp in selected_campaign.experiments if selected_campaign else ():
@@ -133,10 +212,20 @@ def used_loop_values(setup, backend, context, design_labels):
         ))
         available = {device: configs[device] for device in {*roles.values(), *monitors} if device in configs}
         try:
-            mapping = recording_mapping(setup, roles, available) if "T" in roles else setup["channels"]
+            required = imed_objective_channels(imed_response_weights(case)) if backend == "imed" else None
+            mapping = (recording_mapping(setup, roles, available, required_measurements=required)
+                       if "T" in roles else setup["channels"])
         except ValueError as error:
             recorded.append(("Check channel mappings", str(error), "Recording tab"))
             mapping = setup["channels"]
+        else:
+            if selected_campaign and "T" in roles:
+                try:
+                    source = antisolvent_recording_source(recording, mapping, selected_campaign,
+                                                          roles, available, infer_no_feed=backend == "imed")
+                except ValueError as error:
+                    source = str(error)
+                recorded.append(("AS feed measurement", source, "Selected experiment period"))
     for role in CHANNELS:
         inherited = "PBM simulation" if simulation else "Recording override" if role in setup["channels"] else "Automatic mapping"
         recorded.append((role, mapping.get(role) or "Not recorded", inherited))
@@ -150,10 +239,16 @@ def used_loop_values(setup, backend, context, design_labels):
         times, targets = profile["points"]
         support.append((ROLES[role].label, f"{len(times)} points · {min(targets):g}–{max(targets):g} {ROLES[role].unit}",
                         "Support profile override"))
-    if pump := setup["seed_pump"]:
+    pump = setup["seed_pump"]
+    seed_config = configs.get(roles.get("seed"), {})
+    seed_curve = seed_config.get("seed_calibration")
+    if seed_curve and (not pump or pump.get("use_device_calibration")):
+        support.append(("Calibrated dry-seed delivery", f"{seed_curve['rpm']:g} RPM · up to {seed_curve['points'][-1][1]:g} g",
+                        seed_curve["source_name"]))
+    elif pump:
         try:
             from experiment.pump_calibration_files import seed_delivery_rate
-            rate = seed_delivery_rate(configs.get(roles.get("seed"), {}), pump)
+            rate = seed_delivery_rate(seed_config, pump)
             support.append(("Calibrated seed delivery", f"{pump['rpm']:g} RPM · {rate:g} g/s",
                             "Loaded seed pump calibration" if pump.get("use_device_calibration") else "Devices"))
         except (ValueError, KeyError, TypeError) as error:
@@ -183,8 +278,6 @@ def used_loop_values(setup, backend, context, design_labels):
             model.extend((("Impeller power number", mixing["power_number"], "Campaign constant"),
                           ("Impeller diameter (mm)", mixing["diameter_m"] * 1000, "Campaign constant"),
                           ("Volume basis", mixing["volume_ml"] if mixing["volume_mode"] == "fixed" else "Charges + recorded AS additions", "IMED design")))
-        stored = case.get(PE_WEIGHTS_KEY, case.get("objweightfactor", {}))
-        stored = stored if isinstance(stored, dict) else {}
         options = setup["imed"]
         pbm_case = {**case, "pbmsetting": {**mesh, **case.get("pbmsetting", {})}} if simulation else case
         pbm = effective_pe_pbm(pbm_case)
@@ -195,7 +288,7 @@ def used_loop_values(setup, backend, context, design_labels):
             ("Candidate models", ", ".join(candidates) or ("Validation PBM" if simulation else None), "IMED case"),
             ("PE solver / mesh bins", f"{pbm.get('Numerics', 'conservative')} / {pbm['N']}", "IMED case"),
             ("PE weights · count / concentration / size",
-             [stored.get(f"W{i}", default) for i, default in enumerate(LOOP_WEIGHT_DEFAULTS, 1)], "IMED case"),
+             imed_response_weights(case), "IMED objectives"),
             ("PE size samples", context["size_term"], "Settings"),
             ("CPU workers", context["workers"], "IMED case"),
             ("PE global iterations / population", [fit["global_iterations"], fit["population_size"]], "PE settings"),
@@ -207,4 +300,6 @@ def used_loop_values(setup, backend, context, design_labels):
         ))
         for key, title in design_labels.items():
             model.append((title, options["conditions"].get(key), "IMED design"))
+    if context.get("final_size_samples") is not None:
+        model.append(("Final size samples to average", context["final_size_samples"], "Settings"))
     return groups

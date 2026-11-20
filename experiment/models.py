@@ -70,6 +70,9 @@ class ExperimentDefinition:
     model_window: tuple[float, float] | None = None
     run_stages: tuple = ()
     initial_mass_g: float | None = None
+    seed_mass_g: float | None = None
+    model_process: dict | None = None
+    pump_adjustments: dict | None = None
 
     def __post_init__(self):
         ids = [profile.device_id for profile in self.profiles]
@@ -79,6 +82,8 @@ class ExperimentDefinition:
         object.__setattr__(self, "run_stages", stages_from_payload(self.run_stages, duration))
         if self.initial_mass_g is not None and (not math.isfinite(self.initial_mass_g) or self.initial_mass_g < 0):
             raise ValueError("The initial system mass must be finite, nonnegative grams.")
+        if self.seed_mass_g is not None and (not math.isfinite(self.seed_mass_g) or self.seed_mass_g < 0):
+            raise ValueError("The initial seed mass must be finite, nonnegative grams.")
         if any(point.device_id not in ids or point.time_s > duration for point in self.control_modes):
             raise ValueError("Control-mode events must refer to assigned devices within the experiment timeline.")
         if self.model_window is not None:
@@ -146,6 +151,7 @@ class Campaign:
     monitor_device_ids: tuple[str, ...] = ()
     doe_factors: tuple[str, ...] | None = None
     line_roles: dict = field(default_factory=dict)
+    doe_decisions: dict | None = None
 
 
 @dataclass

@@ -758,6 +758,7 @@ class IsmatecPump(BaseDevice):
 
         self.target_flow = 0.0
         self.is_running = False
+        self._rpm_stages = set()
 
     def connect(self) -> bool:
 
@@ -892,12 +893,19 @@ class IsmatecPump(BaseDevice):
                 errors="ignore"
             )
 
+    def _ensure_rpm_mode(self, stage):
+        if stage not in self._rpm_stages:
+            if self._send_cmd(f"{stage}L").strip() != "*":
+                raise ValueError(f"Stage {stage} did not confirm RPM mode.")
+            self._rpm_stages.add(stage)
+
     def set_target(
         self,
         flow_value: float,
         stage=None,
         **kwargs
     ) -> bool:
+        """Set the Ismatec drive speed in RPM using the REGLO serial S command."""
     
         stage = self._resolve_stage(
             stage
@@ -915,9 +923,7 @@ class IsmatecPump(BaseDevice):
     
             if flow_value == 0:
     
-                self._send_cmd(
-                    f"{stage}S000000"
-                )
+                self._send_cmd(f"{stage}S000000")
     
                 self._send_cmd(
                     f"{stage}I"
@@ -934,35 +940,26 @@ class IsmatecPump(BaseDevice):
             # DIRECTION
             # --------------------------------------------------
     
+            self._ensure_rpm_mode(stage)
             direction_cmd = (
                 f"{stage}J"
                 if flow_value < 0
                 else f"{stage}K"
             )
     
-            self._send_cmd(
-                direction_cmd
-            )
+            self._send_cmd(direction_cmd)
     
             # --------------------------------------------------
             # FLOW SETPOINT
             # --------------------------------------------------
     
-            val_str = (
-                f"{int(abs(flow_value) * 100):06d}"
-            )
-    
-            self._send_cmd(
-                f"{stage}S{val_str}"
-            )
+            self._send_cmd(f"{stage}S{round(abs(flow_value) * 100):06d}")
     
             # --------------------------------------------------
             # ENSURE STAGE IS RUNNING
             # --------------------------------------------------
     
-            self._send_cmd(
-                f"{stage}H"
-            )
+            self._send_cmd(f"{stage}H")
     
             if stage == self.stage:
     
@@ -989,6 +986,7 @@ class IsmatecPump(BaseDevice):
 
         try:
 
+            self._ensure_rpm_mode(stage)
             self._send_cmd(
                 f"{stage}H"
             )
@@ -1040,6 +1038,7 @@ class IsmatecPump(BaseDevice):
             "name": self.name,
             "connected": self.is_connected,
             "stage": self.stage,
+            "speed_rpm": self.target_flow if self.is_running else 0.0,
             "flow": (
                 self.target_flow
                 if self.is_running
@@ -1052,6 +1051,7 @@ class IsmatecPump(BaseDevice):
         if not self.is_connected:
             return
 
+        self._rpm_stages.clear()
         try:
 
             self.stop()

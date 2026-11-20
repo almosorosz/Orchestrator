@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.integrate import cumulative_trapezoid
+from .size_data import validate_final_size_samples
 
 
 CHANNELS = ("Temperature", "Concentration", "FBRM", "D10", "D50", "D90", "AS scale")
@@ -104,7 +105,9 @@ def seed_distribution(percentiles):
 
 def import_run(file, mapping, *, start, end, concentration_multiplier, scale_direction,
                smoothing, initial_concentration, seed_percentiles, no_feed,
-               feed_channel=None, feed_multiplier=1., feed_transform=None, require_initial_concentration=True):
+               feed_channel=None, feed_multiplier=1., feed_transform=None, require_initial_concentration=True,
+               pump_adjustment=None, final_size_samples=1):
+    final_size_samples = validate_final_size_samples(final_size_samples)
     if feed_channel:
         mapping = {**mapping, "AS flow": feed_channel}
     selected = {role: {} for role in (*CHANNELS, "AS flow")}
@@ -155,20 +158,32 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
         elif require_initial_concentration:
             raise ValueError("Enter an initial concentration when the channel has no sample at the run start.")
     scale = within_window("AS scale")
+    scale_for_feed = scale.copy()
+    if pump_adjustment and scale_direction < 0:
+        from experiment.pump_corrections import progress_fraction
+
+        for kind in ("prime", "reverse"):
+            if (action := pump_adjustment.get(kind)) and "mass_g" in action:
+                scale_for_feed[1] += action["mass_g"] * progress_fraction(action, scale[0] + origin)
     if no_feed:
         added = feed = np.array([[0., duration], [0., 0.]])
     elif feed_channel:
         feed = within_window("AS flow")
+        if pump_adjustment:
+            for kind in ("prime", "reverse"):
+                if action := pump_adjustment.get(kind):
+                    elapsed = feed[0] + origin
+                    feed[1, (elapsed >= action["start_s"]) & (elapsed < action["end_s"])] = 0.
         feed[1] = feed_transform(feed[1]) if feed_transform is not None else feed[1] * feed_multiplier
         if (feed.shape[1] < 2 or feed[0, 0] != 0 or feed[0, -1] != duration
                 or np.any(feed[1] < 0)):
             raise ValueError("Assigned AS flow must cover the crystallization window.")
-        added = (np.vstack((scale[0], scale_direction * (scale[1] - scale[1, 0]))) if scale.shape[1] >= 2
+        added = (np.vstack((scale[0], scale_direction * (scale_for_feed[1] - scale_for_feed[1, 0]))) if scale.shape[1] >= 2
                  else np.vstack((feed[0], cumulative_trapezoid(feed[1], feed[0], initial=0))))
     else:
         if scale.shape[1] < 2:
             raise ValueError("Map an AS scale with two or more readings, or select no AS feed.")
-        added, feed = scale_to_feed(scale, direction=scale_direction, smoothing=smoothing)
+        added, feed = scale_to_feed(scale_for_feed, direction=scale_direction, smoothing=smoothing)
         if feed[0, 0] > 0:
             feed = np.column_stack(([0., 0.], [np.nextafter(feed[0, 0], 0), 0.], feed))
         if feed[0, -1] < duration:
@@ -182,8 +197,9 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
     for t in sorted(set(lookup[0]).intersection(*lookup[1:]), reverse=True):
         values = [channel[t] for channel in lookup]
         if 0 < values[0] <= values[1] <= values[2]:
-            final = values
-            break
+            final.append(values)
+            if len(final) == final_size_samples:
+                break
     return {
         "TemperatureData": temperature, "ConcentrationData": concentration,
         "RecordingStart_s": origin,
@@ -192,5 +208,6 @@ def import_run(file, mapping, *, start, end, concentration_multiplier, scale_dir
         "FlowRateData": feed, "AntisolventScaleData": scale, "AddedAntisolventData": added,
         "InitialCSDsData": seed_distribution(seed_percentiles) if seed_percentiles else EMPTY.copy(),
         "InitialD10D50D90": np.asarray(seed_percentiles if seed_percentiles is not None else [0., 0., 0.]), "FinalCSDsData": EMPTY.copy(),
-        "FinalD10D50D90": np.asarray(final), **{role + "Data": data for role, data in sizes.items()},
+        "FinalD10D50D90": np.mean(final, axis=0) if final else np.empty(0),
+        "FinalSizeSamplesUsed": len(final), **{role + "Data": data for role, data in sizes.items()},
     }

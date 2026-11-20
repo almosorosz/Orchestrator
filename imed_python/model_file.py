@@ -1,5 +1,6 @@
 """Save edited IMED parameters and settings while preserving other MAT variables."""
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -95,6 +96,11 @@ MATLAB_FIT_SUMMARIES = ("MDIteration", "MDsimulation", "PPsimulation", "summaryT
 def checkpoint_variables(case):
     """Convert current IMED case fields to MATLAB-compatible records."""
     updates = {key: case[key] for key in CHECKPOINT_FIELDS if key in case}
+    workflow = updates.get("PythonWorkflow", {})
+    if isinstance(workflow.get("doe_decisions"), dict):
+        # MATLAB collapses singleton cell arrays and converts logical fields on
+        # read. Keep this nested plan in its portable JSON representation.
+        updates["PythonWorkflow"] = {**workflow, "doe_decisions": json.dumps(workflow["doe_decisions"], allow_nan=False)}
     for key in MATLAB_FIT_SUMMARIES:
         value = case.get(key)
         if isinstance(value, np.ndarray) and not value.size:

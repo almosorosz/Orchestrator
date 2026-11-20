@@ -11,15 +11,21 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from bo.profiles import Profile, case_runs, make_profile, recipe_data, campaign_profiles
+from experiment.doe_decisions import (
+    capture_decisions, charge_volume, decision_summary, planned_decisions, starting_run_process, validate_decisions,
+)
 from experiment.doe_campaign import ROLES, convert_profile
 from experiment import loop_outputs
-from experiment.loop_process import LOOP_WEIGHT_DEFAULTS, VALIDATION_PE_SETTINGS, starting_process_defaults
+from experiment.pump_calibration_files import seed_dose_command, seed_dose_speed
+from experiment.loop_process import (
+    PROCESS_FIELDS, VALIDATION_PE_SETTINGS, require_positive_process, starting_process_defaults,
+)
 from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
 from experiment.recording import atomic_json
 from hardware_devices.capabilities import is_monitor_only
 from hardware_devices.limits import target_allowed, target_limits
 from imed_python.campaign_import import ALIASES, CHANNELS, campaign_runs, import_run, read_json, seed_distribution
-from imed_python.demo_campaign import compile_simulation, import_simulated_campaign, model_inputs, validation_model
+from imed_python.demo_campaign import calibrated_simulation, compile_simulation, import_simulated_campaign, legacy_simulation, model_inputs, validation_model
 from imed_python.design import discrimination_score, d_optimal_log_score, optimize_recipe, parameter_samples, recipe_space
 from imed_python.estimation import FitObjective, fit_model
 from imed_python.model_screening import matlab_screening_fields, pack_screening, screen_models
@@ -27,6 +33,7 @@ from imed_python.native_case import save_native_case
 from imed_python.pe_settings import PE_WEIGHTS_KEY, PYFIT_DEFAULTS, PYFIT_SETTINGS_KEY, effective_pe_pbm
 from imed_python.session import display_name, loop_stages, pack_fit, pe_signatures, record_step, signature
 from imed_python.solver import pbm_backend_label
+from imed_python.size_data import validate_final_size_samples
 from imed_python.mixing import DEFAULT_MIXING, validate_mixing, average_mixing, trace_mean
 
 
@@ -35,8 +42,10 @@ POSITIVE_PROCESS = ("SolvMass", "SolventDensity", "AntiSolventDensity", "SolidDe
 NONNEGATIVE_PROCESS = ("AntiSolvMass", "SeedMass", "PowerRatio")
 DEVICE_RECORDING_COLUMNS = {
     "huber": ("temp_external", "temp_internal"), "opcua": ("value",), "mettler": ("weight_g",),
-    "jkem": ("speed", "target"), "ismatec": ("flow", "target"), "masterflex": ("speed", "target"),
+    "jkem": ("speed", "target"), "ismatec": ("speed_rpm", "flow", "target"), "masterflex": ("speed", "target"),
 }
+IMED_OBJECTIVES = (("FBRM", ("FBRM",)), ("Concentration", ("Concentration",)),
+                   ("D10 / D50 / D90", ("D10", "D50", "D90")))
 
 
 def default_setup():
@@ -49,9 +58,10 @@ def default_setup():
         "experiment_period": {"mode": "definition", "stage_ids": []},
         "reactor_unit": "", "mixing": dict(DEFAULT_MIXING),
         "derive_initial_charges": True,
+        "doe_decisions": None,
         "support_profiles": {}, "seed_pump": None,
         "imed": {"delta_aic": 2, "iterations": 5, "covariance_samples": 8,
-                 "equilibration_s": 5, "conditions": {}},
+                 "equilibration_s": 5, "conditions": {}, "use_doe_decisions": True},
     }
 
 
@@ -68,10 +78,46 @@ def _integer(value, label, low, high):
     return _number(value, label, low, high)
 
 
+def imed_response_weights(case):
+    stored = case.get(PE_WEIGHTS_KEY, case.get("objweightfactor", {}))
+    stored = stored if isinstance(stored, dict) else {}
+    return [float(_number(stored.get(f"W{i}", 0), f"{label} objective weight", 0, 10000))
+            for i, (label, _) in enumerate(IMED_OBJECTIVES, 1)]
+
+
+def imed_objective_channels(weights):
+    return tuple(channel for (_, channels), weight in zip(IMED_OBJECTIVES, weights)
+                 if weight > 0 for channel in channels)
+
+
+def imed_design_conditions(conditions, *, no_feed):
+    if not conditions or not no_feed:
+        return conditions
+    solvent, antisolvent = conditions["liquid_masses"]
+    return {**conditions, "no_feed": True, "final_anti": antisolvent / (solvent + antisolvent) if solvent > 0 else 0.,
+            "antisolvent_rates": (0., 0.)}
+
+
 def _merge(defaults, updates, label):
-    if not isinstance(updates, dict) or set(updates) - set(defaults):
-        raise ValueError(f"Check the fields in {label}.")
+    if not isinstance(updates, dict):
+        raise ValueError(f"{label.capitalize()} must contain named settings.")
+    unknown = set(updates) - set(defaults)
+    if unknown:
+        fields = ", ".join(sorted(map(str, unknown)))
+        hint = " Open Automatic loop setup to review and save the supported settings." if label == "automatic loop settings" else ""
+        raise ValueError(f"Unsupported fields in {label}: {fields}.{hint}")
     return {**defaults, **updates}
+
+
+def setup_for_editing(updates):
+    """Open supported settings from a saved setup without applying unknown fields."""
+    if not isinstance(updates, dict):
+        return validate_setup(updates), []
+    keys = default_setup().keys()
+    supported = {key: value for key, value in updates.items() if key in keys}
+    # A file with no loop settings may be a different configuration entirely.
+    normalized = validate_setup(supported if supported else updates)
+    return normalized, sorted(map(str, set(updates) - keys))
 
 
 def validate_setup(updates):
@@ -82,6 +128,7 @@ def validate_setup(updates):
     if type(data["derive_initial_charges"]) is not bool:
         raise ValueError("Choose whether to derive starting charges from preparation pumps.")
     data["mixing"] = validate_mixing(data["mixing"])
+    data["doe_decisions"] = validate_decisions(data["doe_decisions"])
     period = data["experiment_period"] = _merge(defaults["experiment_period"], data["experiment_period"], "experiment period")
     if (period["mode"] not in {"definition", "stages", "manual"} or not isinstance(period["stage_ids"], list)
             or any(not isinstance(key, str) or not key for key in period["stage_ids"])
@@ -143,6 +190,8 @@ def validate_setup(updates):
         if not pump["use_device_calibration"]:
             _number(pump["grams_per_second"], "seed pump mass rate", 1e-12)
     imed = data["imed"] = _merge(defaults["imed"], data["imed"], "IMED design")
+    if type(imed["use_doe_decisions"]) is not bool:
+        raise ValueError("Choose whether IMED uses the DoE decision variables.")
     _number(imed["delta_aic"], "relative AIC threshold")
     _number(imed["equilibration_s"], "final equilibration duration")
     _integer(imed["iterations"], "design iterations", 0, 1000)
@@ -159,7 +208,7 @@ def validate_setup(updates):
                 raise ValueError(f"Enter two values for {field}.")
             for value in values:
                 _number(value, field, -273.149 if field == "temperature" else 0)
-        recipe_space(conditions)
+        recipe_space(imed_design_conditions(conditions, no_feed=recording["no_feed"]))
     return data
 
 
@@ -183,25 +232,30 @@ def check_loop_folders(experiment_path, model_path):
 
 
 def _process(values):
-    for key in POSITIVE_PROCESS:
-        _number(values.get(key), key, 1e-12)
+    require_positive_process(values, POSITIVE_PROCESS)
     for key in NONNEGATIVE_PROCESS:
-        _number(values.get(key), key)
+        _number(values.get(key), PROCESS_FIELDS[key])
     return values
 
 
-def _role_active(campaign, device_id, *, modeling_only=False):
+def _role_active(campaign, device_id, *, modeling_only=False, recording=None):
     if campaign is None:
         return False
     for exp in campaign.experiments:
         for profile in exp.profiles:
             if profile.device_id != device_id:
                 continue
-            if not modeling_only or exp.model_window is None:
+            window = exp.model_window
+            if window is None and recording is not None:
+                window = (recording["start_s"], recording["end_s"] or
+                          max(p.points[-1].time_s for p in exp.profiles))
+            if not modeling_only or window is None:
                 if any(point.target != 0 for point in profile.points):
                     return True
                 continue
-            begin, end = exp.model_window
+            begin, end = window
+            if end <= begin:
+                continue
             times = np.array([point.time_s for point in profile.points])
             targets = np.array([point.target for point in profile.points])
             sample_times = np.union1d([begin, np.nextafter(end, begin)], times[(times >= begin) & (times < end)])
@@ -213,7 +267,8 @@ def _role_active(campaign, device_id, *, modeling_only=False):
 
 
 def device_configuration_changed(previous, current):
-    fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity")
+    fields = ("type", "connection", "defaults", "simulated", "target_limits", "pump_calibration", "connectivity",
+              "pump_corrections", "seed_calibration", "reservoir_density_g_ml")
     return previous is None or current is None or any(current.get(field) != previous.get(field) for field in fields)
 
 
@@ -223,27 +278,59 @@ def _column_exists(column, configs):
     return field in DEVICE_RECORDING_COLUMNS.get(kind, ())
 
 
-def recording_mapping(setup, roles, configs):
+def recording_mapping(setup, roles, configs, *, required_measurements=None):
     mapping = {key: next((column for column in ALIASES[key] if _column_exists(column, configs)), "")
                for key in CHANNELS}
     mapping["Temperature"] = f"{roles['T']}.temp_external"
     mapping.update(setup["channels"])
-    invalid = [column for column in mapping.values() if column and not _column_exists(column, configs)]
+    if setup["recording"]["no_feed"]:
+        mapping["AS scale"] = ""
+    required = set(CHANNELS if required_measurements is None else required_measurements) | {"Temperature"}
+    invalid = []
+    for measurement, column in mapping.items():
+        if column and not _column_exists(column, configs):
+            if measurement in required:
+                invalid.append(f"{measurement} ({column})")
+            else:
+                mapping[measurement] = ""
     if invalid:
-        raise ValueError("Map channels to assigned devices and monitors: " + ", ".join(invalid))
+        raise ValueError("In Recording, select assigned devices or monitors for " + ", ".join(invalid) + ".")
     columns = [column for column in mapping.values() if column]
     if len(set(columns)) != len(columns):
         raise ValueError("Map each recorded measurement to a distinct column.")
     return mapping
 
 
+def antisolvent_recording_source(recording, mapping, campaign, roles, configs, *, infer_no_feed=False):
+    as_roles = {"AS"} | {role for role, lane in (campaign.line_roles if campaign else {}).items()
+                         if lane.get("role") == "AS"}
+    pumps = {roles[role] for role in as_roles if role in roles}
+    active = any(_role_active(campaign, pump, modeling_only=True, recording=recording) for pump in pumps)
+    if recording["no_feed"]:
+        if active:
+            raise ValueError("No antisolvent feed is selected, but an AS pump runs during the experiment period. "
+                             "Remove that delivery or clear the no-feed checkbox in Recording.")
+        return "No antisolvent feed"
+    if mapping.get("AS scale"):
+        return f"AS scale ({mapping['AS scale']})"
+    pump = configs.get(roles.get("AS") or (next(iter(pumps)) if len(pumps) == 1 else None), {})
+    if pump.get("pump_calibration"):
+        return "Calibrated AS pump delivery"
+    if pump.get("type") == "ismatec" and pump.get("simulated"):
+        return "Simulated AS pump delivery"
+    if infer_no_feed and not active:
+        return "No antisolvent feed"
+    raise ValueError("Map the AS scale or load the assigned antisolvent pump's mass-flow calibration.")
+
+
 def read_completed_recordings(folder, expected, recording, mapping, processes_by_id, windows, *,
-                              require_initial_concentration=True, roles=None, mixing=None):
+                              require_initial_concentration=True, roles=None, mixing=None, allow_density_fallback=False,
+                              final_size_samples=1):
     runs = campaign_runs(folder)
     run_ids = [read_json(file.with_name("run.json"))["experiment_id"] for _, _, file in runs]
     if set(run_ids) != set(expected) or len(set(run_ids)) != len(runs):
         raise ValueError("Recorded experiment identities differ from the completed campaign manifest.")
-    demo = import_simulated_campaign(folder)
+    demo = import_simulated_campaign(folder, final_size_samples=final_size_samples)
     if demo is not None:
         return demo["ExpData"], demo["ProcInf"], runs
     experiments, processes = [], []
@@ -255,7 +342,13 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
     roles = roles or {key: lane["device_id"] for key, lane in payload.get("campaign", {}).get("line_roles", {}).items()}
     for (number, name, file), experiment_id in zip(runs, run_ids):
         process = processes_by_id[experiment_id]
+        definition = definitions.get(experiment_id, {})
+        tubing = definition.get("pump_adjustments") or {}
         start, end = windows.get(experiment_id, (recording["start_s"], recording["end_s"]))
+        if tubing:
+            shift = tubing["lead_in_s"]
+            start += shift
+            end = tubing["nominal_end_s"] if end is None else min(end + shift, tubing["nominal_end_s"])
         initial = process.get("InitialConcentration", recording["initial_concentration"])
         with file.open(newline="", encoding="utf-8-sig") as stream:
             rows = list(csv.DictReader(stream))
@@ -276,32 +369,42 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
         if not recording["no_feed"] and series(mapping.get("AS scale", "")).shape[1] < 2:
             device = roles.get("AS")
             cfg = configs.get(device, {})
-            field = next((field for field in ("flow", "speed_rpm", "speed", "target")
+            fields = ("flow", "speed_rpm", "speed", "target")
+            if cfg.get("type") == "ismatec":
+                fields = ("speed_rpm", "target", "flow")
+            if cfg.get("type") == "masterflex" and cfg.get("defaults", {}).get("direction") == "-":
+                fields = ("target", "speed_rpm", "speed")
+            field = next((field for field in fields
                           if f"{device}.{field}" in headers and series(f"{device}.{field}").shape[1] >= 2), None)
             if not device or not field:
                 raise ValueError("No usable AS scale. Assign an antisolvent pump with recorded delivery and a calibration/density.")
+            source = f"Calibrated pump delivery ({device}.{field})"
             if cfg.get("pump_calibration"):
                 from experiment.pump_calibration_files import delivered_flow
                 transform = lambda values: delivered_flow(cfg, values) / 3600.
-            elif cfg.get("type") == "ismatec":
+            elif cfg.get("type") == "ismatec" and cfg.get("simulated") and allow_density_fallback:
                 density = _number(process.get("AntiSolventDensity"), "antisolvent density", 1e-12)
                 transform = lambda values: values * density / 60.
+                source = f"Estimated pump delivery from AS density ({device}.{field})"
+            elif cfg.get("type") == "ismatec" and cfg.get("simulated"):
+                transform = lambda values: values / 60.
+                source = f"Simulated pump delivery ({device}.{field})"
             else:
                 raise ValueError(f"Load a mass-flow calibration for antisolvent pump {device}, or map its reservoir scale.")
             feed_options = {"feed_channel": f"{device}.{field}", "feed_transform": transform}
-            source = f"Calibrated pump delivery ({device}.{field})"
         experiment = import_run(
             file, mapping, start=start, end=end, initial_concentration=initial,
             concentration_multiplier=recording["concentration_multiplier"],
             scale_direction=recording["scale_direction"], smoothing=recording["smoothing"],
             seed_percentiles=recording["seed_percentiles"] if process["SeedMass"] else None,
             no_feed=recording["no_feed"], require_initial_concentration=require_initial_concentration,
+            pump_adjustment=tubing.get("pumps", {}).get(roles.get("AS")),
+            final_size_samples=final_size_samples,
             **feed_options,
         )
         experiment.update(Name=name, RecordingFile=str(file))
         experiment["CommandedProfiles"] = {key: value.payload() for key, value in campaign_profiles(experiment, process, payload, roles).items()}
         experiment["AntisolventSource"] = source
-        definition = definitions.get(experiment_id, {})
         if definition.get("run_stages"):
             experiment["ModelingWindow_s"] = [start, end]
             experiment["ModelingStages"] = [stage for stage in definition["run_stages"]
@@ -341,12 +444,75 @@ def read_completed_recordings(folder, expected, recording, mapping, processes_by
     return experiments, processes, runs
 
 
+def _replace_model_window(original, replacement, begin, end, new_end, *, suffix_starts_at_boundary=False, run_end=None):
+    """Splice the proposed profile into the run without ramping across its phase boundaries."""
+    interpolation = "step" if original.interpolation == replacement.interpolation == "step" else "linear"
+
+    def points_for(profile, offset=0.):
+        points = []
+        for point in profile.points:
+            time = point.time_s + offset
+            if points and time <= points[-1].time_s:
+                # A short edge can lose its distinct time when moved to the run clock.
+                time = float(np.nextafter(points[-1].time_s, np.inf))
+            if points and interpolation == "linear" and profile.interpolation == "step" and point.target != points[-1].target:
+                before = time - min(1e-6, (time - points[-1].time_s) / 2)
+                if points[-1].time_s < before < time:
+                    points.append(ProfilePoint(before, points[-1].target))
+            points.append(ProfilePoint(time, point.target))
+        return points
+
+    existing = points_for(original)
+    middle = points_for(replacement, begin)
+    if middle[-1].time_s < new_end:
+        middle.append(ProfilePoint(new_end, middle[-1].target))
+    delta = max(new_end, middle[-1].time_s) - end
+    before = [p for p in existing if p.time_s < begin]
+    after = [p for p in existing if p.time_s > end]
+    has_suffix = bool(after) or (run_end is not None and end < run_end)
+    x, y = zip(*[(p.time_s, p.target) for p in existing])
+    if begin > 0:
+        if not before:
+            before.append(ProfilePoint(0., y[0]))
+        if interpolation == "linear":
+            boundary = float(np.nextafter(begin, 0.))
+            if before[-1].time_s < boundary:
+                before.append(ProfilePoint(boundary, float(np.interp(boundary, x, y))))
+    if has_suffix and suffix_starts_at_boundary:
+        # The next stage owns the setpoint at the boundary. Retain the
+        # recommendation's endpoint as the left limit for the modeled period.
+        last = float(np.nextafter(new_end, begin))
+        endpoint = middle[-1].target
+        middle = [point for point in middle if point.time_s < last]
+        middle.append(ProfilePoint(last, endpoint))
+        delta = new_end - end
+    points = before + middle
+    if has_suffix:
+        value = (y[max(0, np.searchsorted(x, end, side="right") - 1)] if interpolation == "step"
+                 else float(np.interp(end, x, y)))
+        time = new_end if suffix_starts_at_boundary else float(np.nextafter(points[-1].time_s, np.inf))
+        points.append(ProfilePoint(time, value))
+    for point in after:
+        time = max(point.time_s + delta, float(np.nextafter(points[-1].time_s, np.inf)))
+        points.append(ProfilePoint(time, point.target))
+    return replace(original, points=tuple(points), interpolation=interpolation)
+
+
+def _followup_time(time, begin, end, new_end):
+    if time <= begin:
+        return time
+    if time >= end:
+        return new_end + (time - end)
+    return begin + (time - begin) * (new_end - begin) / (end - begin)
+
+
 class RecipeCompiler:
     """Resolve process profiles to the assigned devices for LOOP and one-off execution."""
 
     def __init__(self, setup, template, configs, calibration_storage, assignments, monitors, mode):
         from experiment.run_stages import modeling_campaign
         self.setup, self.template, self.mode = setup, modeling_campaign(template, setup), mode
+        self.staged = bool(self.template and self.template.experiments[0].run_stages)
         self.calibration_storage = calibration_storage
         self.assignments = {item.role: item for item in assignments}
         self.line_roles = template.line_roles if template else {}
@@ -360,7 +526,8 @@ class RecipeCompiler:
                 self.assignments[semantic] = self.assignments[original]
                 self.role_specs[semantic] = ROLES[semantic]
         self.monitors = tuple(monitors)
-        self.demo = template.experiments[0].imed_simulation if template else None
+        self.simulation = template.experiments[0].imed_simulation if template else None
+        self.demo = legacy_simulation(self.simulation)
         selected = set(self.roles.values()) | set(self.monitors)
         self.configs = deepcopy({key: configs[key] for key in selected if key in configs})
         if "T" not in self.roles:
@@ -388,6 +555,11 @@ class RecipeCompiler:
         for experiment in campaign.experiments:
             ExperimentDefinition.from_frame(experiment.to_frame(), configs)
 
+    @property
+    def seed_rpm(self):
+        device = self.roles.get("seed")
+        return seed_dose_speed(self.configs[device], self.setup["seed_pump"]) if device else None
+
     def check_support(self, campaign):
         support = self.setup["support_profiles"]
         bad_roles = set(support) - (set(self.roles) - {"T", "AS"})
@@ -395,28 +567,28 @@ class RecipeCompiler:
             raise ValueError("Support profiles need distinct assigned DoE roles: " + ", ".join(sorted(bad_roles)))
         for role, profile in support.items():
             self._support_profile(role, profile)
-        if self.setup["seed_pump"]:
-            if "seed" not in self.roles:
-                raise ValueError("Assign the seed pump before enabling calibrated seed delivery.")
-            from experiment.pump_calibration_files import seed_delivery_rate
-            _number(seed_delivery_rate(self.configs[self.roles["seed"]], self.setup["seed_pump"]), "calibrated seed rate", 1e-12)
+        if self.setup["seed_pump"] and "seed" not in self.roles:
+            raise ValueError("Assign the seed pump before enabling calibrated seed delivery.")
+        if self.seed_rpm is not None:
+            cfg = self.configs[self.roles["seed"]]
+            if not target_allowed(self.seed_rpm, target_limits(cfg)):
+                raise ValueError("Calibrated seed pump RPM exceeds the assigned pump limits.")
+            seed_dose_command(cfg, self.setup["seed_pump"], 0.)
         if self.line_roles or (self.template and self.template.experiments[0].model_window is not None):
             return  # Timeline charging and support stages are carried into follow-up recipes.
         required = {role for role in self.roles if role not in {"T", "AS", "seed"}
                     and _role_active(campaign, self.roles[role])}
         if self.demo:
             required -= {"clean_sol", "valve_state"}
-        missing = required - set(support) - ({"stirring_rate"} if self.mode == "bo" else set())
+        traces = (campaign.doe_decisions or {}).get("traces", {}) if campaign else {}
+        have_stirrer = self.mode == "bo" or "stirring" in traces
+        missing = required - set(support) - ({"stirring_rate"} if have_stirrer else set())
         if missing:
             raise ValueError("Define follow-up support profiles for: " + ", ".join(sorted(missing)))
-        if self.setup["seed_pump"] and ("seed" not in self.roles or "seed" in support):
+        if self.seed_rpm is not None and "seed" in support:
             raise ValueError("Assign a seed pump and choose either calibrated delivery or a support profile.")
-        if self.setup["seed_pump"]:
-            limits = target_limits(self.configs[self.roles["seed"]])
-            if not target_allowed(self.setup["seed_pump"]["rpm"], limits):
-                raise ValueError("Calibrated seed pump RPM exceeds the assigned pump limits.")
         if not self.demo and "seed" in self.roles and _role_active(campaign, self.roles["seed"]):
-            if not self.setup["seed_pump"] and "seed" not in support:
+            if self.seed_rpm is None and "seed" not in support:
                 raise ValueError("Set calibrated seed delivery or a fixed seed support profile for follow-ups.")
 
     def _support_profile(self, role, settings):
@@ -435,25 +607,26 @@ class RecipeCompiler:
     def device_profile(self, role, profile, process=None):
         assignment = self.assignments[role]
         config = self.configs[assignment.device_id]
-        values = profile.values
-        if role == "AS" and config["type"] == "ismatec" and not config.get("pump_calibration"):
-            density = 1.
-            if not self.demo and np.any(values):
-                density = _number(process.get("AntiSolventDensity"), "antisolvent density (g/mL)", 1e-12)
-            values, unit = values * 60 / density, "mL/min"
+        times, values = profile.time, profile.values
+        if role == "AS" and self.demo and config["type"] == "ismatec" and not config.get("pump_calibration"):
+            values, unit = values * 60, "RPM"
         else:
             mass_flow = self.role_specs[role].unit == "g/h"
             if role == "AS":
                 values = values * 3600
             if mass_flow:
                 from experiment.doe_campaign import ProfileAssignment
+                from experiment.pump_calibration_files import calibration_knots
+
                 semantic = self.line_roles.get(role, {}).get("role", role)
                 conversion = ProfileAssignment(semantic, assignment.device_id, assignment.density_g_ml)
+                if not profile.step and config.get("pump_calibration"):
+                    times, values = calibration_knots(config, times, values)
                 values, unit, _ = convert_profile(self.calibration_storage, conversion, config, values)
             else:
                 unit = target_limits(config)["unit"]
         return DeviceProfile(assignment.device_id, tuple(ProfilePoint(float(t), float(v))
-                             for t, v in zip(profile.time, values)),
+                             for t, v in zip(times, values)),
                              "step" if profile.step or role == "valve_state" else "linear", unit)
 
     def build(self, recipe, process, *, name, source, default_seed, modeling=False):
@@ -468,15 +641,14 @@ class RecipeCompiler:
                 raise ValueError("The antisolvent profile must be nonnegative, span the crystallization window and end at zero.")
             if np.any(feed.values > 0) and ("AS" not in self.roles or self.setup["recording"]["no_feed"]):
                 raise ValueError("Provide an assigned and monitored antisolvent pump for the recommended recipe.")
-            if "AS" in self.roles:
+            if "AS" in self.roles and not self.setup["recording"]["no_feed"]:
                 device_profiles["AS"] = self.device_profile("AS", feed, process)
         stirring = recipe.get("stirring")
-        support = self.setup["support_profiles"]
-        if stirring is not None and "stirring_rate" in support:
-            raise ValueError("The BO stirring recommendation conflicts with the configured main stirrer support profile.")
+        support = {role: spec for role, spec in self.setup["support_profiles"].items()
+                   if role != "stirring_rate" or stirring is None}
         if stirring is not None:
             if "stirring_rate" not in self.roles and np.any(stirring.values != 0):
-                raise ValueError("Assign a main stirrer to execute the BO stirring recommendation.")
+                raise ValueError("Assign a main stirrer to execute the stirring recommendation.")
         if stirring is not None and "stirring_rate" in self.roles:
             device_profiles["stirring_rate"] = self.device_profile("stirring_rate", stirring)
         if ("stirring_rate" in self.roles and _role_active(self.template, self.roles["stirring_rate"])
@@ -486,7 +658,7 @@ class RecipeCompiler:
         seed_mass = _number(process.get("SeedMass", default_seed), "seed mass")
         if recipe.get("volume") is not None:
             requested = float(recipe["volume"].values[0])
-            current = process.get("InitialVolume_ml")
+            current = charge_volume(process)
             process.pop("VolumeFromDesignConditions", None)
             if current is not None and np.isclose(requested, current):
                 process.pop("RequestedInitialVolume_ml", None)
@@ -502,17 +674,15 @@ class RecipeCompiler:
             demo = self._append_demo_profiles(device_profiles, duration, seed_mass, temp, feed)
         else:
             demo = None
-            calibration = self.setup["seed_pump"]
             if modeling and seed_mass > 0 and not self.setup["recording"]["seed_percentiles"]:
                 raise ValueError("Configure seed percentiles before executing a seeded follow-up.")
-            if seed_mass and calibration:
-                from experiment.pump_calibration_files import seed_delivery_rate
-                end = seed_mass / seed_delivery_rate(self.configs[self.roles["seed"]], calibration)
+            if self.seed_rpm is not None:
+                rpm, end = seed_dose_command(self.configs[self.roles["seed"]], self.setup["seed_pump"], seed_mass)
                 if end >= duration:
                     raise ValueError("Seed addition exceeds the recommended experiment duration.")
-                seed = Profile(np.array([0., end, duration]), np.array([calibration["rpm"], 0., 0.]),
-                               "Calibrated seed dose", step=True)
-                device_profiles["seed"] = self.device_profile("seed", seed)
+                if seed_mass:
+                    seed = Profile(np.array([0., end, duration]), np.array([rpm, 0., 0.]), "Calibrated seed dose", step=True)
+                    device_profiles["seed"] = self.device_profile("seed", seed)
             elif seed_mass != default_seed:
                 raise ValueError("Configure calibrated seed delivery before changing the preloaded seed mass.")
             start = self.setup["followup_start_s"]
@@ -538,68 +708,144 @@ class RecipeCompiler:
         from dataclasses import replace
 
         original = self.template.experiments[0]
+        seed_mass = process.get("SeedMass", default_seed)
+        seed_delivery = None
+        original_seed = (original.model_process or {}).get("SeedMass", original.seed_mass_g)
+        seed_device = self.roles.get("seed")
+        seed_config = self.configs.get(seed_device, {})
+        if original_seed is None and original.model_window and seed_config.get("seed_calibration"):
+            seed_profile = next((p for p in original.profiles if p.device_id == seed_device
+                                 and any(point.target > 0 for point in p.points)), None)
+            if seed_profile is not None:
+                from experiment.pump_calibration_files import seed_mass_from_profile
+
+                original_seed = seed_mass_from_profile(seed_profile, seed_config, original.model_window[0])
+        if not np.isclose(seed_mass, default_seed if original_seed is None else original_seed):
+            if self.staged:
+                raise ValueError("The recommendation changes the seed dose. Use the seed dose programmed in the starting recipe's preparation stages.")
+            for template in self.template.experiments:
+                stored = (template.model_process or {}).get("SeedMass", template.seed_mass_g)
+                if template.model_window is not None and stored is not None and np.isclose(stored, seed_mass):
+                    original = template
+                    break
+            else:
+                if self.seed_rpm is None or original.model_window is None:
+                    raise ValueError("Use a seed mass from a starting experiment, or configure calibrated seed delivery.")
+                slot = next((stage for stage in original.run_stages if stage.purpose == "Seeding"), None)
+                if slot is None or slot.end_s > original.model_window[0]:
+                    raise ValueError("Define a Seeding stage before the modeling period to vary the seed dose.")
+                seed_device = self.roles["seed"]
+                rpm, seconds = seed_dose_command(self.configs[seed_device], self.setup["seed_pump"], seed_mass)
+                stop = slot.start_s + seconds
+                if stop > slot.end_s:
+                    raise ValueError("The proposed seed mass does not fit the calibrated Seeding stage.")
+                seed_delivery = (seed_device, slot.start_s, stop, rpm)
         if original.model_window is None:
             raise ValueError("Mark the Experiment and Equilibration stages in Experiment Definition before running a modeling loop.")
-        if process.get("SeedMass", default_seed) != default_seed:
-            raise ValueError("Keep the timeline's fixed seed mass for follow-ups, or define calibrated seed delivery.")
         begin, end = original.model_window
-        volume_scale = 1.
+        new_end = begin + duration
+        run_end = max(profile.points[-1].time_s for profile in original.profiles)
+        from experiment.material_balance import initial_charges
+
+        volumes = {"AS": "AntiSolvMass", "solvent": "SolvMass", "solution": "SolvMass"}
+        charge_roles = {device: self.line_roles.get(role, {}).get("role", role) for role, device in self.roles.items()
+                        if self.line_roles.get(role, {}).get("role", role) in volumes}
+        scales = {}
         if "RequestedInitialVolume_ml" in process:
-            from experiment.material_balance import initial_charges
-            inferred = initial_charges(original, process, self.roles, self.configs, line_roles=self.line_roles)
-            reference = inferred.get("InitialVolume_ml", process.get("InitialVolume_ml"))
+            reference_process = {**process, **(original.model_process or {})}
+            reference_process.pop("InitialVolume_ml", None)
+            inferred = initial_charges(original, reference_process, self.roles, self.configs, line_roles=self.line_roles)
+            reference = inferred.get("InitialVolume_ml")
             if reference is None or reference <= 0:
                 raise ValueError("Volume decisions require a known starting liquid volume.")
+            if self.staged and not np.isclose(process["RequestedInitialVolume_ml"], reference):
+                raise ValueError("The recommendation changes the starting liquid volume. Use the charges programmed in the starting recipe's preparation stages.")
             volume_scale = process["RequestedInitialVolume_ml"] / reference
-            if not np.isclose(volume_scale, 1.):
-                charge_devices = {device for role, device in self.roles.items()
-                                  if self.line_roles.get(role, {}).get("role", role) in {"AS", "solvent", "solution"}}
-                adjustable = [p for p in original.profiles if p.device_id in charge_devices
-                              and any(point.target > 0 for point in p.points if point.time_s < begin)]
-                if not adjustable:
-                    raise ValueError("Initial-volume decisions need defined preparation charging pumps. Add those stages or hold volume fixed in BO.")
-                if not process.get("VolumeFromDesignConditions"):
-                    process["SolvMass"] *= volume_scale
-                    process["AntiSolvMass"] *= volume_scale
-                process["InitialVolume_ml"] = process["RequestedInitialVolume_ml"]
+            explicit_masses = process.get("VolumeFromDesignConditions")
+            for key in ("SolvMass", "AntiSolvMass"):
+                planned = process[key] if explicit_masses else inferred[key] * volume_scale
+                if not np.isclose(planned, inferred[key]):
+                    if self.staged:
+                        raise ValueError("The recommendation changes the starting liquid charges. Use the charges programmed in the preparation stages.")
+                    prepared = inferred.get("PreparationCharges_g", {})
+                    if inferred[key] <= 0 or not any(prepared.get(role, 0) > 0 for role in volumes if volumes[role] == key):
+                        raise ValueError(f"Varying {PROCESS_FIELDS[key].lower()} needs a defined preparation charge for that liquid.")
+                    scales[key] = planned / inferred[key]
+                process[key] = planned
+            process["InitialVolume_ml"] = process["RequestedInitialVolume_ml"]
         shift = begin + duration - end
         by_device = {profile.device_id: profile for profile in modeled.values()}
         profiles = []
         for profile in original.profiles:
-            if not np.isclose(volume_scale, 1.) and profile.device_id in charge_devices:
+            if seed_delivery and profile.device_id == seed_delivery[0]:
+                _, start, stop, rpm = seed_delivery
+                seed_points = {0.: 0., begin: 0.}
+                if stop > start:
+                    seed_points.update({start: rpm, stop: 0.})
+                seed_points.update({p.time_s: p.target for p in profile.points if p.time_s > begin})
+                profile = DeviceProfile(profile.device_id, tuple(ProfilePoint(t, v) for t, v in sorted(seed_points.items())),
+                                        "step", profile.unit)
+            if (mass_key := volumes.get(charge_roles.get(profile.device_id))) in scales:
                 from experiment.pump_calibration_files import delivered_flow, convert_flow
                 cfg = self.configs[profile.device_id]
+                scale = scales[mass_key]
                 def scaled(target):
                     if cfg.get("pump_calibration"):
-                        return float(convert_flow(cfg["pump_calibration"], cfg["type"], delivered_flow(cfg, [target]) * volume_scale)[0])
-                    if cfg["type"] == "ismatec":
-                        return target * volume_scale
+                        return float(convert_flow(cfg["pump_calibration"], cfg["type"], delivered_flow(cfg, [target]) * scale)[0])
+                    if cfg["type"] == "ismatec" and cfg.get("simulated"):
+                        return target * scale
                     raise ValueError(f"Load the charging calibration for {profile.device_id} before varying initial volume.")
                 profile = DeviceProfile(profile.device_id,
                     tuple(ProfilePoint(p.time_s, scaled(p.target) if p.time_s < begin else p.target) for p in profile.points),
                     profile.interpolation, profile.unit)
             replacement = by_device.get(profile.device_id)
-            if replacement is None:
-                if any(begin + duration < point.time_s < end for point in profile.points):
-                    raise ValueError(f"The recommended duration is shorter than {profile.device_id}'s support sequence.")
-                points = tuple(ProfilePoint(p.time_s + shift if p.time_s >= end else p.time_s, p.target)
-                               for p in profile.points)
-            else:
-                before = tuple(p for p in profile.points if p.time_s < begin)
-                middle = tuple(ProfilePoint(begin + p.time_s, p.target) for p in replacement.points)
-                after = tuple(ProfilePoint(p.time_s + shift, p.target) for p in profile.points if p.time_s > end)
-                points = (*before, *middle, *after)
-            profiles.append(DeviceProfile(profile.device_id, points, profile.interpolation, profile.unit))
-        modes = tuple(replace(mode, time_s=mode.time_s + shift if mode.time_s >= end else mode.time_s)
+            if replacement is not None:
+                profiles.append(_replace_model_window(profile, replacement, begin, end, new_end, run_end=run_end,
+                                                      suffix_starts_at_boundary=self.staged))
+                continue
+            if self.staged:
+                trace = Profile(np.asarray([p.time_s for p in profile.points]),
+                                np.asarray([p.target for p in profile.points]), "Starting recipe",
+                                step=profile.interpolation == "step")
+                times = np.union1d(trace.time, [begin, end])
+                points = tuple(ProfilePoint(_followup_time(t, begin, end, new_end), float(value))
+                               for t, value in zip(times, trace.sample(times)))
+                profiles.append(replace(profile, points=points))
+                continue
+            if any(begin + duration < point.time_s < end for point in profile.points):
+                raise ValueError(f"The recommended duration is shorter than {profile.device_id}'s support sequence.")
+            points = tuple(ProfilePoint(p.time_s + shift if p.time_s >= end else p.time_s, p.target)
+                           for p in profile.points)
+            profiles.append(replace(profile, points=points))
+        if seed_delivery and all(profile.device_id != seed_delivery[0] for profile in original.profiles):
+            device, start, stop, rpm = seed_delivery
+            if stop > start:
+                points = {0.: 0., begin: 0., start: rpm, stop: 0.}
+                profiles.append(DeviceProfile(device, tuple(ProfilePoint(t, v) for t, v in sorted(points.items())), "step", "RPM"))
+        modes = tuple(replace(mode, time_s=_followup_time(mode.time_s, begin, end, new_end))
                       for mode in original.control_modes)
         from experiment.run_stages import RunStage
-        stages = tuple(stage for stage in original.run_stages if stage.end_s <= begin + 1e-7)
-        stages += (RunStage("modeled-experiment", f"{self.mode.upper()} proposed experiment", "Experiment", begin, begin + duration),)
-        stages += tuple(replace(stage, start_s=stage.start_s + shift, end_s=stage.end_s + shift)
-                        for stage in original.run_stages if stage.start_s >= end - 1e-7)
+        stages = tuple(replace(stage, start_s=_followup_time(stage.start_s, begin, end, new_end),
+                               end_s=_followup_time(stage.end_s, begin, end, new_end))
+                       for stage in original.run_stages)
+        if not stages:
+            stages = (RunStage("modeled-experiment", f"{self.mode.upper()} proposed experiment", "Experiment", begin, new_end),)
         experiment = ExperimentDefinition(name, tuple(profiles), source=source, control_modes=modes,
-                                          model_window=(begin, begin + duration), run_stages=stages,
-                                          initial_mass_g=original.initial_mass_g)
+                                          model_window=(begin, new_end), run_stages=stages,
+                                          initial_mass_g=original.initial_mass_g, seed_mass_g=seed_mass)
+        if self.setup["derive_initial_charges"] or scales:
+            actual = initial_charges(experiment, process, self.roles, self.configs, line_roles=self.line_roles)
+            visible = actual.get("PreparationCharges_g", {})
+            if visible:
+                for key in ("SolvMass", "AntiSolvMass"):
+                    if key in scales and not np.isclose(actual[key], process[key], rtol=.002, atol=1e-6):
+                        raise ValueError(f"Converted pump profiles deliver {actual[key]:g} g for {PROCESS_FIELDS[key].lower()}. "
+                                         f"The recommendation requested {process[key]:g} g.")
+                process.update(actual)
+        if self.simulation and not self.demo:
+            simulation = calibrated_simulation(self.simulation, self.roles, self.configs, self.monitors, experiment)
+            model_process = {**process, "SeedPercentiles": list(self.setup["recording"]["seed_percentiles"])}
+            experiment = replace(experiment, imed_simulation=simulation, model_process=model_process)
         ExperimentDefinition.from_frame(experiment.to_frame(), self.configs)
         return Campaign(name, (experiment,), monitor_device_ids=self.monitors, line_roles=self.line_roles), experiment.model_window
 
@@ -648,7 +894,7 @@ class RecipeCompiler:
 
 class AdaptiveLoop:
     def __init__(self, mode, setup, campaign, configs, connected, calibration_storage, assignments, case,
-                 *, bo_settings=None, size_term, workers=1):
+                 *, bo_settings=None, size_term, workers=1, final_size_samples=1):
         self.mode = mode
         self.setup = validate_setup(setup)
         self.compiler = RecipeCompiler(self.setup, campaign, configs, calibration_storage, assignments,
@@ -660,11 +906,15 @@ class AdaptiveLoop:
         self.template = campaign
         self.case = deepcopy(case)
         self.bo = deepcopy(bo_settings)
+        if self.bo is not None:
+            self.bo["discrete_seed"] = bool(self.demo or self.compiler.seed_rpm is None)
         self.size_term, self.workers = size_term, workers
+        self.final_size_samples = validate_final_size_samples(final_size_samples)
         self.followups = 0
         self.process_by_id = {}
         self.windows = {}
         self.used_recordings = set()
+        self.doe_template_index = None
         self.recipe_origins = {}
         unmapped = {profile.device_id for experiment in campaign.experiments for profile in experiment.profiles}
         unmapped -= set(self.roles.values())
@@ -672,6 +922,9 @@ class AdaptiveLoop:
             raise ValueError("Assign the initial actuators to known profile roles: " + ", ".join(sorted(unmapped)))
         self.check_devices(campaign, configs, connected)
         self._prepare_measurements(campaign)
+        self.doe_decisions = planned_decisions(self.template, self.setup, self.roles, self.configs, self.case)
+        self.template = replace(self.template, doe_decisions=self.doe_decisions)
+        self.compiler.template = self.template
         expected_names = {experiment.name for experiment in campaign.experiments}
         unknown = self.setup["initial_processes"].keys() - expected_names
         if unknown:
@@ -682,7 +935,7 @@ class AdaptiveLoop:
             self._prepare_imed()
             self.active_models = tuple(range(len(self.case["ModelParameter"])))
             self.stage_counts = Counter(stage["kind"] for stage in loop_stages(self.case))
-        self.compiler.check_support(campaign)
+        self.compiler.check_support(self.template)
 
     @property
     def complete(self):
@@ -698,19 +951,20 @@ class AdaptiveLoop:
             self.case["pbmsetting"] = {**mesh, **self.case.get("pbmsetting", {})}
             self.mapping = {}
             return
-        self.process = _process(self.compiler.process_defaults(self.case))
+        defaults = self.compiler.process_defaults(self.case)
         if self.setup["recording"]["initial_concentration"] is not None:
-            self.process.setdefault("InitialConcentration", self.setup["recording"]["initial_concentration"])
+            defaults.setdefault("InitialConcentration", self.setup["recording"]["initial_concentration"])
         prepared = []
         for experiment in campaign.experiments:
-            process = _process({**self.process, **self.setup["initial_processes"].get(experiment.name, {})})
-            if self.setup["derive_initial_charges"]:
-                from experiment.material_balance import initial_charges
-                process = _process(initial_charges(experiment, process, self.roles, self.configs,
-                                   overrides=self.setup["initial_processes"].get(experiment.name, {}),
-                                   line_roles=self.compiler.line_roles))
+            try:
+                process = _process(starting_run_process(experiment, self.setup, self.roles, self.configs,
+                                                       self.compiler.line_roles, defaults))
+            except ValueError as error:
+                raise ValueError(f"{experiment.name}: {error}") from error
             if "InitialConcentration" in process:
                 _number(process["InitialConcentration"], "initial concentration", 0, 1 - 1e-12)
+            elif experiment.imed_simulation:
+                raise ValueError(f"{experiment.name}: enter the initial concentration for the staged PBM simulation.")
             sizes = self.setup["recording"]["seed_percentiles"]
             if process["SeedMass"] and (not sizes or not np.all(np.asarray(sizes) > 0)):
                 raise ValueError("Positive seed mass requires positive seed D10/D50/D90. Use 0 g seed and 0/0/0 for an unseeded run.")
@@ -726,25 +980,25 @@ class AdaptiveLoop:
                 initial = 0.
             elif "seed" not in self.roles:
                 initial += process["SeedMass"]
-            prepared.append(replace(experiment, initial_mass_g=initial))
+            modeled_fields = (*POSITIVE_PROCESS, *NONNEGATIVE_PROCESS, "InitialConcentration", "InitialVolume_ml", "MixingSettings")
+            prepared.append(replace(experiment, initial_mass_g=initial,
+                                    model_process={**{key: process[key] for key in modeled_fields if key in process},
+                                                   "SeedPercentiles": list(sizes)}))
             if experiment.model_window is not None:
                 self.windows[experiment.experiment_id] = experiment.model_window
+        self.process = dict(self.process_by_id[campaign.experiments[0].experiment_id])
         self.template = replace(campaign, experiments=tuple(prepared))
         self.compiler.template = self.template
-        self.mapping = recording_mapping(self.setup, self.roles, self.configs)
+        required = imed_objective_channels(imed_response_weights(self.case)) if self.mode == "imed" else None
+        self.mapping = recording_mapping(self.setup, self.roles, self.configs, required_measurements=required)
         self._require_channels("Temperature")
         recording = self.setup["recording"]
-        if recording["initial_concentration"] is None:
-            self._require_channels("Concentration")
-        if not recording["no_feed"]:
-            if not self.mapping.get("AS scale"):
-                if "AS" not in self.roles:
-                    raise ValueError("Assign an antisolvent pump or map an AS scale for addition tracking.")
-                cfg = self.configs[self.roles["AS"]]
-                if cfg["type"] != "ismatec" and not cfg.get("pump_calibration"):
-                    raise ValueError("Without an AS scale, load the antisolvent pump's mass-flow calibration.")
-        elif "AS" in self.roles and _role_active(campaign, self.roles["AS"], modeling_only=True):
-            raise ValueError("Clear no_feed or remove antisolvent delivery from the selected modeling period.")
+        if any("InitialConcentration" not in process for process in self.process_by_id.values()) and not self.mapping.get("Concentration"):
+            raise ValueError("Enter Initial concentration in Recording or Process inputs, or map a concentration channel sampled at the start.")
+        source = antisolvent_recording_source(recording, self.mapping, campaign, self.roles, self.configs,
+                                             infer_no_feed=self.mode == "imed")
+        if source == "No antisolvent feed":
+            recording["no_feed"] = True
         if self.mode == "imed" and self.setup["mixing"]["enabled"] and "stirring_rate" not in self.roles:
             raise ValueError("Assign the main stirrer through MSI or Devices to calculate average mixing power.")
 
@@ -774,8 +1028,13 @@ class AdaptiveLoop:
         if not self.case.get("ModelParameter") and self.demo:
             self.case["ModelParameter"] = [validation_model()]
             self.case.setdefault(PYFIT_SETTINGS_KEY, dict(VALIDATION_PE_SETTINGS))
-        if not self.case.get("Solubility") or not self.case.get("ModelParameter"):
-            raise ValueError("Load an IMED case with solubility and candidate kinetic models.")
+        coefficients = self.case.get("Solubility")
+        if not isinstance(coefficients, dict):
+            raise ValueError("Open Solubility and enter coefficients a–h before starting IMED.")
+        for key in "abcdefgh":
+            _number(coefficients.get(key), f"solubility coefficient {key} under Solubility", -np.inf)
+        if not self.case.get("ModelParameter"):
+            raise ValueError("Add a candidate kinetic model under IMED settings before starting IMED.")
         for index, model in enumerate(self.case["ModelParameter"], 1):
             table = np.asarray(model.get("paraset", []), dtype=float)
             if table.shape != (35, 4):
@@ -784,16 +1043,10 @@ class AdaptiveLoop:
             if (not len(active) or not np.isfinite(active).all() or np.isnan(table).any()
                     or np.isposinf(table).any() or np.any(active[:, 1] > active[:, 2])):
                 raise ValueError(f"Set valid parameter bounds and enable estimation in IMED model {index}.")
-        weights = self.case.get(PE_WEIGHTS_KEY, self.case.get("objweightfactor", {}))
-        self.weights = [float(weights.get(f"W{i}", default)) for i, default in enumerate(LOOP_WEIGHT_DEFAULTS, 1)]
-        if not np.isfinite(self.weights).all() or min(self.weights) < 0 or sum(w > 0 for w in self.weights) < 2:
-            raise ValueError("Enable at least two IMED response weights so the loop can reach D-optimal design.")
-        if self.weights[0]:
-            self._require_channels("FBRM")
-        if self.weights[1]:
-            self._require_channels("Concentration")
-        if self.weights[2]:
-            self._require_channels("D10", "D50", "D90")
+        self.weights = imed_response_weights(self.case)
+        if not any(self.weights):
+            raise ValueError("Open IMED objectives and set at least one positive weight for FBRM, concentration or D-values.")
+        self._require_channels(*imed_objective_channels(self.weights))
         self.pe_mesh = effective_pe_pbm(self.case)
         pbm_backend_label(self.pe_mesh)
         prior = self.case.get("ExpData", [])
@@ -804,19 +1057,21 @@ class AdaptiveLoop:
             # A process-only template supplies defaults without becoming a fit observation.
             self.case["ProcInf"] = []
         options = self.setup["imed"]
-        conditions = options["conditions"]
+        design_settings = self.case.get("pbmsetting", {})
+        self.case["pbmsetting"] = {**self.pe_mesh, **(design_settings if isinstance(design_settings, dict) else {})}
+        if options["use_doe_decisions"] and self.doe_decisions and self.doe_decisions["traces"].get("temperature"):
+            if self.demo and options["equilibration_s"] <= 0:
+                raise ValueError("Add a positive equilibration duration for simulated IMED follow-ups.")
+            return
+        conditions = self._imed_followup_conditions(self.process)
         if not conditions:
             raise ValueError("Enter automatic IMED design conditions in Setup.")
         if self.demo and options["equilibration_s"] <= 0:
             raise ValueError("Add a positive equilibration duration for simulated IMED follow-ups.")
-        design_settings = self.case.get("pbmsetting", {})
-        self.case["pbmsetting"] = {**self.pe_mesh, **(design_settings if isinstance(design_settings, dict) else {})}
         addition, bounds = recipe_space(conditions)
         temperature_limits = target_limits(self.configs[self.roles["T"]])
         if not all(target_allowed(temp, temperature_limits) for temp in conditions["temperature"]):
             raise ValueError("IMED design temperatures exceed the assigned temperature controller limits.")
-        if self.setup["recording"]["no_feed"] and addition:
-            raise ValueError("IMED design adds antisolvent but recordings are configured as no_feed.")
         if addition and "AS" not in self.roles:
             raise ValueError("Assign an antisolvent pump for the IMED design.")
         if addition:
@@ -828,7 +1083,7 @@ class AdaptiveLoop:
         if conditions["seed_bounds"][1] > 0 and not self.demo:
             if not self.setup["recording"]["seed_percentiles"]:
                 raise ValueError("Enter seed percentiles for a seeded IMED design.")
-            if self.setup["seed_pump"] is None and list(conditions["seed_bounds"]) != [self.process["SeedMass"]] * 2:
+            if self.compiler.seed_rpm is None and list(conditions["seed_bounds"]) != [self.process["SeedMass"]] * 2:
                 raise ValueError("Configure calibrated seed delivery or fix IMED seed mass to the preloaded mass.")
         if self.demo:
             _, simulated, seeded, _, _ = model_inputs(True)
@@ -842,15 +1097,36 @@ class AdaptiveLoop:
             if low != high or not any(np.isclose(low, mass) for mass in available):
                 raise ValueError("Fix simulated IMED seed mass to a dose available in the validation DoE.")
 
+    def _imed_followup_conditions(self, process, experiment=None):
+        options = self.setup["imed"]
+        conditions = dict(options["conditions"])
+        if conditions and self.compiler.staged and not self.demo:
+            concentration = (experiment or {}).get("InitialConcentration", process.get("InitialConcentration"))
+            conditions.update(liquid_masses=(process["SolvMass"], process["AntiSolvMass"]),
+                              seed_bounds=(process["SeedMass"], process["SeedMass"]))
+            if concentration is not None:
+                conditions["concentration"] = concentration
+        return imed_design_conditions(conditions, no_feed=self.setup["recording"]["no_feed"])
+
     def _read_batch(self, manifest, target, report):
         for experiment_id in manifest["experiments"]:
             if window := self.windows.get(experiment_id):
                 report(f"Importing only the modeling experiment period {window[0]:g}–{window[1]:g} s; "
                        "full preparation and cleanup recordings are retained.")
+            process = self.process_by_id.get(experiment_id, {})
+            if charges := process.get("PreparationCharges_g"):
+                summary = ", ".join(f"{role} {mass:g} g" for role, mass in charges.items())
+                report(f"Calibrated preparation charges: {summary}. Initial solvent {process['SolvMass']:g} g, "
+                       f"antisolvent {process['AntiSolvMass']:g} g, dry seed {process['SeedMass']:g} g.")
         experiments, processes, runs = read_completed_recordings(
             Path(manifest["campaign_folder"]), manifest["experiments"], self.setup["recording"],
             self.mapping, self.process_by_id, self.windows, roles=self.roles,
-            mixing=self.setup["mixing"] if self.mode == "imed" and not self.demo else None)
+            mixing=self.setup["mixing"] if self.mode == "imed" and not self.demo else None,
+            allow_density_fallback=self.mode == "imed", final_size_samples=self.final_size_samples)
+        if self.final_size_samples > 1:
+            for experiment in experiments:
+                report(f"{experiment['Name']}: used {experiment['FinalSizeSamplesUsed']} of "
+                       f"{self.final_size_samples} requested D10 / D50 / D90 samples for final sizes.")
         if self.mode == "imed":
             for experiment, process in zip(experiments, processes):
                 if not self.demo:
@@ -875,12 +1151,21 @@ class AdaptiveLoop:
         if not self.used_recordings:
             from experiment.campaign_effects import initial_input_groups, power_effects
             groups = initial_input_groups(processes)
-            self.case.setdefault("PythonWorkflow", {})["initial_input_groups"] = groups
+            # Older scale-only pump setups may have no command-to-mass curve.
+            # The recording can supply that missing profile, with the planned
+            # decisions taking precedence for channels that have command data.
+            measured = capture_decisions(case_runs({"ExpData": experiments, "ProcInf": processes},
+                                                   manifest["campaign_folder"], controls=self.roles, prefer_commands=True))
+            planned = self.doe_decisions or {"traces": {}, "levels": {}}
+            self.doe_decisions = {key: {**measured[key], **planned[key]} for key in planned}
+            workflow = self.case.setdefault("PythonWorkflow", {})
+            workflow.update(initial_input_groups=groups, doe_decisions=self.doe_decisions)
             if self.bo is not None:
                 self.bo["initial_input_groups"] = groups
+                self.bo["doe_decisions"] = self.doe_decisions
             if not self.demo:
                 self.process.update(processes[0])
-            progress(f"Initial campaign operating inputs available for BO / SA: {', '.join(groups) or 'stirring and volume fixed'}.")
+            progress(f"Initial DoE decision variables: {decision_summary(self.doe_decisions)}.")
             if self.mode == "imed" and self.setup["mixing"]["enabled"]:
                 reports = power_effects(self.case["ModelParameter"], processes)
                 self.case["PythonWorkflow"]["mixing_effects"] = reports
@@ -922,19 +1207,31 @@ class AdaptiveLoop:
             profiles, process, details = self._recommend_imed(
                 experiments, processes, survivors, scores, pe_stage, cancelled, progress, publish, target)
         progress("Validating the recommended experiment")
+        if self.compiler.staged and not self.demo:
+            progress("Applying the recommendation only inside the selected experiment period. Reusing the programmed preparation and following stages.")
         _process(process)
         campaign, window = self.compiler.build(
             profiles, process, name=f"{self.mode.upper()} follow-up {self.followups + 1}",
             source=self.mode, default_seed=self.process["SeedMass"], modeling=True)
-        experiment = campaign.experiments[0]
+        if (stirrer := profiles.get("stirring")) is not None:
+            process["StirringRPM"] = stirrer.total() / (stirrer.time[-1] - stirrer.time[0])
+        process_fields = (*POSITIVE_PROCESS, *NONNEGATIVE_PROCESS, "InitialConcentration", "InitialVolume_ml", "StirringRPM", "MixingSettings")
+        experiment = replace(campaign.experiments[0], seed_mass_g=float(process["SeedMass"]), model_window=window,
+                             model_process={**{key: process[key] for key in process_fields if key in process},
+                                            "SeedPercentiles": list(self.setup["recording"]["seed_percentiles"])})
+        campaign = replace(campaign, experiments=(experiment,))
         self.process_by_id[experiment.experiment_id] = process
         self.windows[experiment.experiment_id] = window
+        from experiment.pump_corrections import corrected_campaign
+
+        executed = corrected_campaign(campaign, self.configs, self.windows)
         process_state = {key: float(process[key]) for key in (*POSITIVE_PROCESS, *NONNEGATIVE_PROCESS)}
-        if (initial := process.get("InitialConcentration")) is not None:
-            process_state["InitialConcentration"] = float(initial)
+        for key in ("InitialConcentration", "InitialVolume_ml", "StirringRPM"):
+            if process.get(key) is not None:
+                process_state[key] = float(process[key])
         payload = {"format": "crystaloop-recommendation", "version": 1, "backend": self.mode,
-                   "input_campaign_id": manifest["campaign_id"], "campaign": asdict(campaign),
-                   "process": process_state, "crystallization_window_s": self.windows[experiment.experiment_id],
+                   "input_campaign_id": manifest["campaign_id"], "campaign": asdict(executed),
+                   "process": process_state, "crystallization_window_s": executed.experiments[0].model_window or window,
                    **details}
         if self.mode == "imed":
             save_native_case(target / "fit.imed.json", self.case)
@@ -943,7 +1240,7 @@ class AdaptiveLoop:
             "RecipeSource": details["method"], "RecipeReason": details.get("design_reason", ""),
             "RecipeStage": details["stage_name"], "RecipeModelFolder": str(target),
         }
-        loop_outputs.modeled_recipe(target, profiles, campaign, details.get("predictions"))
+        loop_outputs.modeled_recipe(target, profiles, executed, details.get("predictions"))
         atomic_json(target / "recommendation.json", payload)
         progress(f"Saved the {details['method']} recommendation and device-target CSVs to {target}")
         self.used_recordings.add(manifest["campaign_id"])
@@ -973,7 +1270,12 @@ class AdaptiveLoop:
         from bo.optimizer import propose
 
         report("BO is fitting response models and searching for the next experiment")
-        result = propose(state, report=report)
+        fixed = {}
+        if self.compiler.staged and not self.demo:
+            fixed["seed"] = self.process["SeedMass"]
+            if (volume := charge_volume(self.process)) is not None:
+                fixed["volume"] = volume
+        result = propose(state, report=report, fixed_inputs=fixed)
         publish("bo_result", result)
         seed = result.profiles.get("seed")
         process = {**self.process, "SeedMass": float(seed.values[0]) if seed is not None else self.process["SeedMass"]}
@@ -1060,6 +1362,8 @@ class AdaptiveLoop:
         return survivors, scores, stage
 
     def _recommend_imed(self, experiments, processes, survivors, scores, pe_stage, cancelled, report, publish, target):
+        from imed_python.doe_design import design_note, doe_controls, imed_doe_groups, imed_recipe_profiles, seed_template
+
         fitted = self.case["ModelParameter"]
         solubility = self.case["Solubility"]
         cutoff = self.setup["imed"]["delta_aic"]
@@ -1081,23 +1385,45 @@ class AdaptiveLoop:
             reason = f"Only {name} passed model screening."
             report(f"IMED selected {method} and skipped model discrimination. {reason}")
             samples = parameter_samples(model, self.setup["imed"]["covariance_samples"])
+            size_term = self.size_term if sum(weight > 0 for weight in self.weights) == 1 else "CSD"
             score = partial(d_optimal_log_score, model, solubility=solubility, settings=settings,
-                            enabled_terms=[weight > 0 for weight in self.weights], samples=samples)
+                            enabled_terms=[weight > 0 for weight in self.weights], samples=samples, size_term=size_term)
         if len(survivors) > 1:
             report(f"IMED selected {method}. {reason}")
         options = self.setup["imed"]
-        conditions = {**options["conditions"], "equilibration_s": options["equilibration_s"]}
         design_experiment = {**experiments[-1]}
-        if conditions["seed_bounds"][1] > 0:
+        design_process = processes[-1]
+        use_doe = options["use_doe_decisions"] and self.doe_decisions is not None
+        staged = self.compiler.staged and not self.demo
+        if staged or use_doe:
+            if self.doe_template_index is None:
+                self.doe_template_index = len(self.case["ExpData"]) - len(experiments)
+            start = self.doe_template_index
+            design_experiment = self.case["ExpData"][start]
+            design_process = self.case["ProcInf"][start]
+        conditions = {**self._imed_followup_conditions(design_process, design_experiment),
+                      "equilibration_s": options["equilibration_s"]}
+        if use_doe:
+            groups = imed_doe_groups(self.doe_decisions, [fitted[index] for index in survivors],
+                                     design_experiment, design_process)
+            if staged:
+                groups -= {"seed", "volume"}
+            controls = doe_controls(self.doe_decisions, groups, discrete_seed=bool(self.demo or self.compiler.seed_rpm is None))
+            conditions["doe_search"] = {"space": self.doe_decisions, "controls": controls,
+                                        "seed_template": seed_template(self.case),
+                                        "final_hold_s": options["equilibration_s"] if self.demo else 0.}
+            report(design_note(self.doe_decisions, controls))
+        elif conditions["seed_bounds"][1] > 0:
             design_experiment["InitialCSDsData"] = (model_inputs(True)[1]["InitialCSDsData"] if self.demo
                                                     else seed_distribution(self.setup["recording"]["seed_percentiles"]))
-        request = {"template_index": len(self.case["ExpData"]) - 1, "model_index": 0,
+        template_index = self.doe_template_index if self.doe_template_index is not None else len(self.case["ExpData"]) - 1
+        request = {"template_index": template_index, "model_index": 0,
                    "iterations": options["iterations"], "samples": options["covariance_samples"],
                    "terms": "D10 D50 D90", "weights": self.weights, "conditions": conditions}
         publish("imed_design", {"case": deepcopy(self.case), "method": method,
                                 "survivors": survivors, "request": request})
         value, proposal, process = optimize_recipe(
-            design_experiment, processes[-1], conditions, score,
+            design_experiment, design_process, conditions, score,
             iterations=options["iterations"], cancelled=cancelled, workers=self.workers)
         stage = self._imed_stage(kind, target, pe_stage["candidates"])
         action = "d_optimal_design" if kind == "DO" else "model_discrimination"
@@ -1107,9 +1433,18 @@ class AdaptiveLoop:
         stage_path = save_native_case(stage["case_file"], self.case)
         report(f"Saved {stage['name']} ({method}) and its fitted models to {stage_path}.")
         publish("imed_result", {"case": deepcopy(self.case), "result": (value, proposal, process)})
-        profiles = {"temperature": Profile(*proposal["TemperatureData"], method),
-                    "feed": Profile(*proposal["FlowRateData"], method)}
-        process["InitialConcentration"] = options["conditions"]["concentration"]
+        profiles = imed_recipe_profiles(proposal, method)
+        if "stirring" not in profiles and "stirring_rate" not in self.setup["support_profiles"]:
+            stirrer = design_experiment.get("CommandedProfiles", {}).get("stirring")
+            if not stirrer and self.doe_decisions:
+                stirrer = next(iter(self.doe_decisions["traces"].get("stirring", ())), None)
+            if stirrer:
+                from bo.decoder import fixed_horizon
+
+                commanded = make_profile(stirrer["points"], stirrer["source"], step=stirrer["step"])
+                profiles["stirring"] = fixed_horizon(commanded, profiles["temperature"].time[-1])
+        if "InitialConcentration" in proposal:
+            process["InitialConcentration"] = float(proposal["InitialConcentration"])
         return profiles, process, {"method": method, "design_reason": reason, "score": value,
                                    "stage_name": stage["name"], "stage_case": str(stage_path),
                                    "observations": len(self.case["ExpData"]),

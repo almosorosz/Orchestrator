@@ -300,7 +300,9 @@ def decode_recipe(channels, slices, point, horizon):
     return recipe
 
 
-def propose(state, report=lambda _: None):
+def propose(state, report=lambda _: None, *, fixed_inputs=None):
+    from experiment.doe_decisions import capture_decisions, decision_groups, decision_summary
+
     runs = [state["runs"][index] for index in state["selected"]]
     if len(runs) < 2:
         raise ValueError("Select at least two completed experiments.")
@@ -310,6 +312,12 @@ def propose(state, report=lambda _: None):
                          "Change the bounds, batch horizon, or selected experiments.")
     channels, column_slices = {}, {}
     variables, columns = [], []
+    fixed_inputs = fixed_inputs or {}
+    space = state.get("doe_decisions")
+    if space is None:
+        space = capture_decisions(runs)
+    groups = decision_groups(space)
+    report(f"DoE decision variables: {decision_summary(space, groups - fixed_inputs.keys())}.")
     for key, (label, _, _) in CHANNELS.items():
         has_channel = [key in run["profiles"] for run in runs]
         if not any(has_channel):
@@ -320,7 +328,19 @@ def propose(state, report=lambda _: None):
             raise ValueError(f"{label} data is missing from some selected runs. Select runs with "
                              "matching profile coverage or complete the missing profiles in IMED.")
         report(f"Preparing {label.lower()} inputs")
-        channel = channels[key] = prepare_channel(state, runs, key, report, horizon=horizon)
+        if key in groups:
+            channel = prepare_channel(state, runs, key, report, horizon=horizon)
+        else:
+            reference = run_profile(runs[0], key)
+            if key in space["traces"]:
+                entry = space["traces"][key][0]
+                reference = make_profile(entry["points"], entry["source"], step=entry["step"])
+            elif key in space["levels"]:
+                reference = Profile(np.zeros(1), np.array([space["levels"][key][0]]), "Initial DoE")
+            channel = Channel(key, reference, (), np.empty((len(runs), 0)), "Fixed by the initial DoE")
+        if key in fixed_inputs:
+            channel.reference = Profile(np.zeros(1), np.array([fixed_inputs[key]]), "Starting recipe")
+        channels[key] = channel
         start = len(variables)
         variables.extend(channel.variables)
         columns.append(channel.features)
@@ -328,11 +348,13 @@ def propose(state, report=lambda _: None):
     check_settings(state, channels)
     observed = np.column_stack(columns)
     active = variable_activity(observed)
-    vary = active & np.array([state["overrides"].get(variable.key, True) for variable in variables], dtype=bool)
-    initial_groups = state.get("initial_input_groups")
-    if initial_groups is not None:
-        vary &= np.array([not var.key.startswith(("stirring:", "volume:")) or var.key.split(':')[0] in initial_groups for var in variables])
+    fixed_columns = {columns.start: fixed_inputs[key] for key, columns in column_slices.items()
+                     if key in fixed_inputs and columns.start < columns.stop}
+    vary = active & np.array([index not in fixed_columns and state["overrides"].get(variable.key, True)
+                              for index, variable in enumerate(variables)], dtype=bool)
     if not vary.any():
+        if fixed_inputs:
+            raise ValueError("Choose a decision control with variation inside the selected experiment period.")
         raise ValueError("Choose at least one stage control, setpoint or seed mass that varies across the runs.")
     # Keep measured variation in the GP even when a decision variable is held fixed for the search.
     scaler = StandardScaler().fit(observed)
@@ -347,6 +369,8 @@ def propose(state, report=lambda _: None):
     portion = rng.uniform(.02, .98, (POOL_SIZE, 1))
     points = observed[left] * portion + observed[right] * (1 - portion)
     points[:, ~vary] = observed[0, ~vary]
+    for column, value in fixed_columns.items():
+        points[:, column] = value
     for key, channel in channels.items():
         if channel.stages is not None:
             columns = column_slices[key]
@@ -357,7 +381,7 @@ def propose(state, report=lambda _: None):
         # The zero-mass mode and positive-mass mode come from executed runs.
         # Never interpolate a new seed mass between an unseeded and a seeded recipe.
         before, after = observed[left, seed_column], observed[right, seed_column]
-        mixed = (before == 0.) != (after == 0.)
+        mixed = np.ones(len(before), dtype=bool) if state.get("discrete_seed") else (before == 0.) != (after == 0.)
         points[mixed, seed_column] = np.where(portion[mixed, 0] >= .5, before[mixed], after[mixed])
     accepted, rejected = [], {}
     for row, point in enumerate(points):

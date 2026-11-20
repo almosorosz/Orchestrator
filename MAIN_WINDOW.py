@@ -65,7 +65,8 @@ from hardware_devices.capabilities import is_monitor_only
 from gui.doe_assignment_dialog import DoeAssignmentDialog
 from PySide6.QtWidgets import QFileDialog
 from experiment.adaptive_loop import (
-    AdaptiveLoop, RecipeCompiler, check_loop_folders, device_configuration_changed, recording_mapping, validate_setup,
+    AdaptiveLoop, RecipeCompiler, check_loop_folders, device_configuration_changed, imed_objective_channels,
+    imed_response_weights, recording_mapping, validate_setup,
 )
 from experiment.recipe_feedback import RecipeFeedback
 from imed_python.campaign_import import read_json as read_campaign_json
@@ -189,6 +190,8 @@ class MainWindow(QMainWindow):
             self.modeling_workflow = "imed"
         elif self.stack.currentWidget() is self.bo_page:
             self.modeling_workflow = "bo"
+        elif self.stack.currentWidget() is self.settings_page:
+            self._refresh_session_notice()
 
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
@@ -1429,7 +1432,7 @@ class MainWindow(QMainWindow):
 
     def define_doe(self):
         if self.control_panel.experiment_running() or (self.execution.timer.isActive() and not self.execution.awaiting_campaign):
-            self.log_message("Finish the active experiment/monitoring run before regenerating the DoE.", "WARNING")
+            self._check_session_change("Cannot generate experiments", allow_waiting=True)
             return
         try:
             initial_exp_count = (2 if self.settings_page.get_sampling_strategy() == "Full Factorial DoE generation"
@@ -1529,11 +1532,9 @@ class MainWindow(QMainWindow):
             return self._start_assigned_doe(for_loop=True)
         if self.create_experiments is None:
             return
-        panel = self.control_panel
-        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
-                or (self.execution.timer.isActive() and not self.execution.awaiting_campaign)):
-            self.log_message("End the active session/monitoring run before assigning a DoE campaign.", "WARNING")
+        if not self._check_session_change("Cannot assign DoE devices", allow_waiting=True):
             return
+        panel = self.control_panel
         configs, _ = panel.collect_current_configuration()
         dialog = DoeAssignmentDialog(self.create_experiments, configs, panel.hardware, self._doe_assignments, self,
                                      calibration_editor=panel.edit_pump_calibrations)
@@ -1571,11 +1572,9 @@ class MainWindow(QMainWindow):
         if campaign is None:
             self.log_message("Generate a DoE and apply device assignments before starting.", "WARNING")
             return
-        panel = self.control_panel
-        if (panel.hardware_manager.is_busy or panel.experiment_window_attached()
-                or (self.execution.timer.isActive() and not (for_loop and self.execution.awaiting_campaign))):
-            self.log_message("End the active experiment/monitoring session before starting the DoE.", "WARNING")
+        if not self._check_session_change("Cannot start the DoE", allow_waiting=for_loop):
             return
+        panel = self.control_panel
         configs, _ = panel.collect_current_configuration()
         if self._doe_devices_changed(configs):
             self._assigned_doe_campaign = None
@@ -1598,6 +1597,7 @@ class MainWindow(QMainWindow):
             campaign = replace(self._adaptive_loop.template, campaign_id=uuid4().hex)
         if self._adaptive_loop is None:
             self.CONTROLLER.pbm_size_term = self.settings_page.pbm_size_samples.currentData()
+            self.CONTROLLER.pbm_final_size_samples = self.settings_page.final_size_sample_count(mode)
         dashboard = self.control_panel.start_campaign(campaign, {"enabled": True, "output_folder": self.CONTROLLER.omni_folder})
         if dashboard is None:
             if self._adaptive_loop is not None:
@@ -1668,6 +1668,7 @@ class MainWindow(QMainWindow):
             source = "doe" if doe is not None or not panel.experiments else "manual"
         messages = []
         resolution = None
+        assignments_stale = False
         if doe is not None and panel.experiments:
             messages.append("Choose the starting batch on Dashboard Start. This selector only changes the preview.")
         if source == "doe":
@@ -1678,6 +1679,7 @@ class MainWindow(QMainWindow):
             if doe is None:
                 messages.append("Generate a DoE and apply its device assignments in Settings.")
             elif self._doe_devices_changed(configs):
+                assignments_stale = True
                 messages.append("Device configuration changed. Apply the DoE assignments again before starting.")
         else:
             monitors = tuple(key for key in configs if key in connected and is_monitor_only(configs[key]))
@@ -1707,6 +1709,14 @@ class MainWindow(QMainWindow):
             except (ValueError, TypeError) as error:
                 messages.append(f"BO settings need attention. {error}")
         imed = self.imed_page.panel
+        imed_case = imed.checkpoint_case()
+        from experiment.doe_decisions import planned_decisions
+
+        try:
+            decisions = planned_decisions(campaign, setup, roles, configs, imed_case)
+        except (ValueError, TypeError, KeyError) as error:
+            decisions = None
+            messages.append(f"DoE decision variables need starting process inputs. {error}")
         experiment_folder, model_folder, _ = self.settings_page.get_environment_inputs()
         stages = campaign.experiments[0].run_stages if campaign is not None else ()
         if not stages and source == "doe" and self.experiment_service.exp_par.timeline:
@@ -1715,9 +1725,13 @@ class MainWindow(QMainWindow):
             recipe = self.experiment_service.exp_par.timeline
             stages = recipe_run_stages(recipe, {key: item["value"] for key, item in recipe_parameters(recipe)})
         return {"source": source, "label": label, "campaign": campaign, "roles": roles, "monitors": monitors, "run_stages": stages,
+                "assignments_stale": assignments_stale,
                 "topology": panel.current_system_topology(), "resolution": resolution, "effective_setup": setup,
-                "configs": configs, "connected": connected, "messages": messages, "case": imed.checkpoint_case(),
+                "configs": configs, "connected": connected, "messages": messages, "case": imed_case,
+                "doe_decisions": decisions,
                 "bo": bo_settings, "size_term": self.settings_page.pbm_size_samples.currentText(),
+                "final_size_samples": (self.settings_page.final_size_sample_count()
+                                       if self.settings_page.uses_final_size_samples() else None),
                 "folders": (experiment_folder, model_folder), "workers": imed.cpu_workers()}
 
     def _resolved_loop_setup(self, setup, configs, campaign=None, *, doe=False, strict=True):
@@ -1787,6 +1801,13 @@ class MainWindow(QMainWindow):
             imed = self.imed_page.panel
             imed_case = imed.checkpoint_case()
             defaults = compiler.process_defaults(imed_case)
+            if compiler.template and not compiler.demo:
+                from experiment.doe_decisions import starting_run_process
+
+                if (initial := setup["recording"]["initial_concentration"]) is not None:
+                    defaults.setdefault("InitialConcentration", initial)
+                defaults = starting_run_process(compiler.template.experiments[0], setup, compiler.roles,
+                                                compiler.configs, compiler.line_roles, defaults)
             recipe_process = {**defaults, **(process or {})}
             if mode == "imed":
                 recipe_process["MixingSettings"] = setup["mixing"]
@@ -1795,9 +1816,12 @@ class MainWindow(QMainWindow):
             campaign, window = compiler.build(profiles, recipe_process, name=f"{mode.upper()} recipe",
                                               source=mode, default_seed=defaults["SeedMass"])
             compiler.check_devices(campaign, configs, connected)
-            mapping = {} if compiler.demo else recording_mapping(setup, compiler.roles, compiler.configs)
             feed = profiles.get("feed")
             recording = {**setup["recording"], "no_feed": feed is None or not (feed.values > 0).any()}
+            required = imed_objective_channels(imed_response_weights(imed_case)) if mode == "imed" else None
+            mapping = {} if compiler.demo else recording_mapping({**setup, "recording": recording},
+                                                                  compiler.roles, compiler.configs,
+                                                                  required_measurements=required)
             solubility = imed_case.get("Solubility", {})
             if compiler.demo and not solubility:
                 from imed_python.demo_campaign import model_inputs
@@ -1806,7 +1830,8 @@ class MainWindow(QMainWindow):
             feedback = RecipeFeedback(
                 mode, campaign.campaign_id, campaign.experiments[0].experiment_id, recording, mapping, compiler.roles,
                 recipe_process, window, solubility, source or f"{mode.upper()} recipe", seed_template or {},
-                self._model_output_folder(prepare=True))
+                self._model_output_folder(prepare=True),
+                final_size_samples=self.settings_page.final_size_sample_count(mode))
             dataset = imed.case if mode == "imed" else self.bo_page.state["runs"]
             snapshot = deepcopy(imed_case if mode == "imed" else self.bo_page.state)
             if self.experiment_page.dashboard is not None:
@@ -1831,12 +1856,9 @@ class MainWindow(QMainWindow):
             raise ValueError(str(error)) from error
 
     def _execute_imed_recipe(self, experiment, process, *, source=None):
-        from bo.profiles import make_profile
+        from imed_python.doe_design import imed_recipe_profiles
 
-        profiles = {key: make_profile(experiment.get(field), "IMED design")
-                    for key, field in (("temperature", "TemperatureData"), ("feed", "FlowRateData"))}
-        if not all(profiles.values()):
-            raise ValueError("The IMED recipe needs finite temperature and antisolvent profiles.")
+        profiles = imed_recipe_profiles(experiment, "IMED design")
         initial = experiment.get("InitialConcentration")
         if initial is not None:
             process = {**process, "InitialConcentration": float(initial)}
@@ -1889,6 +1911,10 @@ class MainWindow(QMainWindow):
 
         self._recipe_feedback_timer.stop()
         self._pending_recipe_feedback = None
+        if feedback.final_size_samples > 1:
+            for experiment in measured["ExpData"]:
+                self.log_message(f"{experiment['Name']}: used {experiment['FinalSizeSamplesUsed']} of "
+                                 f"{feedback.final_size_samples} requested D10 / D50 / D90 samples for final sizes.")
         if current and feedback.mode == "imed":
             imed.case.update({key: updated[key] for key in ("ExpData", "ProcInf", "Solubility")})
             imed.campaign_path = folder
@@ -1937,7 +1963,8 @@ class MainWindow(QMainWindow):
                                    self._connected_loop_devices(), calibration_storage,
                                    assignments, imed.checkpoint_case(),
                                    bo_settings=self.bo_page.settings() if mode == "bo" else None,
-                                   size_term=settings.pbm_size_samples.currentData(), workers=imed.cpu_workers())
+                                   size_term=settings.pbm_size_samples.currentData(), workers=imed.cpu_workers(),
+                                   final_size_samples=settings.final_size_sample_count(mode))
         except (ValueError, TypeError, RuntimeError, OSError, ImportError, KeyError) as error:
             problems.append(str(error))
         if problems:
@@ -1952,6 +1979,7 @@ class MainWindow(QMainWindow):
         self.dashboard_page.set_omni_count(0)
         self.dashboard_page.set_model_count(0)
         self._adaptive_loop = session
+        settings.loop_setup["doe_decisions"] = session.doe_decisions
         for role, origin in resolution["origins"].items():
             self.log_message(f"Loop assignment {role}: {session.roles.get(role, '')} ({origin}).", "INFO")
         for experiment in session.template.experiments:
@@ -2007,6 +2035,7 @@ class MainWindow(QMainWindow):
     def _on_loop_model_finished(self):
         job = self._loop_model_job
         self._loop_model_job = None
+        self._refresh_session_notice()
         job.deleteLater()
         if self._adaptive_loop is not job.session or self.CONTROLLER.process_stop:
             return
@@ -2128,6 +2157,7 @@ class MainWindow(QMainWindow):
                            "model_path": self.settings_page.MODEL_path_input.text(),
                            "experiment_count": self.settings_page.exp_number_input.text(),
                            "pbm_size_term": self.settings_page.pbm_size_samples.currentData(),
+                           "pbm_final_size_samples": str(self.settings_page.pbm_final_size_samples.value()),
                            "loop_backend": self.settings_page.loop_backend.currentData(),
                            "loop_setup": json.dumps(self.settings_page.loop_setup, allow_nan=False),
                            "sampling_strategy": self.settings_page.get_sampling_strategy()}
@@ -2143,23 +2173,49 @@ class MainWindow(QMainWindow):
         except Exception as error:
             QMessageBox.warning(self, "Preset save failed", str(error))
 
+    def _session_change_blocker(self, *, allow_waiting=False):
+        if self._adaptive_loop is not None:
+            return ("The automatic loop is running. Wait for it to finish, or click Stop on the Dashboard. "
+                    "Then go to Experiment and click End Session.")
+        if self._loop_model_job is not None:
+            return "Modeling is still finishing. Wait for it to finish before changing the setup."
+        if self.execution.timer.isActive() and not (allow_waiting and self.execution.awaiting_campaign):
+            return ("The Dashboard is still monitoring a loop. Click Stop on the Dashboard and wait for cleanup. "
+                    "Then use Experiment → End Session if an experiment session is open.")
+        return self.control_panel.experiment_change_blocker()
+
+    @Slot()
+    def _refresh_session_notice(self):
+        self.settings_page.set_session_notice(self._session_change_blocker())
+
+    def _check_session_change(self, title, *, allow_waiting=False):
+        if reason := self._session_change_blocker(allow_waiting=allow_waiting):
+            self._refresh_session_notice()
+            self.log_message(reason, "WARNING")
+            QMessageBox.warning(self, title, reason)
+            return False
+        return True
+
     def load_setup_preset(self, filename=None):
-        if (self.control_panel.hardware_manager.is_busy or self.control_panel.experiment_window_attached()
-                or self.execution.timer.isActive()):
-            self.log_message("End the experiment session and stop monitoring before loading a setup preset.", "WARNING")
+        if not self._check_session_change("Cannot load setup preset"):
             return
         if filename is None:
             filename, _ = QFileDialog.getOpenFileName(self, "Load setup preset", "", "JSON (*.json)")
+            if filename and not self._check_session_change("Cannot load setup preset"):
+                return
         if not filename:
             return
         try:
             from app.presets import read_preset
+            from experiment.adaptive_loop import setup_for_editing
             from gui.recording_settings_dialog import save_recording_settings
             data, parameters, assignments = read_preset(filename)
             from imed_python.setup_snapshot import read_imed_settings
 
             environment = data.get("environment", {})
-            loop_setup = validate_setup(json.loads(environment.get("loop_setup", "{}")))
+            saved_loop_setup = json.loads(environment.get("loop_setup", "{}"))
+            supported_loop_setup, unsupported_loop_fields = setup_for_editing(saved_loop_setup)
+            loop_setup = {**saved_loop_setup, **supported_loop_setup}
             loop_backend = self.settings_page.loop_backend.findData(environment.get("loop_backend", "external"))
             if loop_backend < 0:
                 raise ValueError("Unsupported LOOP backend in the setup preset.")
@@ -2204,6 +2260,9 @@ class MainWindow(QMainWindow):
             self.experiment_service._build_doe_dependencies()
             self.control_panel.simulation_speed.setValue(panel.get("simulation_speed", 1))
             self.settings_page.loop_setup = loop_setup
+            if unsupported_loop_fields:
+                fields = ", ".join(unsupported_loop_fields)
+                self.log_message(f"Saved loop settings include unsupported fields ({fields}). Review and save Automatic loop setup before starting.", "WARNING")
             self.settings_page.loop_backend.setCurrentIndex(loop_backend)
             self.settings_page.exp_path_input.setText(environment.get("experiment_path", ""))
             self.settings_page.MODEL_path_input.setText(environment.get("model_path", ""))
@@ -2211,6 +2270,7 @@ class MainWindow(QMainWindow):
             self.settings_page.pbm_size_samples.setCurrentIndex(
                 self.settings_page.pbm_size_samples.findData(environment.get(
                     "pbm_size_term", self.settings_page.pbm_size_samples.itemData(0))))
+            self.settings_page.pbm_final_size_samples.setValue(int(environment.get("pbm_final_size_samples", "1")))
             self.settings_page.doe_type_combo.setCurrentText(environment.get("sampling_strategy", "Random sampling"))
             self.settings_page.set_doe_available(False)
             self.settings_page.set_doe_info("", "", "")
@@ -2296,7 +2356,8 @@ class MainWindow(QMainWindow):
         for button in buttons:
             button.setEnabled(enabled)
 
-        self.settings_page.set_controls_enabled( enabled)
+        self.settings_page.set_controls_enabled(enabled)
+        self._refresh_session_notice()
 
     @Slot()
     def refresh_reservoir_amounts(self):
@@ -2402,6 +2463,7 @@ class MainWindow(QMainWindow):
             self.omni_filename,
             self.MODEL_filename,
             pbm_size_term=self.settings_page.pbm_size_samples.currentData(),
+            pbm_final_size_samples=self.settings_page.final_size_sample_count(),
         )
 
         # Give the coordinator the SAME controller instance.
@@ -2443,12 +2505,9 @@ class MainWindow(QMainWindow):
         return None
 
     def start_command(self):
-        panel = self.control_panel
-        if (self._loop_model_job is not None or self._adaptive_loop is not None
-                or panel.hardware_manager.is_busy or panel.experiment_window_attached()
-                or (self.execution.timer.isActive() and not self.execution.awaiting_campaign)):
-            self.log_message("End the active experiment or monitoring session before starting another LOOP batch.", "WARNING")
+        if not self._check_session_change("Cannot start another experiment", allow_waiting=True):
             return
+        panel = self.control_panel
         source = self._choose_loop_source()
         if source is None:
             return
@@ -2491,15 +2550,21 @@ class MainWindow(QMainWindow):
         experiments = tuple(ExperimentDefinition.from_frame(frame, configs, name=f"Experiment {number}")
                             for number, frame in enumerate(self.control_panel.experiments, 1))
         if simulation is not None:
-            from imed_python.demo_campaign import CONTROL_TYPES, VERSION, compile_simulation
+            from imed_python.demo_campaign import CONTROL_TYPES, VERSION, calibrated_simulation, compile_simulation
+            from experiment.run_stages import modeling_campaign
 
             setup = validate_setup(self.settings_page.loop_setup if setup is None else setup)
             setup, _ = self._resolved_loop_setup(setup, configs, Campaign("Control Panel experiments", experiments))
             controls, simulation = setup["manual_assignments"], setup["manual_simulation"]
-            if not set(CONTROL_TYPES) <= controls.keys():
-                raise ValueError("Map all PBM simulation actuator roles to Control Panel devices.")
             prepared = []
-            for experiment in experiments:
+            modeled = modeling_campaign(Campaign("Control Panel experiments", experiments), setup)
+            for experiment in modeled.experiments:
+                if experiment.run_stages and experiment.model_window is not None:
+                    spec = calibrated_simulation(simulation, controls, configs, monitors, experiment)
+                    prepared.append(replace(experiment, imed_simulation=spec))
+                    continue
+                if not set(CONTROL_TYPES) <= controls.keys():
+                    raise ValueError("Map all PBM simulation actuator roles to Control Panel devices.")
                 profiles = {profile.device_id: profile for profile in experiment.profiles}
                 if not {controls[role] for role in CONTROL_TYPES} <= profiles.keys():
                     raise ValueError(f"{experiment.name}: include profiles for all PBM simulation actuators.")
@@ -2595,6 +2660,7 @@ class MainWindow(QMainWindow):
         self.control_panel = (self.control_panel_page.control_panel)
         self.control_panel.dashboard_host = self.embed_experiment_dashboard
         self.control_panel.setup_preset_loader = self.load_setup_preset
+        self.control_panel.configuration_load_blocker = self._session_change_blocker
 
         self.hardware = (self.control_panel_page.hardware)
 
@@ -2615,6 +2681,14 @@ class MainWindow(QMainWindow):
         self.imed_page.bo_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.bo_page)))
         self.bo_page.imed_requested.connect(lambda: self.switch_page(self.stack.indexOf(self.imed_page)))
         def navigate_setup(key):
+            panel = self.imed_page.panel
+            editor = {"objectives": panel.edit_objectives, "solubility": panel.edit_solubility,
+                      "imed_candidate": panel.generate_candidate, "imed_models": panel.show_configurations,
+                      "imed_fit": panel.edit_fit_settings, "imed_runtime": panel.edit_runtime_settings,
+                      "bo_settings": self.bo_page.edit_loop_settings}.get(key)
+            if editor is not None:
+                editor(parent=self.settings_page.loop_setup_dialog)
+                return
             page = {"control": self.control_panel_page, "bo": self.bo_page,
                     "imed": self.imed_page, "pe": self.imed_page, "folders": self.settings_page}.get(key, self.settings_page)
             self.switch_page(self.stack.indexOf(page))
@@ -2652,6 +2726,8 @@ class MainWindow(QMainWindow):
         dashboard.set_theme(self.dark_mode)
 
         self.experiment_page.attach_dashboard(dashboard)
+        dashboard.execution_active_changed.connect(self._refresh_session_notice)
+        self._refresh_session_notice()
 
         self.switch_page(1)
 
@@ -2669,10 +2745,10 @@ class MainWindow(QMainWindow):
             return
 
         if self._adaptive_loop is not None and not automatic:
-            self.log_message("Stop the automatic loop before ending its experiment session.", "WARNING")
+            self._check_session_change("Cannot end experiment session")
             return
         if dashboard.is_execution_active():
-            self.log_message("Stop the experiment and wait for cleanup before ending the session.", "WARNING")
+            self.log_message("Wait for the experiment to finish, or click Stop and wait for cleanup before ending the session.", "WARNING")
             return
 
         panel = self.control_panel_page.control_panel
@@ -2728,6 +2804,7 @@ class MainWindow(QMainWindow):
         # 3. Remove dashboard from Experiment page
         # --------------------------------------------------
 
+        dashboard.execution_active_changed.disconnect(self._refresh_session_notice)
         page.detach_dashboard()
 
         if panel.experiment_window is dashboard:
@@ -2735,6 +2812,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_loop_dashboard", None) is dashboard:
             self._loop_dashboard = None
         panel.refresh_connectivity_fields()
+        self._refresh_session_notice()
 
         print(
             "[MAIN WINDOW] Experiment session ended. "

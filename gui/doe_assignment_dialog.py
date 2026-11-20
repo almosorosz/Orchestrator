@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTable
                                QCheckBox, QFileDialog, QMessageBox, QAbstractItemView)
 
 from experiment.doe_campaign import DoeCampaignService, ProfileAssignment, DEFAULT_ASSIGNMENTS
+from experiment.pump_corrections import corrected_campaign
 from hardware_devices.capabilities import is_monitor_only
 
 
@@ -24,8 +25,8 @@ class DoeAssignmentDialog(QDialog):
         layout = QVBoxLayout(self)
         description = QLabel(
             "Assign active profiles (*) to distinct devices. Generated hours become seconds. "
-            "Mass-flow profiles use pump calibrations. Ismatec defaults to g/h ÷ 60 → mL/min (1 g/mL). "
-            "Existing return-pump segments are retained. Only assigned actuators will be controlled. "
+            "Real Ismatec profiles require a mass-flow calibration measured in RPM. "
+            "The preview includes configured line-fill and back-rotation steps. Only assigned actuators will be controlled. "
             "Preview, validate and apply assignments. Start execution separately from Settings or the Dashboard."
         )
         description.setWordWrap(True)
@@ -162,9 +163,13 @@ class DoeAssignmentDialog(QDialog):
         text = "Not assigned"
         if device_id is not None:
             custom = self.configs[device_id].get("pump_calibration")
+            seed = self.configs[device_id].get("seed_calibration")
             unit = self.service.roles[role].unit
+            semantic = self.service.recipe_lanes.get(role, {}).get("role", role)
             text = (f"Loaded calibration: {custom.get('source_name', 'CSV')}" if custom and unit == "g/h" else
-                    "g/h ÷ 60 → mL/min (1 g/mL)" if kind == "ismatec" and unit == "g/h" else
+                    f"Dry seed calibration · {seed['rpm']:g} RPM" if semantic == "seed" and seed else
+                    "Load the AS calibration" if kind == "ismatec" and semantic == "AS" and not self.configs[device_id].get("simulated") else
+                    "Simulated delivery → RPM" if kind == "ismatec" and unit == "g/h" else
                     f"{role} calibration: g/h → RPM" if unit == "g/h" else f"Direct ({unit})")
         self.table.setItem(row, 2, QTableWidgetItem(text))
         self.invalidate()
@@ -198,7 +203,7 @@ class DoeAssignmentDialog(QDialog):
                                             imed_monitors=self.imed_monitor_assignments())
             self.preview_table.setRowCount(0)
             total_duration = 0
-            for experiment in campaign.experiments:
+            for experiment in corrected_campaign(campaign, self.configs).experiments:
                 duration = max(profile.points[-1].time_s for profile in experiment.profiles)
                 total_duration += duration
                 for profile in experiment.profiles:

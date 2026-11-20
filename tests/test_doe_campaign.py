@@ -69,7 +69,7 @@ class CompilationTests(unittest.TestCase):
         profiles = {p.device_id: p for p in experiment.profiles}
         self.assertAlmostEqual(profiles["TEM_MAIN"].points[-1].time_s, 1.08)
         self.assertAlmostEqual(profiles["PMP_AS"].points[0].target, 1.)
-        self.assertEqual(profiles["PMP_AS"].unit, "mL/min")
+        self.assertEqual(profiles["PMP_AS"].unit, "RPM")
         self.assertEqual(profiles["PMP_SOLU"].points[0].target, 20.)
         self.assertEqual(profiles["PMP_SEED"].points[-1].target, 50.)
         self.assertEqual(profiles["VALVE"].interpolation, "step")

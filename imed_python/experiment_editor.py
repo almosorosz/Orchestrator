@@ -224,11 +224,6 @@ class ExperimentEditor(QDialog):
             self.tabs.addTab(editor, TRACES[key][0])
         self.sizes = InputTable(("D10 (µm)", "D50 (µm)", "D90 (µm)"), self.status.setText, ("Seed", "Final"))
         self.tabs.addTab(self.sizes, "Size percentiles")
-        self.solubility = InputTable(("Value",), self.status.setText, tuple("abcdefgh"))
-        self.tabs.addTab(self.solubility, "Solubility")
-        coefficients = case.get("Solubility")
-        self.coefficients = coefficients if isinstance(coefficients, dict) else {}
-        self.solubility.load([[self.coefficients.get(key)] for key in "abcdefgh"])
         self.tabs.setCurrentWidget(self.traces["TemperatureData"])
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.apply)
@@ -363,20 +358,8 @@ class ExperimentEditor(QDialog):
     def apply(self):
         try:
             self.store_record()
-            original = [str(self.coefficients[key]) if key in self.coefficients else "" for key in "abcdefgh"]
-            entered = [row[0] for row in self.solubility.rows()]
-            solubility = self.coefficients
-            if entered != original:
-                solubility = {key: number(value, f"coefficient {key}")
-                              for key, value in zip("abcdefgh", entered) if value}
-                if solubility:
-                    solubility = {**{key: value for key, value in self.coefficients.items() if key not in "abcdefgh"},
-                                  **solubility}
-                self.changed = True
-            if solubility and any(key not in solubility for key in "abcdefgh"):
-                raise ValueError("Enter all eight solubility coefficients or leave the table blank.")
         except ValueError as error:
             self.status.setText(str(error))
             return
-        self.result = self.records, solubility
+        self.result = self.records
         self.accept()

@@ -11,10 +11,35 @@ from .validation.cases import Case
 
 
 VERSION = "pbm-validation-v1"
+PROFILE_VERSION = "pbm-calibrated-v1"
 MONITOR_TYPES = {role: "mettler" if role == "AS scale" else "opcua"
                  for role in CHANNELS if role != "Temperature"}
 CONTROL_TYPES = {"T": "huber", "AS": "ismatec", "seed": "masterflex",
                  "clean_sol": "ismatec", "valve_state": "nidaq_valve"}
+
+
+def legacy_simulation(spec):
+    return spec if spec and spec.get("version") == VERSION else None
+
+
+def calibrated_simulation(options, roles, configs, selected_monitors, experiment):
+    """Connect simulated PBM telemetry to the same staged commands as a real run."""
+    monitors = options["monitors"]
+    if not set(monitors.values()).issubset(selected_monitors):
+        raise ValueError("Connect every assigned PBM monitor.")
+    if any(configs.get(key, {}).get("type") != MONITOR_TYPES[role] for role, key in monitors.items()):
+        raise ValueError("Use the required simulated device type for every PBM monitor.")
+    controls = {role: roles[role] for role in ("T", "AS") if role in roles}
+    active = {profile.device_id for profile in experiment.profiles}
+    if "T" not in controls or not set(controls.values()).issubset(active):
+        raise ValueError("Include the assigned temperature and antisolvent profiles in the simulated experiment.")
+    if "AS" in controls and not configs[controls["AS"]].get("pump_calibration"):
+        raise ValueError("Load an antisolvent pump calibration for staged PBM simulation.")
+    if not all(configs.get(key, {}).get("simulated") for key in active | set(monitors.values())):
+        raise ValueError("PBM simulation requires all assigned devices to be simulated.")
+    start, end = experiment.model_window
+    return {"version": PROFILE_VERSION, "start_s": start, "end_s": end,
+            "controls": controls, "monitors": dict(monitors)}
 
 
 def compile_simulation(options, controls, configs, selected_monitors, monitors, profiles):
@@ -93,16 +118,40 @@ def recorded_columns(spec):
 
 
 class SimulationTrace:
-    def __init__(self, spec, frame, cancelled=None):
-        check_window(spec)
+    def __init__(self, spec, frame, cancelled=None, *, process=None, configs=None):
+        staged = spec.get("version") == PROFILE_VERSION
+        if not staged:
+            check_window(spec)
         self.spec = spec
-        self.end = spec["end_s"]
-        parameters, experiment, process, solubility, settings = model_inputs(spec["seeded"])
-        active = frame.loc[frame["time_s"] <= self.end + 1e-8]
-        time = active["time_s"].to_numpy()
-        self.temperature = np.vstack((time, active[spec["controls"]["T"]]))
-        # The assigned Ismatec uses mL/min and simulated AS density is 1 g/mL.
-        self.feed = np.vstack((time, active[spec["controls"]["AS"]] / 60))
+        self.start, self.end = spec["start_s"], spec["end_s"]
+        if staged:
+            from experiment.material_balance import pump_rate_g_s
+            from .campaign_import import seed_distribution
+
+            if process is None:
+                raise ValueError("Start the staged PBM simulation through the automatic loop to resolve the process inputs.")
+            parameters, experiment, _, solubility, settings = model_inputs(bool(process["SeedMass"]))
+            timeline = frame["time_s"].to_numpy(dtype=float)
+            absolute = np.r_[self.start, timeline[(timeline > self.start) & (timeline < self.end)], self.end]
+            time = absolute - self.start
+            temperature = np.interp(absolute, timeline, frame[spec["controls"]["T"]])
+            self.temperature = np.vstack((time, temperature))
+            rate = np.zeros(len(time))
+            if device := spec["controls"].get("AS"):
+                rpm = np.interp(absolute, timeline, frame[device])
+                rate = pump_rate_g_s(configs[device], rpm, process["AntiSolventDensity"])
+            self.feed = np.vstack((time, rate))
+            concentration = process["InitialConcentration"]
+            experiment["ConcentrationData"] = [[0., time[-1]], [concentration, concentration]]
+            if process["SeedMass"]:
+                experiment["InitialCSDsData"] = seed_distribution(process["SeedPercentiles"])
+        else:
+            parameters, experiment, process, solubility, settings = model_inputs(spec["seeded"])
+            active = frame.loc[frame["time_s"] <= self.end + 1e-8]
+            time = active["time_s"].to_numpy()
+            self.temperature = np.vstack((time, active[spec["controls"]["T"]]))
+            # The legacy fixture uses virtual RPM values equal to synthetic g/min.
+            self.feed = np.vstack((time, active[spec["controls"]["AS"]] / 60))
         experiment.update(TemperatureData=self.temperature, FlowRateData=self.feed)
         count, concentration, csd, state = simulate(
             parameters, experiment, process, solubility, settings,
@@ -120,14 +169,16 @@ class SimulationTrace:
         self.reservoir = 200 - cumulative_trapezoid(self.feed[1], time, initial=0)
 
     def apply(self, telemetry, elapsed):
-        active = elapsed <= self.end + 1e-8
+        active = self.start <= elapsed <= self.end + 1e-8
+        elapsed -= self.start
         controls = self.spec["controls"]
         if active:
             temperature = float(np.interp(elapsed, *self.temperature))
             telemetry[controls["T"]].update(temp_external=temperature, temp_internal=temperature)
-            telemetry[controls["AS"]]["flow"] = float(np.interp(elapsed, *self.feed) * 60)
+            if legacy_simulation(self.spec):
+                telemetry[controls["AS"]]["flow"] = float(np.interp(elapsed, *self.feed) * 60)
         time, rate = self.feed
-        clipped = min(elapsed, time[-1])
+        clipped = np.clip(elapsed, time[0], time[-1])
         interval = np.searchsorted(time, clipped, side="right") - 1
         dt = clipped - time[interval]
         local_rate = np.interp(clipped, time, rate)
@@ -138,13 +189,13 @@ class SimulationTrace:
             telemetry[self.spec["monitors"][role]]["value"] = float(value) if np.isfinite(value) else None
 
 
-def import_simulated_campaign(folder):
+def import_simulated_campaign(folder, *, final_size_samples=1):
     """Return a complete IMED case when the recorder carries demo assignments."""
     definition_path = Path(folder) / "definition.json"
     if not definition_path.is_file():
         return None
     definitions = read_json(definition_path).get("campaign", {}).get("experiments", [])
-    specs = {item["experiment_id"]: item for item in definitions if item.get("imed_simulation")}
+    specs = {item["experiment_id"]: item for item in definitions if legacy_simulation(item.get("imed_simulation"))}
     if not specs:
         return None
     experiments, processes = [], []
@@ -154,13 +205,17 @@ def import_simulated_campaign(folder):
             raise ValueError("The simulated campaign is missing IMED assignments for a completed run.")
         spec = item["imed_simulation"]
         check_window(spec)
+        tubing = item.get("pump_adjustments") or {}
+        shift = tubing.get("lead_in_s", 0.)
         _, seed_data, process, _, _ = model_inputs(spec["seeded"])
         try:
             experiment = import_run(
-                file, recorded_columns(spec), start=spec["start_s"], end=spec["end_s"] + 1e-8,
+                file, recorded_columns(spec), start=spec["start_s"] + shift, end=spec["end_s"] + shift + 1e-8,
                 concentration_multiplier=1, scale_direction=-1, smoothing=1,
                 initial_concentration=None, seed_percentiles=None, no_feed=False,
                 feed_channel=f"{spec['controls']['AS']}.flow", feed_multiplier=1 / 60,
+                pump_adjustment=tubing.get("pumps", {}).get(spec["controls"]["AS"]),
+                final_size_samples=final_size_samples,
             )
         except (KeyError, ValueError) as error:
             raise ValueError(f"{item['name']}: {error}") from error

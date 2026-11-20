@@ -157,9 +157,9 @@ HARDWARE_TYPES = {
             }
         },
         "target": {
-            "label": "Flow",
+            "label": "Speed",
             "type": "float",
-            "unit": "mL/min",
+            "unit": "RPM",
             "min": -1000,
             "max": 1000,
             "decimals": 2
@@ -662,7 +662,9 @@ class DeviceWidget(QGroupBox):
             limits = target_limits(config)
             integer = self.schema["target"]["type"] == "int"
             self.schema["target"].update(min=int(limits["min"]) if integer else limits["min"],
-                                         max=int(limits["max"]) if integer else limits["max"])
+                                         max=int(limits["max"]) if integer else limits["max"], unit=limits["unit"])
+        if config["type"] == "ismatec":
+            self.schema["target"]["label"] = "Pump setting"
         self.hardware = hardware
         self.device = device
 
@@ -898,7 +900,8 @@ class DeviceWidget(QGroupBox):
             if target.get("unit"):
                 label += f" ({target['unit']})"
 
-            form.addRow(label, self.target_widget)
+            self.target_label = QLabel(label)
+            form.addRow(self.target_label, self.target_widget)
 
         defaults = self.config.get("defaults", {})
 
@@ -1387,7 +1390,7 @@ class DeviceWidget(QGroupBox):
             
                 success = self.device.set_target(
                     target,
-                    stage=stage
+                    stage=stage,
                 )
 
             elif device_type == "masterflex":
@@ -1548,6 +1551,7 @@ class ControlPanel(QWidget):
 
         self.hardware_manager = HardwareManager(self.hardware)
         self.setup_preset_loader = None
+        self.configuration_load_blocker = None
         self.output_folder_provider = None
         self.output_folder_setter = None
 
@@ -1721,13 +1725,16 @@ class ControlPanel(QWidget):
         self.module_sensors_button.clicked.connect(lambda: self.edit_system_topology(False, tab=1))
         calibration_row.addWidget(self.module_sensors_button)
         top_section.addLayout(calibration_row)
-        system_row = QHBoxLayout()
+        system_row = FlowLayout()
         self.unit_operations_button = QPushButton("Unit operations / modules…")
         self.msi_button = QPushButton("Generate MSI / connectivity graph…")
         self.unit_operations_button.clicked.connect(lambda: self.edit_system_topology(False))
         self.msi_button.clicked.connect(lambda: self.edit_system_topology(True))
         system_row.addWidget(self.unit_operations_button)
         system_row.addWidget(self.msi_button)
+        self.flowsheet_button = QPushButton("View Flowsheet")
+        self.flowsheet_button.clicked.connect(self.show_flowsheet)
+        system_row.addWidget(self.flowsheet_button)
         self.reservoir_button = QPushButton("Reservoir amounts…")
         self.reservoir_button.clicked.connect(self.edit_reservoirs)
         system_row.addWidget(self.reservoir_button)
@@ -1848,10 +1855,15 @@ class ControlPanel(QWidget):
             if key not in self.device_widgets:
                 continue
             widget = self.device_widgets[key]
-            if "pump_calibration" in config:
-                widget.config["pump_calibration"] = deepcopy(config["pump_calibration"])
-            else:
-                widget.config.pop("pump_calibration", None)
+            for field in ("pump_calibration", "pump_corrections", "seed_calibration"):
+                if field in config:
+                    widget.config[field] = deepcopy(config[field])
+                else:
+                    widget.config.pop(field, None)
+            if widget.config["type"] == "ismatec":
+                unit = target_limits(widget.config)["unit"]
+                widget.schema["target"]["unit"] = unit
+                widget.target_label.setText(f"Pump setting ({unit})")
         return self.collect_current_configuration()[0]
 
     def current_system_topology(self):
@@ -1877,6 +1889,18 @@ class ControlPanel(QWidget):
             self.reservoirs.configure(self.system_topology, configs)
             self.refresh_connectivity_fields()
         dialog.deleteLater()
+
+    def show_flowsheet(self):
+        from experiment.system_topology import system_graph
+        from gui.flowsheet_dialog import FlowsheetDialog
+
+        configs, _ = self.collect_current_configuration()
+        try:
+            msi_code, graph = system_graph(self.system_topology, configs)
+        except ValueError as error:
+            QMessageBox.warning(self, "Check MSI setup", str(error))
+            return
+        FlowsheetDialog(graph, configs, self, msi_code=msi_code).open()
 
     def edit_reservoirs(self):
         if self.hardware_manager.is_busy or self.experiment_window_attached():
@@ -1943,6 +1967,17 @@ class ControlPanel(QWidget):
 
     def experiment_window_attached(self):
         return getattr(self, "experiment_window", None) is not None
+
+    def experiment_change_blocker(self):
+        dashboard = getattr(self, "experiment_window", None)
+        if self.experiment_running() or (dashboard is not None and dashboard.is_execution_active()):
+            return ("An experiment is running or finishing. Wait for it to finish, or click Stop and wait for cleanup. "
+                    "Then go to Experiment and click End Session.")
+        if dashboard is not None:
+            return "An experiment session is still open. Go to Experiment and click End Session."
+        if self.connection_operation_active() or self.hardware_manager.is_busy:
+            return "A hardware operation is in progress. Wait for it to finish and try again."
+        return ""
 
     def edit_device_limits(self):
         if self.hardware_manager.is_busy or self.experiment_window_attached():
@@ -2148,28 +2183,9 @@ class ControlPanel(QWidget):
         return True
 
     def load_configuration(self):
-    
-        if self.experiment_running():
-            QMessageBox.warning(
-                self,
-                "Experiment Running",
-                "Stop the experiment before changing "
-                "the hardware configuration.",
-            )
-            return
-
-        if (
-            self.connection_thread is not None
-            and self.connection_thread.isRunning()
-        ):
-        
-            QMessageBox.warning(
-                self,
-                "Hardware Busy",
-                "Wait for Connect All / Disconnect All "
-                "to finish before resetting."
-            )
-        
+        blocker = self.configuration_load_blocker or self.experiment_change_blocker
+        if reason := blocker():
+            QMessageBox.warning(self, "Cannot load configuration", reason)
             return
     
         file_path, _ = QFileDialog.getOpenFileName(
@@ -2180,6 +2196,9 @@ class ControlPanel(QWidget):
         )
     
         if not file_path:
+            return
+        if reason := blocker():
+            QMessageBox.warning(self, "Cannot load configuration", reason)
             return
     
         try:
@@ -2371,7 +2390,8 @@ class ControlPanel(QWidget):
                     )
                 )
     
-        return devices, profiles
+        from experiment.pump_corrections import with_reservoir_densities
+        return with_reservoir_densities(devices, self.system_topology), profiles
 
     def update_experiment_controls(self):
     
@@ -2637,12 +2657,26 @@ class ControlPanel(QWidget):
                 if device_id in selected_ids
             }
             # Validate all experiments before reserving or starting any hardware.
-            for experiment in experiments:
+            definitions = []
+            for index, experiment in enumerate(experiments, 1):
                 frame = experiment.to_frame() if isinstance(experiment, ExperimentDefinition) else experiment
-                ExperimentDefinition.from_frame(frame, device_configs)
-            self.reservoirs.configure(self.current_system_topology(), device_configs)
-            first = experiments[0] if isinstance(experiments[0], ExperimentDefinition) else ExperimentDefinition.from_frame(experiments[0], device_configs)
-            self.reservoirs.check(first, end_hold_s=5.)
+                validated = ExperimentDefinition.from_frame(frame, device_configs, name=f"Experiment {index}")
+                for profile in validated.profiles:
+                    config = device_configs[profile.device_id]
+                    calibration = config.get("pump_calibration")
+                    if (config["type"] == "ismatec" and calibration and calibration.get("output_unit") != "RPM"
+                            and any(point.target for point in profile.points)):
+                        raise ValueError(f"Review the saved calibration for {profile.device_id} and apply an RPM calibration.")
+                definitions.append(experiment if isinstance(experiment, ExperimentDefinition) else validated)
+            from dataclasses import replace
+            from experiment.pump_corrections import apply_pump_corrections, with_reservoir_densities
+            topology = self.current_system_topology()
+            device_configs = with_reservoir_densities(device_configs, topology)
+            experiments = tuple(apply_pump_corrections(experiment, device_configs) for experiment in definitions)
+            if campaign is not None:
+                campaign = replace(campaign, experiments=experiments)
+            self.reservoirs.configure(topology, device_configs)
+            self.reservoirs.check(experiments[0], end_hold_s=5.)
             if campaign is not None:
                 if any(not is_monitor_only(device_configs[key]) for key in campaign.monitor_device_ids):
                     raise ValueError("Only read-only devices may be added as campaign monitors")
@@ -3068,7 +3102,6 @@ class ControlPanel(QWidget):
         self.disconnect_all_button.setEnabled(True)
     
         self.reset_button.setEnabled(True)
-        self.load_config_button.setEnabled(True)
         self.new_connection_button.setEnabled(True)
     
         # --------------------------------------------------
@@ -3081,7 +3114,6 @@ class ControlPanel(QWidget):
             "[CONTROL PANEL] "
             "Connection worker completely stopped."
         )
-        self.load_config_button.setEnabled(True)
         
     @Slot(str, bool, str)
     def _connection_device_finished(
@@ -3157,7 +3189,6 @@ class ControlPanel(QWidget):
             self.connect_all_button.setEnabled(False)
             self.disconnect_all_button.setEnabled(False)
             self.reset_button.setEnabled(False)
-            self.load_config_button.setEnabled(False)
             self.new_connection_button.setEnabled(False)
         
             self.global_status.setText(
@@ -3262,7 +3293,6 @@ class ControlPanel(QWidget):
                 self.connect_all_button.setEnabled(True)
                 self.disconnect_all_button.setEnabled(True)
                 self.reset_button.setEnabled(True)
-                self.load_config_button.setEnabled(True)
                 self.new_connection_button.setEnabled(True)
         
                 self.update_global_status()

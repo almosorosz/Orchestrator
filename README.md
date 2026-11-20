@@ -288,11 +288,10 @@ CSV exports. The deliberate real Huber `start()` behavior remains unchanged.
 3. Select **Assign devices / preview DoE** under Environmental variables. Active roles are marked `*`.
    Assign each role to a distinct compatible device; inactive zero-only roles may
    remain unassigned. Device IDs, real/simulated mode and connection status are shown.
-4. Ismatec uses the fixed **1 g/mL** assumption: generated **g/hour** becomes
-   **mL/min** via `g/h ÷ 60`; no density entry is required. Masterflex
-   profiles use the existing named role calibration to convert g/hour to RPM.
-   Seed pumping is already RPM and supports Masterflex; no implicit RPM-to-flow
-   conversion is made. Temperature and stirrer targets retain °C and RPM.
+4. Real Ismatec and Masterflex devices take **RPM** commands. Assign a pump with
+   the appropriate mass-flow calibration to generate its RPM targets. A Masterflex
+   can also use its existing role calibration. The simulated Ismatec has a
+   synthetic RPM-to-delivery conversion. Temperature and stirrer targets retain °C and RPM.
 5. Select **Preview / validate**. Review experiment durations and target ranges.
    Source hours become seconds; return-pump segments from the existing generator
    are retained. Exact duplicate boundary rows are coalesced; conflicting targets
@@ -319,7 +318,7 @@ the DoE assignment dialog. Select a pump and **Load CSV…**. Choose the header 
 file format and column mapping, then **Preview / validate → Apply calibration**.
 
 Flow/target tables use measured flow in **g/h** and pump targets in **RPM** for
-Masterflex or **mL/min** for Ismatec. For example:
+both Masterflex and Ismatec. For example:
 
 ```csv
 flow_g_h,rpm
@@ -334,13 +333,21 @@ The loader estimates flow from the mass slope of each constant-target segment.
 Loaded points are interpolated linearly; targets above the calibrated flow range
 are rejected rather than extrapolated. Device target limits are still enforced.
 
+**Define pump profile…** plots mass against elapsed time for each measured setting
+and lets you review which runs to include. For an Ismatec, confirm the recorded
+numbers were RPM before applying the curve. The definer can also preview mL/min
+logs. For a dry-seed CSV, choose the measured fixed RPM and keep the elapsed
+empty-tube segment when it is part of the measurements. For a liquid **Mass
+addition** in Experiment Definition, fit the rate to the stage duration or pick a
+calibrated RPM and let CrystalLoop calculate the pump-on time.
+
 The calibration points, source filename and checksum are saved with the device
 configuration and setup preset. The original CSV is not required after loading.
 Custom calibrations apply to assigned DoE mass-flow profiles. Manual profiles and
 seed profiles already expressed in device units are not converted again. Changing
 a calibration after assignment requires previewing/applying assignments again.
-**Use built-in conversion** restores the existing Masterflex role calibration or
-the Ismatec fixed 1 g/mL conversion. Only stirrers record and plot torque; pump
+**Remove selected calibration** restores the existing Masterflex role conversion.
+Real Ismatec DoE doses still require an RPM curve. Only stirrers record and plot torque. Pump
 torque fields in older recordings are omitted from campaign plots.
 
 **Export generated DoE CSV** in Settings creates a new `doe_<id>` subfolder with
@@ -534,7 +541,7 @@ Read-only probes/scales have no target range. Valve targets remain binary.
 | Type | Default target range | Minimum nonzero |
 |---|---|---|
 | Masterflex | −300 to 300 RPM | 0 |
-| Ismatec | −1000 to 1000 mL/min | 0 |
+| Ismatec | −1000 to 1000 RPM | 0 |
 | Huber | −50 to 200 °C | 0 |
 | JKem | 0 to 800 RPM | 0 |
 | Valve | 0 or 1 | 0 |
@@ -594,13 +601,15 @@ and **Seeding**, as well as Charging, Experiment, Equilibration, Wait and cleanu
 For manual profiles, use **Control Panel → Run stages…** before generating each experiment.
 Save/load configuration and full setup presets preserve the stage labels and intervals.
 In **Automatic loop setup → Experiment period**, keep the definition's Experiment and
-Equilibration period, select adjacent named run stages, or enter manual start/end seconds
-in Recording. The selection applies to both BO and IMED. Sampled durations resolve to
+Equilibration period, select adjacent named run stages, or choose **Manual start / end**
+to enter elapsed seconds. The selection applies to both BO and IMED. Sampled durations resolve to
 each experiment's own boundaries. Modeling time starts at zero at the selected start;
-full recordings and stage-change logs still include the entire run. Follow-up recipes
-retain the first starting run's preparation and cleanup around the proposed modeling
-period. Supply process masses, concentration and seed information for the start of that
-period, after any charging/dissolution/seeding outside it.
+full recordings and stage-change logs still include the entire run. For staged follow-ups,
+select only the stages the recommendation can change. The other stages replay the first
+starting run's commands and durations, including heating, charging, seeding and cleanup.
+If the selected period changes duration, later stages move with its end. The selected
+period sets the follow-up start time. Supply process masses, concentration and seed
+information for the beginning of that period.
 
 ### Shared physical inputs, average mixing and inventories
 

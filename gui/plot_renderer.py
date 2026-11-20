@@ -8,7 +8,7 @@ class OriginalPlotRenderer(FigureCanvas):
     TELEMETRY_FIELDS = {
         "masterflex": [("speed_rpm", "RPM")],
         "jkem": [("speed_rpm", "RPM")],
-        "ismatec": [("flow", "Flow")],
+        "ismatec": [("flow", "RPM")],
         "huber": [("setpoint", "Setpoint"),("temp_internal", "Jacket"),("temp_external", "Process")],
         "mettler": [("weight_g", "Mass")],
         "nidaq_valve": [("measured_voltage", "Voltage")],

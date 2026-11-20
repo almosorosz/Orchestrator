@@ -205,9 +205,15 @@ def _predict(parameters, experiment, process, solubility, settings, *, cancelled
 
 
 def _trial(candidate, *, baseline, indices, condition_keys, experiment, process, solubility,
-           settings, cancelled=None):
+           settings, cancelled=None, doe_recipe=None, doe_keys=()):
     parameters = baseline.copy()
     parameters[indices] = candidate[:len(indices)]
+    if doe_recipe is not None:
+        try:
+            proposed, proposed_process = doe_recipe.apply(dict(zip(doe_keys, candidate[len(indices):])))
+            return _predict(parameters, proposed, proposed_process, solubility, settings, cancelled=cancelled), ""
+        except TRIAL_ERRORS as error:
+            return None, str(error)
     conditions = dict(zip(condition_keys, candidate[len(indices):]))
     experiment, process = dict(experiment), dict(process)
     temperature = np.asarray(experiment["TemperatureData"], dtype=float).copy()
@@ -299,7 +305,7 @@ def _numbered_trial(item, *, trial, cancelled):
 
 def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_parameters=True,
               conditions=None, workers=1, simulated_profile=None, cancelled=None, progress=None,
-              draw_progress=None, retain_partial=False):
+              draw_progress=None, retain_partial=False, doe_conditions=None):
     if not 2 <= samples <= 10000:
         raise ValueError("Use between 2 and 10000 samples.")
     if progress is not None:
@@ -307,7 +313,7 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
     conditions = conditions or {}
     if "volume_factor" in conditions and "volume" not in editable_groups(case, model_index, simulated_profile):
         raise ValueError("Initial volume can vary in SA only when it was varied in the initial campaign.")
-    if not use_parameters and not conditions:
+    if not use_parameters and not conditions and not doe_conditions:
         raise ValueError("Select parameter uncertainty, operating conditions, or both.")
     if ("stirring_factor" in conditions or "stirring_rpm" in (simulated_profile or {})):
         if "stirring" not in editable_groups(case, model_index, simulated_profile):
@@ -328,10 +334,39 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
         if (key not in known or len(bounds) != 2 or not np.isfinite(bounds).all()
                 or bounds[0] >= bounds[1] or (key != "temperature_offset" and bounds[0] <= 0)):
             raise ValueError(f"Enter valid increasing uncertainty bounds for {key}.")
-    operating_draws = np.column_stack([rng.uniform(*conditions[key], samples) for key in keys]) if keys else np.empty((samples, 0))
-    draws = np.column_stack((parameter_draws, operating_draws))
-    names = [PARAMETERS[index][0] for index in indices] + [dict((item[0], item[1]) for item in CONDITIONS)[key] for key in keys]
     experiment, process = prediction_inputs(case, experiment_index, simulated_profile)
+    doe_recipe = None
+    doe_keys = []
+    categorical = []
+    operating = [rng.uniform(*conditions[key], samples) for key in keys]
+    names = [PARAMETERS[index][0] for index in indices] + [dict((item[0], item[1]) for item in CONDITIONS)[key] for key in keys]
+    if doe_conditions is not None:
+        from experiment.doe_decisions import LABELS, case_decisions
+        from .doe_design import DoeRecipe, doe_controls, imed_doe_groups, seed_template
+
+        space = case_decisions(case)
+        if space is None or conditions:
+            raise ValueError("Select operating inputs from the loaded DoE for this analysis.")
+        base = dict(case["ExpData"][experiment_index])
+        if simulated_profile:
+            commands = base.get("CommandedProfiles", {})
+            base["CommandedProfiles"] = {key: value for key, value in commands.items() if key not in simulated_profile}
+        groups = imed_doe_groups(space, [model], base, process)
+        if set(doe_conditions) - groups:
+            raise ValueError("One or more selected inputs are fixed in the DoE or the kinetic model.")
+        controls = doe_controls(space, set(doe_conditions))
+        doe_recipe = DoeRecipe({**base, **experiment}, process, space, controls, seed_template=seed_template(case))
+        for key, (low, high, discrete) in controls.items():
+            doe_keys.append(key)
+            if discrete:
+                categorical.append((len(names), key))
+                operating.append(rng.integers(int(low), int(high) + 1, samples))
+                names.append(f"{LABELS[key]} choice")
+            else:
+                operating.append(rng.uniform(low, high, samples))
+                names.append(LABELS[key])
+        experiment, process = doe_recipe.apply({})
+    draws = np.column_stack((parameter_draws, *operating))
     settings = case.get("pbmsetting", {})
     if settings.get("Numerics") == "jax" and workers > 1:
         raise ValueError("Use one worker with the JAX PBM backend.")
@@ -339,7 +374,8 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
         progress("Simulating the nominal model…")
     nominal = _predict(baseline, experiment, process, case["Solubility"], settings, cancelled=cancelled)
     trial = partial(_trial, baseline=baseline, indices=indices, condition_keys=keys,
-                    experiment=experiment, process=process, solubility=case["Solubility"], settings=settings)
+                    experiment=experiment, process=process, solubility=case["Solubility"], settings=settings,
+                    doe_recipe=doe_recipe, doe_keys=doe_keys)
     predictions, concentrations, counts, valid, failures = [], [], [], [], []
     completed_draws = {}
 
@@ -405,17 +441,42 @@ def propagate(case, model_index, experiment_index, *, samples=100, seed=0, use_p
     calibration = fbrm_calibration(nominal, experiment)
     count_scale = calibration["scale"] if calibration["scaled"] else 1.
     outputs = np.column_stack((predictions[:, :, -1], concentrations[:, -1], counts[:, -1]*count_scale))
-    prcc = partial_rank_correlations(draws[valid], outputs)
+    if categorical:
+        categorical_indices = {index for index, _ in categorical}
+        continuous = [index for index in range(draws.shape[1]) if index not in categorical_indices]
+        valid_inputs = draws[valid]
+        dummies = []
+        for index in categorical_indices:
+            levels = np.unique(valid_inputs[:, index])
+            dummies.extend(valid_inputs[:, index] == level for level in levels[1:])
+        prcc = np.full((draws.shape[1], outputs.shape[1]), np.nan)
+        if continuous:
+            predictors = np.column_stack((valid_inputs[:, continuous], *dummies))
+            prcc[continuous] = partial_rank_correlations(predictors, outputs)[:len(continuous)]
+    else:
+        prcc = partial_rank_correlations(draws[valid], outputs)
+    choice_effects = []
+    for index, key in categorical:
+        for value in np.unique(draws[valid, index]):
+            mask = draws[valid, index] == value
+            subset = outputs[mask]
+            count = np.isfinite(subset).sum(axis=0)
+            averages = np.divide(np.nansum(subset, axis=0), count,
+                                 out=np.full(subset.shape[1], np.nan), where=count > 0)
+            choice = doe_recipe.levels[key][int(value) - 1] if key == "seed" else int(value)
+            choice_effects.append((names[index], choice, int(mask.sum()), *averages))
     times, observed = observed_percentiles(experiment, nominal["time"][-1])
     request = {"samples": samples, "seed": seed, "use_parameters": use_parameters,
                "conditions": conditions, "workers": workers}
     if simulated_profile:
         request["simulated_profile"] = simulated_profile
+    if doe_conditions is not None:
+        request["doe_conditions"] = list(doe_keys)
     return {"time": nominal["time"], "nominal": nominal, "predictions": predictions,
             "concentrations": concentrations, "counts": counts, "fbrm": calibration,
             "inputs": draws, "input_names": names,
             "valid": valid, "failure_messages": failures, "indices": indices,
-            "parameter_mean": baseline[indices], "covariance": covariance, "prcc": prcc,
+            "parameter_mean": baseline[indices], "covariance": covariance, "prcc": prcc, "choice_effects": choice_effects,
             "prcc_diagnostics": prcc_diagnostics(draws[valid], outputs),
             "observation_time": dict(zip(("D10", "D50", "D90"), times)),
             "observed": dict(zip(("D10", "D50", "D90"), observed)),

@@ -31,6 +31,63 @@ PRESET = Path(__file__).resolve().parents[1] / "examples/configurations/imed_val
 
 
 class AdaptiveLoopTests(unittest.TestCase):
+    def test_imed_accepts_size_only_recording_for_a_cooling_only_campaign(self):
+        from experiment.adaptive_loop import default_setup
+        from experiment.doe_campaign import ProfileAssignment
+        from experiment.models import Campaign, DeviceProfile, ExperimentDefinition, ProfilePoint
+        from gui.setup_readiness import loop_readiness
+        from imed_python.demo_campaign import validation_model
+
+        setup = default_setup()
+        _, _, process, solubility, mesh = model_inputs(False)
+        setup["process"].update(process, InitialConcentration=.1)
+        setup["channels"] = {"D10": "SIZE10.value", "D50": "SIZE50.value", "D90": "SIZE90.value",
+                             "Concentration": "C1.value", "AS scale": "W_AS.weight_g"}
+        setup["imed"].update(use_doe_decisions=False, conditions={
+            "batch": 10., "temperature": [25., 20.], "temperature_rates": [0., 2.],
+            "liquid_masses": [68., 0.], "concentration": .1, "final_anti": .01,
+            "antisolvent_rates": [0., 1.], "seed_bounds": [0., 0.],
+        })
+        monitors = ("SIZE10", "SIZE50", "SIZE90")
+        configs = {"TEMP": {"type": "huber"}, **{tag: {"type": "opcua"} for tag in monitors}}
+        temp = DeviceProfile("TEMP", (ProfilePoint(0., 25.), ProfilePoint(10., 20.)), "linear", "°C")
+        campaign = Campaign("Cooling only", (ExperimentDefinition("Cooling 1", (temp,)),), monitor_device_ids=monitors)
+        case = {"Solubility": solubility, "ModelParameter": [validation_model()], "pbmsetting": mesh}
+        roles = {"T": "TEMP"}
+        context = {"campaign": campaign, "roles": roles, "configs": configs, "monitors": monitors,
+                   "connected": set(configs), "case": case}
+
+        def start():
+            return AdaptiveLoop("imed", setup, campaign, configs, set(configs), None,
+                                [ProfileAssignment("T", "TEMP")], case, size_term="D10 D50 D90")
+
+        with self.assertRaisesRegex(ValueError, "positive weight"):
+            start()
+        case["peweights"] = {"W1": 0., "W2": 0., "W3": 1.}
+        checks = {item.key: item for item in loop_readiness(setup, "imed", context)}
+        self.assertTrue(checks["pe"].ready)
+        self.assertTrue(checks["recording"].ready, checks["recording"].detail)
+        self.assertIn("No antisolvent feed", checks["recording"].detail)
+        self.assertTrue(checks["inputs"].ready, checks["inputs"].detail)
+        self.assertTrue(checks["design"].ready, checks["design"].detail)
+        session = start()
+        self.assertTrue(session.setup["recording"]["no_feed"])
+        self.assertEqual(session.weights, [0., 0., 1.])
+        self.assertFalse(session.mapping["Concentration"])
+        self.assertFalse(session.mapping["AS scale"])
+        self.assertEqual(setup["channels"]["Concentration"], "C1.value")
+        setup["process"].pop("InitialConcentration")
+        with self.assertRaisesRegex(ValueError, "Enter Initial concentration"):
+            start()
+        setup["process"]["InitialConcentration"] = .1
+        case["peweights"]["W2"] = 1.
+        with self.assertRaisesRegex(ValueError, r"Concentration \(C1\.value\)"):
+            start()
+        setup["channels"] = {"FBRM": "SIZE10.value"}
+        setup["recording"]["no_feed"] = True
+        case["peweights"] = {"W1": 1., "W2": 0., "W3": 0.}
+        self.assertEqual(start().weights, [1., 0., 0.])
+
     def setup_dashboard(self, root):
         window = MainWindow()
         self.addCleanup(self.close_window, window)
@@ -104,7 +161,7 @@ class AdaptiveLoopTests(unittest.TestCase):
             finally:
                 self.doCleanups()
 
-    def check_five_run_preset(self, backend, source="doe", *, load_from_control_panel=False):
+    def check_five_run_preset(self, backend, source="doe", *, load_from_control_panel=False, final_size_samples=1):
         with TemporaryDirectory(dir=Path.cwd()) as directory:
             root = Path(directory)
             window = MainWindow()
@@ -121,6 +178,11 @@ class AdaptiveLoopTests(unittest.TestCase):
             try:
                 suffix = "setup" if source == "doe" else "control_panel"
                 preset = PRESET.with_name(f"{backend}_five_run_{suffix}.json")
+                if final_size_samples > 1:
+                    data = json.loads(preset.read_text(encoding="utf-8"))
+                    data["environment"]["pbm_final_size_samples"] = str(final_size_samples)
+                    preset = root / "setup_with_size_average.json"
+                    preset.write_text(json.dumps(data), encoding="utf-8")
                 with patch("app.paths.DATA_DIR", root), \
                      patch("MAIN_WINDOW.QFileDialog.getOpenFileName", return_value=(str(preset), "")), \
                      patch("MAIN_WINDOW.QMessageBox.warning") as warning, \
@@ -131,6 +193,7 @@ class AdaptiveLoopTests(unittest.TestCase):
                         window.load_setup_preset()
                 warning.assert_not_called()
                 critical.assert_not_called()
+                self.assertEqual(window.settings_page.pbm_final_size_samples.value(), final_size_samples)
                 self.assertIs(window.stack.currentWidget(), window.dashboard_page)
                 self.assertTrue(all(device.simulated and device.is_connected for device in window.control_panel.hardware.values()))
                 if source == "doe":
@@ -224,6 +287,9 @@ class AdaptiveLoopTests(unittest.TestCase):
                 messages = "\n".join(message for _, message in logs)
                 self.assertIn("Saved the", messages)
                 self.assertIn("Launched automatic follow-up", messages)
+                if final_size_samples > 1:
+                    usage = f"used {final_size_samples} of {final_size_samples} requested D10 / D50 / D90 samples"
+                    self.assertEqual(messages.count(usage), 6)
                 self.assertIn("Control Panel profiles" if source != "doe" else "Settings DoE", messages)
                 if backend == "bo":
                     self.check_execute_bo_proposal(window, output, logs)
@@ -258,7 +324,7 @@ class AdaptiveLoopTests(unittest.TestCase):
         self.assertEqual(len(json.loads(imported.read_text())["runs"]), 7)
 
     def test_load_and_start_bo_five_run_preset(self):
-        self.check_five_run_preset("bo")
+        self.check_five_run_preset("bo", final_size_samples=3)
 
     def test_load_and_start_imed_five_run_preset(self):
         self.check_five_run_preset("imed")
@@ -414,6 +480,10 @@ class AdaptiveLoopTests(unittest.TestCase):
                 inspect_preview(dialog)
                 dialog.reject()
                 self.assertNotIn("SolvMass", settings.loop_setup["process"])
+                dialog = settings.edit_loop_setup()
+                dialog.preview_source.setCurrentIndex(dialog.preview_source.findData("doe"))
+                dialog.accept()
+                self.assertIn("temperature", settings.loop_setup["doe_decisions"]["traces"])
             finally:
                 self.doCleanups()
 
@@ -436,6 +506,8 @@ class AdaptiveLoopTests(unittest.TestCase):
                             "pyfitsettings": {"global_iterations": 0, "population_size": 5, "local_evaluations": 40}}
                     if count > 1:
                         window.imed_page.panel.restore_setup_settings(case)
+                    else:
+                        window.imed_page.panel.case["objweightfactor"] = case["objweightfactor"]
                     seed = float(process["SeedMass"])
                     settings.loop_setup = json.loads(PRESET.with_name("imed_validation_loop.json").read_text())
                     self.assertAlmostEqual(settings.loop_setup["imed"]["conditions"]["seed_bounds"][0], seed)

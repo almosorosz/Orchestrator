@@ -100,12 +100,17 @@ def validate_recipe(recipe):
                 raise ValueError("Choose a valid end for each action span.")
             if action["kind"] not in {"Hold", "Ramp", "Dose"} or (role == "valve_state" and action["kind"] != "Hold"):
                 raise ValueError("Valve actions must hold a binary state. Other devices support holds and ramps.")
-            if action["kind"] == "Dose" and ROLES[role].unit != "g/h":
-                raise ValueError("Mass additions need a solution, solvent, antisolvent or cleaning pump line.")
+            if action["kind"] == "Dose" and ROLES[role].unit != "g/h" and role != "seed":
+                raise ValueError("Mass additions need a liquid or seed pump line.")
             if action["kind"] == "Dose":
                 amount = action["end"]
                 if not amount.get("equal_previous") and (amount["value"] if amount["mode"] == "Fixed" else amount["min"]) < 0:
                     raise ValueError("A mass addition must be nonnegative.")
+                setting = action.get("dose_setting")
+                if setting is not None and (role == "seed" or not isinstance(setting, dict)
+                        or setting.get("unit") not in {"RPM", "mL/min"}
+                        or type(setting.get("target")) not in (int, float) or not isfinite(setting["target"]) or setting["target"] <= 0):
+                    raise ValueError("Choose a positive calibrated liquid pump setting.")
             if role == "T" and action.get("control_mode") not in {"Jacket", "Process"}:
                 raise ValueError("Choose jacket or internal vessel (Process) temperature control.")
             if action.get("until_stage") and (index >= len(stages) or action["until_stage"] not in stage_ids
@@ -185,11 +190,12 @@ def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=
     for lane in lanes:
         schedules[lane["id"]] = [(begin, horizon if action and action.get("until_end") else end, action, prefix, name)
                                   for begin, end, action, prefix, name in schedules[lane["id"]]]
-    traces, modes = {}, []
+    traces, modes, seed_doses, liquid_doses = {}, [], [], []
     for lane in lanes:
         current = lane["initial"]
         x, y = [0.], [current]
         last_mode = None
+        last_seed_dose = 0.
         for begin, end, action, prefix, name in schedules[lane["id"]]:
             if action:
                 def resolved(key):
@@ -201,11 +207,25 @@ def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=
                         result *= (end - begin) / 3600
                     values[path] = float(result)
                     return result
-                finish = resolved("end")
-                if action["kind"] == "Dose":
+                if action["kind"] == "Dose" and lane["role"] == "seed":
+                    path = f"{prefix}.{lane['id']}.end"
+                    mass = last_seed_dose if action["end"].get("equal_previous") else values[path]
+                    values[path] = last_seed_dose = float(mass)
+                    seed_doses.append({"lane": lane["id"], "name": name, "start_s": float(begin),
+                                       "end_s": float(end), "mass_g": float(mass)})
+                    finish = 0.  # Assigned pump calibration supplies the pulse at device preview.
+                else:
+                    finish = resolved("end")
+                if action["kind"] == "Dose" and lane["role"] != "seed":
                     if finish < 0:
                         raise ValueError(f"{name}: a mass addition cannot inherit a negative pump flow.")
-                    finish *= 3600 / (end - begin)
+                    if setting := action.get("dose_setting"):
+                        limit = 60 * (system.AS_add_max if lane["role"] == "AS" else system.sol_add_max)
+                        liquid_doses.append({"lane": lane["id"], "name": name, "start_s": float(begin), "end_s": float(end),
+                                             "mass_g": float(finish), "setting": dict(setting), "limit_g_h": float(limit)})
+                        finish = 0.  # Resolve the selected device's calibrated pulse during assignment.
+                    else:
+                        finish *= 3600 / (end - begin)
                 start = resolved("start") if action["kind"] == "Ramp" else finish
             else:
                 start = finish = current if lane["role"] == "T" or lane["role"].startswith("stirring") else 0.
@@ -254,6 +274,10 @@ def compile_recipe(recipe, values, system, *, check_limits=True, limit_warnings=
         traces[lane["id"]] = (np.asarray(x), np.asarray(y))
     union = np.unique(np.concatenate([trace[0] for trace in traces.values()]))
     frame = pd.DataFrame({"t": union / 3600., **{key: np.interp(union, *trace) for key, trace in traces.items()}})
+    if seed_doses:
+        frame.attrs["seed_doses"] = seed_doses
+    if liquid_doses:
+        frame.attrs["liquid_doses"] = liquid_doses
     selected = definition_window(recipe_run_stages(recipe, values))
     window = list(selected) if selected else None
     return frame, modes, window
@@ -345,6 +369,10 @@ class RecipeCreator(ExperimentCreator):
             self.parameter_snapshots[name] = {"control_modes": modes, "model_window": window,
                                                "run_stages": [vars(stage) for stage in recipe_run_stages(self.recipe, values)],
                                                **{key: {"value": value} for key, value in values.items()}}
+            if seed_doses := frame.attrs.get("seed_doses"):
+                self.parameter_snapshots[name]["seed_doses"] = seed_doses
+            if liquid_doses := frame.attrs.get("liquid_doses"):
+                self.parameter_snapshots[name]["liquid_doses"] = liquid_doses
         self.actually_sampled_experiments = len(points)
 
     def plot_doe_experiments(self):

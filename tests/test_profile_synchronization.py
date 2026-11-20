@@ -188,7 +188,7 @@ class ProfileSynchronizationTests(unittest.TestCase):
             self.assertEqual(timeline_axes[0].lines[0].get_color(), legacy_axes[0].lines[0].get_color())
             self.assertEqual(timeline_axes[0].get_xlabel(), legacy_axes[0].get_xlabel())
             self.assertEqual(timeline_axes[1].lines[0].get_linestyle(), legacy_axes[1].lines[0].get_linestyle())
-            self.assertIn("mL/min", manual_axes[1].get_ylabel())
+            self.assertIn("RPM", manual_axes[1].get_ylabel())
             self.assertIn("g/h", timeline_axes[1].get_ylabel())
             self.assertEqual(panel.experiments[0]["TEMP"].iloc[-1], 24.)
             preview.close()

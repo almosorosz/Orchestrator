@@ -1,6 +1,7 @@
 """Scoring functions from the IMED model-discrimination and D-optimal objectives."""
 from functools import partial
-from itertools import combinations
+from itertools import combinations, product
+from math import prod
 
 import numpy as np
 from scipy.special import ndtri
@@ -75,20 +76,20 @@ def parameter_samples(model, sample_count, seed=0):
     return fitted + ndtri(unit) @ factor.T
 
 
-def d_optimal_log_score(model, experiment, process, solubility, settings, enabled_terms, samples):
+def d_optimal_log_score(model, experiment, process, solubility, settings, enabled_terms, samples, *, size_term="CSD"):
     """Log determinant of the Fisher matrix using IMED's relative sensitivities."""
     parameters = model_parameters(model)
     estimated = np.flatnonzero(np.asarray(model["paraset"])[:, 0] == 1)
     active = np.flatnonzero(enabled_terms)
     samples = np.asarray(samples, dtype=float)
-    if (len(enabled_terms) != 3 or len(active) < 2 or not len(estimated)
+    if (len(enabled_terms) != 3 or not len(active) or not len(estimated)
             or samples.ndim != 2 or samples.shape[1] != len(estimated)
             or not len(samples) or not np.isfinite(samples).all()):
-        raise ValueError("D-optimal design requires at least two response terms and valid parameter samples")
+        raise ValueError("D-optimal design requires an enabled response and valid parameter samples")
 
     def evaluate(values):
         outputs = simulate(values, experiment, process, solubility, settings)
-        return responses(outputs, process, settings, active, "CSD")
+        return responses(outputs, process, settings, active, size_term)
 
     base = evaluate(parameters)
     columns = []
@@ -175,7 +176,10 @@ def _recipe_cost(score, proposed, process):
 def _design_trial(candidate, *, recipe, score, cancelled):
     if cancelled():
         raise InterruptedError("Experiment design cancelled")
-    return _recipe_cost(score, *recipe(candidate))
+    try:
+        return _recipe_cost(score, *recipe(candidate))
+    except TRIAL_ERRORS:
+        return np.inf
 
 
 def recipe_space(conditions):
@@ -188,7 +192,7 @@ def recipe_space(conditions):
     if (batch <= 0 or solvent <= 0 or antisolvent < 0 or not 0 <= concentration < 1
             or not 0 <= final_anti < 1 or not 0 <= seed_bounds[0] <= seed_bounds[1]):
         raise ValueError("Check batch time, starting masses, concentration, and seed bounds")
-    add = final_anti / (1 - final_anti) * solvent - antisolvent
+    add = 0. if conditions.get("no_feed") else final_anti / (1 - final_anti) * solvent - antisolvent
     if add < -1e-10:
         raise ValueError("Final antisolvent fraction is below the initial fraction")
     add = max(0.0, add)
@@ -216,29 +220,53 @@ def optimize_recipe(experiment, process, conditions, score, *, iterations=5, pop
     """Optimize a recipe. Parallel searches require a picklable score callable."""
     from scipy.optimize import differential_evolution
 
-    add, bounds = recipe_space(conditions)
-    recipe = partial(_candidate_recipe, experiment=experiment, process=process,
-                     conditions=conditions, addition=add)
+    integrality = None
+    if (doe := conditions.get("doe_search")) is not None:
+        from .doe_design import DoeRecipe
+
+        controls = doe["controls"]
+        recipe = DoeRecipe(experiment, process, doe["space"], controls,
+                           seed_template=doe.get("seed_template"), final_hold_s=doe.get("final_hold_s", 0.)).candidate
+        bounds = [(low, high) for low, high, _ in controls.values()]
+        integrality = [bool(discrete) for _, _, discrete in controls.values()]
+    else:
+        add, bounds = recipe_space(conditions)
+        recipe = partial(_candidate_recipe, experiment=experiment, process=process,
+                         conditions=conditions, addition=add)
     best = None
 
     def evaluate(candidate):
         nonlocal best
         if cancelled is not None and cancelled():
             raise InterruptedError("Experiment design cancelled")
-        proposed, design_process = recipe(candidate)
+        try:
+            proposed, design_process = recipe(candidate)
+        except TRIAL_ERRORS:
+            return np.inf
         cost = _recipe_cost(score, proposed, design_process)
         if np.isfinite(cost) and (best is None or -cost > best[0]):
             best = -cost, proposed, design_process
         return cost
 
-    middle = np.mean(bounds, axis=1)
+    middle = np.mean(bounds, axis=1) if bounds else np.empty(0)
+    if integrality is not None and bounds:
+        middle[integrality] = np.rint(middle[integrality])
     free = sum(high > low for low, high in bounds)
+    choices = None
+    if integrality and all(integrality) and workers == 1:
+        count = prod(int(high - low) + 1 for low, high in bounds)
+        if count <= max(population, min(128, population * (iterations + 1))):
+            choices = product(*(range(int(low), int(high) + 1) for low, high in bounds))
     try:
         if not free:
             evaluate(middle)
+        elif choices is not None:
+            for candidate in choices:
+                evaluate(candidate)
         else:
             popsize = max(5, int(np.ceil(population / free)))
-            options = dict(x0=middle, maxiter=iterations, popsize=popsize, polish=False, seed=0)
+            options = dict(x0=middle, maxiter=iterations, popsize=popsize, polish=False, seed=0,
+                           integrality=integrality)
             if workers == 1:
                 differential_evolution(evaluate, bounds, **options)
             else:

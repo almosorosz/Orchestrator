@@ -35,6 +35,24 @@ def number(value):
     return field
 
 
+def dose_setting_choice(lane, configs, current=None):
+    field = QComboBox()
+    field.addItem("Fit rate to the stage duration", None)
+    calibration = configs.get(lane.get("device_id"), {}).get("pump_calibration")
+    if calibration:
+        unit = calibration["output_unit"]
+        for _, target in calibration["points"]:
+            if target > 0:
+                field.addItem(f"{target:g} {unit} · calculate pump-on time", {"target": float(target), "unit": unit})
+    if current is not None and field.findData(current) < 0:
+        field.addItem(f"{current['target']:g} {current['unit']} · saved setting", current)
+    field.setCurrentIndex(max(0, field.findData(current)))
+    field.setToolTip("Pick a calibrated setting to calculate the time for the requested dose. The pump stops when the dose is complete.")
+    if not calibration and current is None:
+        field.setToolTip("Assign a calibrated pump to choose a fixed RPM setting.")
+    return field
+
+
 class ParameterTable(QTableWidget):
     def __init__(self, entries, parent=None, temperature=False, time_unit="s", allow_previous=False, previous_hint=None):
         allow_previous = allow_previous or temperature
@@ -458,7 +476,7 @@ class RecipeEditor(QWidget):
             index = names.index(chosen)
         from gui.device_profile_dialog import DeviceProfileDialog
         lane = self.recipe["lanes"][index]
-        dialog = DeviceProfileDialog(lane, self.recipe["stages"], self, time_unit=self.time_unit)
+        dialog = DeviceProfileDialog(lane, self.recipe["stages"], self, time_unit=self.time_unit, configs=self.configs)
         if dialog.exec():
             if dialog.enabled.isChecked():
                 lane["profile"] = dialog.sections
@@ -486,12 +504,13 @@ class RecipeEditor(QWidget):
             return
         if (kind in {"Open valve", "Close valve"} and lane["role"] != "valve_state"
                 or kind == "Ramp" and lane["role"] == "valve_state"
-                or kind == "Mass addition" and ROLES[lane["role"]].unit != "g/h"):
+                or kind == "Mass addition" and ROLES[lane["role"]].unit != "g/h" and lane["role"] != "seed"):
             self.notice.setText("Choose a compatible action for this device line.")
             return
         action = {"kind": "Dose" if kind == "Mass addition" else "Ramp" if kind == "Ramp" else "Hold",
                   "name": kind, "start": parameter(lane["initial"]),
-                  "end": parameter(1. if kind == "Open valve" else 0. if kind == "Close valve" else lane["initial"]),
+                  "end": parameter(1. if kind == "Open valve" else 0. if kind == "Close valve"
+                                   or (kind == "Mass addition" and lane["role"] == "seed") else lane["initial"]),
                   "control_mode": "Process"}
         action["start"]["equal_previous"] = kind == "Ramp"
         action["end"]["equal_previous"] = kind == "Equilibration"
@@ -524,10 +543,19 @@ class RecipeEditor(QWidget):
         span.setCurrentIndex(max(0, span.findData("__end__" if action.get("until_end") else action.get("until_stage", stage_id))))
         form.addRow("Action lasts until", span)
         unit = "g" if action["kind"] == "Dose" else ROLES[lane["role"]].unit
-        entries = [(f"End ({unit})", action["end"])]
+        seed_dose = action["kind"] == "Dose" and lane["role"] == "seed"
+        setting = None
+        if action["kind"] == "Dose" and not seed_dose:
+            setting = dose_setting_choice(lane, self.configs, action.get("dose_setting"))
+            form.addRow("Pump setting", setting)
+        if seed_dose and (calibration := self.configs.get(lane.get("device_id"), {}).get("seed_calibration")):
+            form.addRow("Calibrated seed speed", QLabel(f"{calibration['rpm']:g} RPM"))
+        label = "Dry seed dose (g)" if seed_dose else "Liquid dose (g)" if action["kind"] == "Dose" else f"End ({unit})"
+        entries = [(label, action["end"])]
         if action["kind"] == "Ramp":
             entries.insert(0, (f"Start ({unit})", action["start"]))
         table = ParameterTable(entries, allow_previous=True, previous_hint=(
+            "Repeat the previous dry seed dose." if seed_dose else
             "Keep the preceding pump flow; the mass for this section is calculated from its duration."
             if action["kind"] == "Dose" else None))
         layout.addWidget(table)
@@ -540,6 +568,11 @@ class RecipeEditor(QWidget):
             action.update(name=name.text().strip(), control_mode=mode.currentData())
             action["until_end"] = span.currentData() == "__end__"
             action["until_stage"] = "" if action["until_end"] else span.currentData()
+            if setting is not None:
+                if setting.currentData() is None:
+                    action.pop("dose_setting", None)
+                else:
+                    action["dose_setting"] = setting.currentData()
             stage["actions"][lane_id] = action
         elif new:
             stage["actions"].pop(lane_id)
@@ -728,6 +761,9 @@ class ExperimentDefinitionDialog(QDialog):
             self.preview_dialog = None
 
     def preview_experiment(self):
+        from experiment.doe_campaign import calibrated_doses
+        from experiment.models import DeviceProfile, ProfilePoint
+        from experiment.pump_calibration_files import calibration_knots, convert_flow
         from experiment.recipe import compile_recipe, recipe_parameters
         from experiment.profile_plots import profile_figure
         from gui.experiment_profile_dialog import DOEPlotsDialog
@@ -739,11 +775,31 @@ class ExperimentDefinitionDialog(QDialog):
                 recipe = parameters.timeline
                 values = {key: value["min"] if value["mode"] == "Alternate" else value["value"]
                           for key, value in recipe_parameters(recipe)}
-                frame, _, _ = compile_recipe(recipe, values, parameters, check_limits=False, limit_warnings=warnings)
-                signals = [{"key": lane["id"], "role": lane["role"], "label": lane["name"],
-                            "unit": ROLES[lane["role"]].unit, "times": frame["t"] * 3600 / TIME_UNITS[self.rate_unit],
-                            "values": frame[lane["id"]]}
-                           for lane in sorted(recipe["lanes"], key=lambda lane: lane["role"] != "T")]
+                frame, _, window = compile_recipe(recipe, values, parameters, check_limits=False, limit_warnings=warnings)
+                signals = []
+                for lane in sorted(recipe["lanes"], key=lambda lane: lane["role"] != "T"):
+                    key, role = lane["id"], lane["role"]
+                    times, targets = frame["t"].to_numpy() * 3600., frame[key].to_numpy()
+                    unit = ROLES[role].unit
+                    dose_key = "seed_doses" if role == "seed" else "liquid_doses"
+                    doses = [dose for dose in frame.attrs.get(dose_key, ()) if dose["lane"] == key and dose["mass_g"]]
+                    if doses:
+                        device = lane.get("device_id")
+                        config = self.editor.configs.get(device, {})
+                        calibration = config.get("seed_calibration" if role == "seed" else "pump_calibration")
+                        if not calibration:
+                            warnings.append(f"{lane['name']}: assign a pump with a saved calibration to preview the dose timing.")
+                        else:
+                            if role != "seed":
+                                times, targets = calibration_knots(config, times, targets)
+                                targets = convert_flow(calibration, config["type"], targets)
+                                unit = calibration["output_unit"]
+                            profile = DeviceProfile(device, tuple(ProfilePoint(float(t), float(v)) for t, v in zip(times, targets)), unit=unit)
+                            profile = calibrated_doses(profile, doses, config, window if role == "seed" else None)
+                            times = np.asarray([point.time_s for point in profile.points])
+                            targets = [point.target for point in profile.points]
+                    signals.append({"key": key, "role": role, "label": lane["name"], "unit": unit,
+                                    "times": times / TIME_UNITS[self.rate_unit], "values": targets})
                 figures = [profile_figure(signals, name="Representative experiment", time_unit=self.rate_unit)[0]]
                 description = ("Preview uses Value for Fixed and DoE controls, and Minimum for Alternate controls (experiment 1). "
                                "Equal to previous and the common experiment duration are resolved from the current definition.")

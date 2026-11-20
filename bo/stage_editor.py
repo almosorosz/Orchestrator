@@ -30,6 +30,7 @@ class ProfileStageEditor(QWidget):
 
     def __init__(self, channel, parent=None):
         super().__init__(parent)
+        self.doe_variable = True
         self.channel = channel
         self.label, self.unit, _ = CHANNELS[channel]
         self.horizon = None
@@ -174,11 +175,12 @@ class ProfileStageEditor(QWidget):
         self.controls.blockSignals(True)
         self.controls.setRowCount(len(controls))
         for row, (definition, value) in enumerate(zip(controls, values)):
-            cell = read_only("")
+            cell = read_only("" if self.doe_variable else "Fixed")
             cell.setData(Qt.ItemDataRole.UserRole, definition.key)
-            cell.setFlags(cell.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            cell.setCheckState(Qt.CheckState.Checked if definition.key in self.selected_controls
-                               else Qt.CheckState.Unchecked)
+            if self.doe_variable:
+                cell.setFlags(cell.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                cell.setCheckState(Qt.CheckState.Checked if definition.key in self.selected_controls
+                                   else Qt.CheckState.Unchecked)
             self.controls.setItem(row, 0, cell)
             self.controls.setItem(row, 1, read_only(definition.label))
             self.controls.setItem(row, 2, read_only(f"{value:g}"))
@@ -201,10 +203,11 @@ class ProfileStageEditor(QWidget):
 
     def update_control_note(self):
         count = len(self.selected_controls)
-        self.control_note.setText(f"{count} decision controls selected.")
+        self.control_note.setText(f"{count} decision controls selected." if self.doe_variable else
+                                  "Fixed in the starting DoE.")
 
     def toggle_control(self, cell):
-        if cell.column() != 0:
+        if cell.column() != 0 or not self.doe_variable:
             return
         key = cell.data(Qt.ItemDataRole.UserRole)
         if cell.checkState() == Qt.CheckState.Checked:
@@ -311,9 +314,10 @@ class StageEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.tabs)
 
-    def load(self, specs, horizon=None):
+    def load(self, specs, horizon=None, *, doe_groups=None):
         for channel, editor in self.editors.items():
             editor.horizon = horizon
+            editor.doe_variable = doe_groups is None or channel in doe_groups
             editor.load(specs.get(channel, {}))
 
     def set_horizon(self, horizon):

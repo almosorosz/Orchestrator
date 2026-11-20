@@ -40,7 +40,7 @@ Current MODEL iteration folder: {context.get('active_model_folder') or '[read fr
 
 Current interface:
 1. CrystalLoop executes the starting batch and publishes campaign_input.json in its MODEL iteration folder. My external program runs separately and reads the manifest and each completed run's execution.csv.
-2. My program writes next_experiments.json as a FULL Control Panel configuration using CrystalLoop's exported template. experiments is a list of pandas split-format tables (columns, index, data). Each table uses time_s in seconds and actual configured actuator IDs. Targets are numeric and finite; times are nonnegative and strictly increasing. Preserve device configuration and required read-only monitors. Command units are temperature °C, stirrer/Masterflex RPM, Ismatec mL/min, valve 0/1. Convert mass flows using the actual pump calibration.
+2. My program writes next_experiments.json as a FULL Control Panel configuration using CrystalLoop's exported template. experiments is a list of pandas split-format tables (columns, index, data). Each table uses time_s in seconds and actual configured actuator IDs. Targets are numeric and finite; times are nonnegative and strictly increasing. Preserve device configuration and required read-only monitors. Command units are temperature °C, stirrer and pump RPM, valve 0/1. Convert mass flows using the actual pump calibration.
 3. Preserve or update experiment_metadata for each experiment when changing timing: run_stages have id/name/purpose/start_s/end_s and model_window is [start_s,end_s]. The modeling period is continuous and must be inside the full run. Distinguish measured outputs from commanded targets; preparation and cleanup data must not be treated as the modeling experiment.
 4. When all calculations and files are complete, publish a nonempty MODEL.json beside campaign_input.json, writing a temporary file and renaming it last. This marker signals completion; its contents do not execute recipes. next_experiments.json is not automatically imported.
 5. The user ends the previous experiment session and stops LOOP monitoring, uses Control Panel → Load Configuration for next_experiments.json, connects devices, reviews View Experiment Profiles, then Dashboard Start → Control Panel profiles to execute the new batch.
@@ -156,7 +156,7 @@ class ExternalModelInfoDialog(QDialog):
             <p>This is an example of the experiments array within the full exported configuration; an isolated array
             is not a complete configuration. Add one object per experiment. Times are seconds, nonnegative and
             strictly increasing. Use actual configured device IDs as columns and numeric, finite targets.</p>
-            <p>Targets use <b>device command units</b>: temperature °C, Masterflex RPM, Ismatec mL/min,
+            <p>Targets use <b>device command units</b> such as temperature °C, Masterflex and Ismatec RPM,
             stirrer RPM, valve 0/1. These differ from the mass-flow g/h used in Experiment Definition.
             Apply your pump calibration before writing device targets. Continuous targets interpolate linearly;
             valves hold the previous binary state. Shorter device profiles hold their final target.</p>

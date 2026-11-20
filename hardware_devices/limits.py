@@ -3,7 +3,7 @@ import math
 
 DEFAULT_LIMITS = {
     "masterflex": {"min": -300., "max": 300., "min_nonzero": 0., "unit": "RPM"},
-    "ismatec": {"min": -1000., "max": 1000., "min_nonzero": 0., "unit": "mL/min"},
+    "ismatec": {"min": -1000., "max": 1000., "min_nonzero": 0., "unit": "RPM"},
     "huber": {"min": -50., "max": 200., "min_nonzero": 0., "unit": "°C"},
     "jkem": {"min": 0., "max": 800., "min_nonzero": 0., "unit": "RPM"},
     "nidaq_valve": {"min": 0., "max": 1., "min_nonzero": 0., "unit": "binary"},

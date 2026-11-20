@@ -13,11 +13,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog
 
 from app.presets import read_preset, write_preset
-from bo.profiles import Profile, case_runs, make_profile
+from bo.profiles import Profile, case_runs, command_profiles, make_profile
 from experiment.adaptive_loop import RecipeCompiler, default_setup, read_completed_recordings
 from experiment.doe_campaign import DoeCampaignService, ProfileAssignment
 from experiment.doe_snapshot import restore_doe, snapshot_doe
-from experiment.models import Campaign, ExperimentDefinition
+from experiment.models import Campaign, ControlModePoint, DeviceProfile, ExperimentDefinition, ProfilePoint
 from experiment.run_stages import PURPOSES, RunStage, frame_metadata, modeling_campaign, stage_window
 from experiment_dashboard.experiment_dashboard import ExperimentWorker
 from gui.external_model_info import experiment_template
@@ -131,12 +131,50 @@ class RunStageTests(unittest.TestCase):
             self.assertEqual(window, (5., 12.))
             experiment = result.experiments[0]
             self.assertEqual([stage.purpose for stage in experiment.run_stages],
-                             ["Preparing for experiment", "Dissolution", "Seeding", "Experiment", "Cleaning"])
+                             ["Preparing for experiment", "Dissolution", "Seeding", "Experiment", "Equilibration", "Cleaning"])
             self.assertEqual(experiment.run_stages[-1].start_s, 12.)
             frame = experiment.to_frame().set_index("time_s")
             self.assertEqual(frame.loc[2., "TEMP"], 25.)
-            self.assertEqual(frame.loc[12., "TEMP"], 20.)
+            self.assertEqual(frame.loc[np.nextafter(12., 5.), "TEMP"], 20.)
+            self.assertEqual(frame.loc[12., "TEMP"], 24.)
             self.assertEqual(frame.loc[14., "TEMP"], 40.)
+
+    def test_followup_changes_only_crystallization_with_a_shorter_recommendation(self):
+        from dataclasses import replace
+
+        original = manual_campaign().experiments[0]
+        temperature = DeviceProfile("TEMP", tuple(ProfilePoint(t, v) for t, v in
+            ((0., 20.), (2., 65.), (4., 65.), (5., 40.), (8., 25.), (10., 25.), (12., 45.))), unit="°C")
+        original = replace(original, profiles=(temperature,), seed_mass_g=.2,
+                           control_modes=(ControlModePoint(0., "TEMP", "Jacket"),
+                                          ControlModePoint(5., "TEMP", "Process"),
+                                          ControlModePoint(8., "TEMP", "Jacket")))
+        setup = default_setup()
+        setup["experiment_period"] = {"mode": "stages", "stage_ids": ["exp"]}
+        setup["followup_start_s"] = 99.
+        recommendation = {"temperature": Profile(np.array([0., 2.]), np.array([37., 21.]), "Proposed")}
+        for backend in ("bo", "imed"):
+            with self.subTest(backend=backend):
+                compiler = RecipeCompiler(setup, Campaign("Staged recipe", (original,)), CONFIGS, None,
+                                          (ProfileAssignment("T", "TEMP"),), (), backend)
+                followup, window = compiler.build(recommendation, {"SeedMass": .2}, name="Follow-up",
+                                                 source=backend, default_seed=.2)
+                experiment = followup.experiments[0]
+                self.assertEqual(window, (5., 7.))
+                self.assertEqual(experiment.run_stages[:3], original.run_stages[:3])
+                self.assertEqual([s.id for s in experiment.run_stages], [s.id for s in original.run_stages])
+                self.assertEqual((experiment.run_stages[4].start_s, experiment.run_stages[4].end_s), (7., 9.))
+                self.assertEqual(experiment.control_modes[-1], ControlModePoint(7., "TEMP", "Jacket"))
+                frame = experiment.to_frame()
+                time, values = frame["time_s"], frame["TEMP"]
+                np.testing.assert_allclose(np.interp([2., 4., 4.5], time, values), [65., 65., 52.5])
+                np.testing.assert_allclose(np.interp([5., 6., 7., 8., 9., 10., 11.], time, values),
+                                           [37., 29., 25., 25., 25., 35., 45.])
+                commands = command_profiles(asdict(experiment), {"SeedMass": .2}, {"devices": CONFIGS},
+                                            5., 2., {"T": "TEMP"})
+                self.assertEqual(commands["temperature"].values[-1], 21.)
+                with self.assertRaisesRegex(ValueError, "changes the seed dose"):
+                    compiler.build(recommendation, {"SeedMass": .3}, name="Follow-up", source=backend, default_seed=.2)
 
     def test_complete_recording_is_retained_but_model_and_bo_use_selected_stages(self):
         campaign = modeling_campaign(manual_campaign(), default_setup())

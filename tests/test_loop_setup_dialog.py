@@ -44,6 +44,32 @@ class LoopSetupDialogTests(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_manual_times_are_only_editable_on_the_experiment_period_tab(self):
+        setup = default_setup()
+        setup["recording"].update(start_s=2, end_s=12)
+        dialog = LoopSetupDialog(setup, "bo")
+        try:
+            self.assertTrue(dialog.period.isAncestorOf(dialog.manual_start))
+            self.assertTrue(dialog.period.manual_form.isHidden())
+            self.assertEqual(dialog.collect()["recording"]["start_s"], 2)
+
+            dialog.period.mode.setCurrentIndex(dialog.period.mode.findData("manual"))
+            self.assertFalse(dialog.period.manual_form.isHidden())
+            dialog.manual_start.setText("4")
+            dialog.manual_end.clear()
+            recording = dialog.collect()["recording"]
+            self.assertEqual(recording["start_s"], 4)
+            self.assertIsNone(recording["end_s"])
+
+            dialog.manual_end.setText("3")
+            with self.assertRaisesRegex(ValueError, "end must follow the start"):
+                dialog.collect()
+            dialog.period.mode.setCurrentIndex(dialog.period.mode.findData("definition"))
+            self.assertTrue(dialog.period.manual_form.isHidden())
+            self.assertEqual(dialog.collect()["recording"]["end_s"], 12)
+        finally:
+            dialog.close()
+
     def test_invalid_settings_stay_open_and_original_is_preserved(self):
         setup = default_setup()
         dialog = LoopSetupDialog(setup, "bo")
@@ -60,6 +86,44 @@ class LoopSetupDialogTests(unittest.TestCase):
             self.assertEqual(dialog.setup["max_followups"], 3)
         finally:
             dialog.close()
+
+    def test_unknown_saved_fields_can_be_reviewed_and_removed_without_resetting_settings(self):
+        from gui.pages.settings_page import SettingsPage
+
+        page = SettingsPage()
+        page.loop_backend.setCurrentIndex(page.loop_backend.findData("bo"))
+        page.loop_setup["max_followups"] = 6
+        page.loop_setup["obsolete_setting"] = {"value": 21}
+        try:
+            with self.assertRaisesRegex(ValueError, "obsolete_setting.*Open Automatic loop setup"):
+                validate_setup(page.loop_setup)
+            dialog = page.edit_loop_setup()
+            self.assertIn("obsolete_setting", dialog.compatibility_note.text())
+            self.assertEqual(dialog.max_followups.value(), 6)
+            dialog.reject()
+            self.assertIn("obsolete_setting", page.loop_setup)
+
+            dialog = page.edit_loop_setup()
+            dialog.accept()
+            self.assertNotIn("obsolete_setting", page.loop_setup)
+            self.assertEqual(validate_setup(page.loop_setup)["max_followups"], 6)
+            with self.assertRaisesRegex(ValueError, "control_panel"):
+                LoopSetupDialog({"control_panel": {}}, "bo")
+        finally:
+            page.close()
+
+    def test_running_app_with_old_loop_module_gets_restart_message(self):
+        from unittest.mock import patch
+        from gui.pages.settings_page import SettingsPage
+
+        page = SettingsPage()
+        page.loop_backend.setCurrentIndex(page.loop_backend.findData("bo"))
+        try:
+            with patch("experiment.adaptive_loop.setup_for_editing", None), patch("gui.pages.settings_page.QMessageBox.warning") as warn:
+                self.assertIsNone(page.edit_loop_setup())
+            self.assertIn("Close and reopen the app", warn.call_args.args[2])
+        finally:
+            page.close()
 
     def test_completed_badge_is_green(self):
         badge = StatusBadge("Completed")

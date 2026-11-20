@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 )
 
 from .control_panel import fill_table, table
+from experiment.doe_decisions import LABELS, case_decisions
+from .doe_design import doe_controls, imed_doe_groups
 from .probabilistic import (
     CONDITIONS, ERROR_LEVELS, assess_reliability, error_limits, model_intervals,
     partial_rank_correlations, prediction_errors, prcc_diagnostics, propagate, sample_intervals,
@@ -65,6 +67,7 @@ class ProbabilisticDialog(QDialog):
         else:
             self.resize(1100, 850)
         self.case, self.job, self.result = case, None, None
+        self.doe_space = case_decisions(case) if sensitivity else None
         self.model, self.experiment = QComboBox(), QComboBox()
         self.model.addItems(display_name(model, f"Model {i+1}")
                             for i, model in enumerate(case["ModelParameter"]))
@@ -145,7 +148,18 @@ class ProbabilisticDialog(QDialog):
             self.condition_controls[key] = enabled, lower, upper
             for column, widget in enumerate((enabled, QLabel(label), lower, upper)):
                 grid.addWidget(widget, row, offset+column)
-        condition_group.setVisible(sensitivity)
+        condition_group.setVisible(sensitivity and self.doe_space is None)
+        self.doe_checks = {}
+        self.doe_group = QGroupBox("DoE decision variables")
+        doe_rows = QFormLayout(self.doe_group)
+        if self.doe_space is not None:
+            for key, label in LABELS.items():
+                check = QCheckBox(label)
+                check.setChecked(True)
+                detail = QLabel()
+                doe_rows.addRow(check, detail)
+                self.doe_checks[key] = check, detail
+        self.doe_group.setVisible(self.doe_space is not None)
         self.covariance_status = QLabel()
         self.covariance_status.setWordWrap(True)
         note = QLabel(
@@ -228,6 +242,10 @@ class ProbabilisticDialog(QDialog):
             layout.addWidget(scroll)
             self.tabs.addTab(page, name)
             self.figures[name] = figure, canvas
+        if self.doe_space is not None:
+            self.choice_table = table(("Decision variable", "Profile choice or seed mass (g)", "Draws",
+                                       "Mean D10", "Mean D50", "Mean D90", "Mean concentration", "Mean counts"))
+            self.tabs.addTab(self.choice_table, "Profile and seed comparisons")
         self.status = QLabel("Choose a model and experiment, then run the analysis.")
         self.status.setWordWrap(True)
         self.draw_bar = QProgressBar()
@@ -265,6 +283,7 @@ class ProbabilisticDialog(QDialog):
             content = layout
         content.addLayout(form)
         content.addWidget(condition_group)
+        content.addWidget(self.doe_group)
         content.addWidget(self.covariance_status)
         content.addWidget(note)
         content.addWidget(self.tabs, 1)
@@ -275,6 +294,7 @@ class ProbabilisticDialog(QDialog):
         self.controls = [self.model, self.experiment, self.samples, self.seed]
         if sensitivity:
             self.controls += [self.use_parameters, *[widget for controls in self.condition_controls.values() for widget in controls]]
+            self.controls.extend(check for check, _ in self.doe_checks.values())
         for step in reversed(history(case)):
             if (step["action"] == self.action
                     and step["signature"] == signature(case, int(step["model_index"]), include_weights=False)):
@@ -313,6 +333,18 @@ class ProbabilisticDialog(QDialog):
         self.profile_button.setToolTip("" if groups else "No editable DoE factors were found for this case and model.")
         self.recorded_button.setEnabled(bool(recipe))
         self.profile_status.setText(recipe["name"] if recipe else "Recorded experiment")
+        if self.doe_space is not None:
+            eligible = imed_doe_groups(self.doe_space, [self.case["ModelParameter"][model]],
+                                       self.case["ExpData"][experiment], self.case["ProcInf"][experiment])
+            bounds = doe_controls(self.doe_space, eligible)
+            for key, (check, detail) in self.doe_checks.items():
+                check.setEnabled(key in eligible)
+                if key in bounds:
+                    low, high, discrete = bounds[key]
+                    unit = {"stirring": "RPM", "volume": "mL", "seed": "g"}.get(key, "")
+                    detail.setText(f"{int(high)} DoE choices" if discrete else f"{low:g}–{high:g} {unit}")
+                else:
+                    detail.setText("Fixed or unavailable for this model")
         stir_enabled = "stirring" in groups
         for widget in self.condition_controls["stirring_factor"]:
             widget.setEnabled(stir_enabled)
@@ -346,6 +378,8 @@ class ProbabilisticDialog(QDialog):
         self.reliability_table.setRowCount(0)
         if self.sensitivity:
             self.prcc_status.clear()
+        if self.doe_space is not None:
+            self.choice_table.setRowCount(0)
         self.status.setText("Settings changed. Run the analysis to refresh the plots.")
         for figure, canvas in self.figures.values():
             figure.clear()
@@ -369,6 +403,9 @@ class ProbabilisticDialog(QDialog):
             for control, value in zip(controls, bounds):
                 control.setText(f"{value:.9g}" if np.isfinite(value) else "")
         conditions = request.get("conditions", {})
+        if "doe_conditions" in request:
+            for key, (check, _) in self.doe_checks.items():
+                check.setChecked(key in request["doe_conditions"])
         for key, (enabled, lower, upper) in self.condition_controls.items():
             enabled.setChecked(key in conditions)
             if key in conditions:
@@ -378,7 +415,7 @@ class ProbabilisticDialog(QDialog):
 
     def start(self):
         conditions = {}
-        if self.sensitivity:
+        if self.sensitivity and self.doe_space is None:
             conditions = {key: [lower.value(), upper.value()]
                           for key, (enabled, lower, upper) in self.condition_controls.items()
                           if enabled.isEnabled() and enabled.isChecked()}
@@ -387,6 +424,9 @@ class ProbabilisticDialog(QDialog):
                    "workers": self.workers}
         if self.sensitivity:
             request["simulated_profile"] = self.profile_drafts.get(self.profile_selection())
+            if self.doe_space is not None:
+                request["doe_conditions"] = [key for key, (check, _) in self.doe_checks.items()
+                                              if check.isEnabled() and check.isChecked()]
             self.profile_button.setEnabled(False)
             self.recorded_button.setEnabled(False)
         self.clear_result()
@@ -542,6 +582,8 @@ class ProbabilisticDialog(QDialog):
     def show_result(self, result, *, remember=True):
         self.result = result
         self.draw_bar.hide()
+        if self.doe_space is not None:
+            fill_table(self.choice_table, result.get("choice_effects", []))
         if self.job is not None:
             self.status.setText("Rendering analysis plots…")
         for figure, _ in self.figures.values():

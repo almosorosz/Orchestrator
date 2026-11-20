@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
 from PySide6.QtCharts import QChart
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QListWidget, QPushButton, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -332,7 +332,12 @@ class BOWindow(QWidget):
         self.yield_basis.currentIndexChanged.connect(self.invalidate_proposal)
 
     def restore(self, settings):
+        from experiment.doe_decisions import capture_decisions
+
         self.state = validate_settings(settings)
+        if self.state["runs"] and self.state.get("doe_decisions") is None:
+            initial = [run for run in self.state["runs"] if not run.get("recipe_stage")]
+            self.state["doe_decisions"] = capture_decisions(initial or self.state["runs"])
         self.state.pop("loop_proposal", None)
         self.rendering = True
         horizon = self.state["batch_horizon_s"]
@@ -373,6 +378,34 @@ class BOWindow(QWidget):
         data["yield_basis"] = self.yield_basis.currentData()
         data["physical_profiles"] = self.stage_editor.specs()
         return validate_settings(data)
+
+    def edit_loop_settings(self, *, parent=None):
+        if self.job is not None or self.loop_busy:
+            self.status.setText("Finish the running BO calculation before editing BO settings.")
+            return
+        dialog = QDialog(parent or self)
+        dialog.setWindowTitle("Bayesian optimization settings")
+        available = dialog.screen().availableGeometry()
+        dialog.resize(min(1000, available.width() - 48), min(730, available.height() - 48))
+        layout = QVBoxLayout(dialog)
+        tabs = QTabWidget(dialog)
+        layout.addWidget(tabs, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        originals = [(i, self.tabs.widget(i), self.tabs.tabText(i)) for i in range(1, 4)]
+        selected = self.tabs.currentWidget()
+        for _, page, title in originals:
+            self.tabs.removeTab(self.tabs.indexOf(page))
+            tabs.addTab(page, title)
+        try:
+            dialog.exec()
+        finally:
+            for index, page, title in originals:
+                tabs.removeTab(tabs.indexOf(page))
+                self.tabs.insertTab(index, page, title)
+            self.tabs.setCurrentWidget(selected)
+            dialog.deleteLater()
 
     def save_file(self):
         try:
@@ -544,18 +577,22 @@ class BOWindow(QWidget):
             self.status.setText(str(error))
 
     def set_case(self, case, source, *, folder=None):
+        from experiment.doe_decisions import capture_decisions, case_decisions, decision_summary
+
         runs = case_runs(case, folder)
         self.state.pop("initial_input_groups", None)
         groups = case.get("PythonWorkflow", {}).get("initial_input_groups")
         if groups is not None:
             self.state["initial_input_groups"] = [str(value) for value in np.asarray(groups).reshape(-1)]
+        space = case_decisions(case, folder)
+        self.state["doe_decisions"] = space if space is not None else capture_decisions(runs)
         self.state.update(source=source, runs=runs, selected=list(range(len(runs))), overrides={},
                           physical_profiles={})
         self.load_stage_templates()
         self.invalidate_proposal()
         self.refresh_data()
         skipped = len(case.get("ExpData", [])) - len(runs)
-        message = f"Loaded {len(runs)} experiment(s)."
+        message = f"Loaded {len(runs)} experiment(s). DoE decision variables: {decision_summary(self.state['doe_decisions'])}."
         if skipped:
             message += f" Skipped {skipped} without a usable temperature timeline."
         self.status.setText(message)
@@ -653,6 +690,8 @@ class BOWindow(QWidget):
         self.update_buttons()
 
     def load_stage_templates(self):
+        from experiment.doe_decisions import decision_groups
+
         runs = [self.state["runs"][index] for index in self.state["selected"]]
         specs = self.state["physical_profiles"]
         for channel in STAGE_CHANNELS:
@@ -662,7 +701,8 @@ class BOWindow(QWidget):
             horizon = self.profile_horizon()
         except ValueError:
             horizon = None  # Keep the stage editor available while the horizon is corrected.
-        self.stage_editor.load(specs, horizon)
+        space = self.state.get("doe_decisions")
+        self.stage_editor.load(specs, horizon, doe_groups=None if space is None else decision_groups(space))
 
     def reset_stage_templates(self):
         self.state["physical_profiles"] = {}
@@ -816,7 +856,10 @@ class BOWindow(QWidget):
             self.status.setText(str(error))
             return
         specs[key] = replacement
-        self.stage_editor.load(specs, horizon)
+        space = self.state.get("doe_decisions")
+        from experiment.doe_decisions import decision_groups
+
+        self.stage_editor.load(specs, horizon, doe_groups=None if space is None else decision_groups(space))
         self.stage_editor.tabs.setCurrentWidget(self.stage_editor.editors[key])
         self.profile_tabs.setCurrentIndex(0)
         self.stage_settings_changed()
@@ -846,8 +889,14 @@ class BOWindow(QWidget):
         self.run_job(prepare, self.show_fit, check_profile=True)
 
     def show_fit(self, result):
+        from experiment.doe_decisions import decision_groups
+
         channel, comparisons, reference, varied = result
         key = channel.key
+        space = self.state.get("doe_decisions")
+        fixed_by_doe = space is not None and key not in decision_groups(space)
+        if fixed_by_doe:
+            varied = np.zeros_like(varied)
         features = channel.features[reference]
         self.render_comparison(key, comparisons, channel.stages)
         self.variables.blockSignals(True)
@@ -859,6 +908,8 @@ class BOWindow(QWidget):
                 tooltip += ("Fitted values vary across the selected experiments." if varied[row]
                             else "The fitted value is the same across the selected experiments.")
                 cell.setToolTip(tooltip)
+            if fixed_by_doe:
+                cell.setToolTip("Fixed in the starting DoE.")
             if channel.stages is None and varied[row]:
                 cell.setText("")
                 cell.setData(Qt.ItemDataRole.UserRole, variable.key)

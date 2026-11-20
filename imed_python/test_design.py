@@ -35,6 +35,8 @@ class DesignTests(unittest.TestCase):
         score = d_optimal_log_score(self.model(2), {}, {}, {}, {}, [1, 1, 0],
                                     [[1.5], [2.5]])
         self.assertAlmostEqual(score, np.log(16))
+        score = d_optimal_log_score(self.model(2), {}, {}, {}, {}, [0, 1, 0], [[1.5], [2.5]])
+        self.assertAlmostEqual(score, np.log(8))
 
     def test_search_preserves_added_mass_and_ramp_limits(self):
         conditions = {"batch": 30, "temperature": (20, 15), "temperature_rates": (0.5, 1),

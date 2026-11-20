@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from .control_panel import fill_table, table
 from .design import discrimination_score, d_optimal_log_score, optimize_recipe, parameter_samples
+from .doe_design import design_note, doe_controls, imed_doe_groups, seed_template
 from .solver import pbm_backend_label
 from .session import latest_step, record_step, signature
 
@@ -56,6 +57,9 @@ class DesignDialog(QDialog):
         self.setWindowTitle(f"IMED | {name}")
         self.resize(800, 650)
         self.case, self.optimal = case, optimal
+        from experiment.doe_decisions import case_decisions
+
+        self.doe_space = case_decisions(case)
         self.workers = workers
         self.recipe_launcher = execute_recipe
         self.models = [(index, model) for index, model in fitted_models(case)
@@ -84,13 +88,18 @@ class DesignDialog(QDialog):
         self.samples.setValue(8)
         self.terms = QComboBox()
         self.terms.addItems(["CSD", "D10 D50 D90"])
-        weights = case.get("objweightfactor")
+        weights = case.get("peweights", case.get("objweightfactor"))
         weights = weights if isinstance(weights, dict) else {}
         self.weights = []
         form = QFormLayout()
         form.addRow("Experiment template (includes seed CSD)", self.template)
         if optimal:
             form.addRow("Fitted model", self.model)
+        self.use_doe = QCheckBox("Use the loaded DoE to select decision variables")
+        self.use_doe.setChecked(self.doe_space is not None)
+        if self.doe_space is not None:
+            form.addRow(self.use_doe)
+        legacy_start = form.rowCount()
         form.addRow("Batch time (s)", self.batch)
         form.addRow("Initial and final temperature (°C)", self.row(self.temperatures))
         form.addRow("Min and max ramp rate (°C/s)", self.row(self.temp_rates))
@@ -99,6 +108,19 @@ class DesignDialog(QDialog):
         form.addRow("Final antisolvent mass fraction", self.final_anti)
         form.addRow("Min and max antisolvent rate (g/s)", self.row(self.anti_rates))
         form.addRow("Min and max seed mass (g)", self.row(self.seed))
+        self.decision_note = QLabel()
+        self.decision_note.setWordWrap(True)
+        if self.doe_space is not None:
+            legacy_rows = range(legacy_start, form.rowCount())
+            form.addRow("DoE decision variables", self.decision_note)
+
+            def show_design_inputs(use_doe):
+                for index in legacy_rows:
+                    form.setRowVisible(index, not use_doe)
+                form.setRowVisible(self.decision_note, use_doe)
+
+            show_design_inputs(True)
+            self.use_doe.toggled.connect(show_design_inputs)
         for i, label in enumerate(("Count", "Concentration", "Size"), 1):
             value = float(weights.get(f"W{i}", int(i > 1)))
             if optimal:
@@ -109,14 +131,14 @@ class DesignDialog(QDialog):
                 control.setValue(value)
             self.weights.append(control)
             form.addRow(label + (" response" if optimal else " weight"), control)
+        self.terms.setCurrentIndex(int(weights.get("Terms", "CSD") != "CSD"))
+        form.addRow("Size terms", self.terms)
         if optimal:
             form.addRow("Latin hypercube samples", self.samples)
-        else:
-            self.terms.setCurrentIndex(int(weights.get("Terms", "CSD") != "CSD"))
-            form.addRow("Size terms", self.terms)
         form.addRow("Search iterations", self.iterations)
 
-        self.status = QLabel("Searches one temperature ramp and one antisolvent pulse.")
+        self.status = QLabel("Select a template and run the design search." if self.doe_space is not None else
+                             "Searches one temperature ramp and one antisolvent pulse.")
         self.status.setWordWrap(True)
         self.result_table = table(("Time (s)", "Temperature (°C)", "Antisolvent (g/s)"))
         self.run_button = QPushButton("Run")
@@ -140,6 +162,7 @@ class DesignDialog(QDialog):
         layout.addWidget(self.row((self.run_button, self.stop_button, self.execute_button, self.export_button,
                                    self.close_button)))
         self.template.currentIndexChanged.connect(self.load_template)
+        self.model.currentIndexChanged.connect(self.refresh_decisions)
         self.load_template(0)
         action = "d_optimal_design" if optimal else "model_discrimination"
         context = "|".join(signature(case, index) for index, _ in self.models)
@@ -223,6 +246,21 @@ class DesignDialog(QDialog):
         self.anti_rates[1].setValue(max(0.1, 2 * addition / max(self.batch.value(), 1)))
         for box in self.seed:
             box.setValue(float(process["SeedMass"]))
+        self.refresh_decisions()
+
+    def decision_controls(self, experiment, process):
+        models = [model for _, model in self.models]
+        if self.optimal:
+            index = self.model.currentIndex()
+            models = models[index:index + 1] if index >= 0 else []
+        return doe_controls(self.doe_space, imed_doe_groups(self.doe_space, models, experiment, process))
+
+    def refresh_decisions(self):
+        if self.doe_space is None or self.template.currentIndex() < 0:
+            return
+        index = self.template.currentIndex()
+        controls = self.decision_controls(self.case["ExpData"][index], self.case["ProcInf"][index])
+        self.decision_note.setText(design_note(self.doe_space, controls))
 
     def start_design(self):
         index = self.template.currentIndex()
@@ -235,6 +273,7 @@ class DesignDialog(QDialog):
                 model = self.models[self.model.currentIndex()][1]
                 score = partial(d_optimal_log_score, model, **shared,
                                 enabled_terms=[w.isChecked() for w in self.weights],
+                                size_term=self.terms.currentText(),
                                 samples=parameter_samples(model, self.samples.value()))
             else:
                 score = partial(discrimination_score, [model for _, model in self.models],
@@ -245,8 +284,8 @@ class DesignDialog(QDialog):
             self.status.setText(str(error))
             return
 
-        if self.optimal and sum(weight.isChecked() for weight in self.weights) < 2:
-            self.status.setText("Select at least two response terms.")
+        if self.optimal and not any(weight.isChecked() for weight in self.weights):
+            self.status.setText("Select at least one response.")
             return
         if not self.optimal and not any(weight.value() for weight in self.weights):
             self.status.setText("Set at least one positive response weight.")
@@ -257,6 +296,9 @@ class DesignDialog(QDialog):
                             ("liquid_masses", self.masses), ("antisolvent_rates", self.anti_rates),
                             ("seed_bounds", self.seed)):
             conditions[key] = tuple(field.value() for field in fields)
+        if self.use_doe.isChecked():
+            conditions["doe_search"] = {"space": self.doe_space, "controls": self.decision_controls(experiment, process),
+                                        "seed_template": seed_template(self.case)}
         self.recipe = None
         self.recipe_result = None
         self.result_table.setRowCount(0)
@@ -284,7 +326,12 @@ class DesignDialog(QDialog):
         fill_table(self.result_table, self.recipe)
         label = "Log determinant" if self.optimal else "Model separation"
         prefix = "Stopped · best evaluated recipe · " if stopped else ""
-        self.status.setText(f"{prefix}{label}: {score:.6g}   Seed mass: {self.seed_mass:.6g} g")
+        details = [f"Seed mass {self.seed_mass:.6g} g"]
+        if "ProposedStirringRPM" in experiment:
+            details.append(f"Stirring {experiment['ProposedStirringRPM']:.6g} RPM")
+        if "RequestedInitialVolume_ml" in process:
+            details.append(f"Starting liquid volume {process['RequestedInitialVolume_ml']:.6g} mL")
+        self.status.setText(f"{prefix}{label}: {score:.6g}   " + " · ".join(details))
         self.execute_button.setEnabled(self.recipe_launcher is not None and self.job is None)
         if remember:
             action = "d_optimal_design" if self.optimal else "model_discrimination"
@@ -337,7 +384,11 @@ class DesignDialog(QDialog):
         try:
             with open(path, "w", encoding="utf-8", newline="") as file:
                 writer = csv.writer(file)
-                writer.writerow(("time_s", "temperature_c", "antisolvent_g_s", "seed_mass_g"))
-                writer.writerows((*row, self.seed_mass) for row in self.recipe)
+                _, experiment, process = self.recipe_result
+                optional = {"stirring_rpm": experiment.get("ProposedStirringRPM"),
+                            "starting_liquid_volume_ml": process.get("RequestedInitialVolume_ml")}
+                columns = {key: value for key, value in optional.items() if value is not None}
+                writer.writerow(("time_s", "temperature_c", "antisolvent_g_s", "seed_mass_g", *columns))
+                writer.writerows((*row, self.seed_mass, *columns.values()) for row in self.recipe)
         except OSError as error:
             QMessageBox.warning(self, "Export recipe", str(error))

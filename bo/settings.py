@@ -43,6 +43,10 @@ def validate_settings(value):
     try:
         if data["yield_basis"] not in ("theoretical", "actual") or not isinstance(data["source"], str):
             raise ValueError("Unknown yield basis or source.")
+        if "doe_decisions" in data:
+            from experiment.doe_decisions import validate_decisions
+
+            data["doe_decisions"] = validate_decisions(data["doe_decisions"])
         if not isinstance(data["loop_stages"], list) or any(
             not isinstance(stage["name"], str) or not isinstance(stage["path"], str)
             or type(stage["observations"]) is not int or type(stage["proposed"]) is not bool

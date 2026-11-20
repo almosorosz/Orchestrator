@@ -8,7 +8,7 @@ def initial_input_groups(processes):
         return bool(len(values) > 1 and np.isfinite(values).all()
                     and np.ptp(values) > 1e-6 * max(1., float(np.max(np.abs(values)))))
     return [key for key, field in (("stirring", "StirringRPM"), ("volume", "InitialVolume_ml"))
-            if varies(field) or (key == "volume" and varies("AverageVolume_ml"))]
+            if varies(field)]
 
 
 def power_effects(models, processes):

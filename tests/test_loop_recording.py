@@ -26,7 +26,7 @@ class LoopRecordingTests(unittest.TestCase):
             with self.subTest(term=term), tempfile.TemporaryDirectory(dir=Path.cwd()) as root:
                 model = Path(root)/"model"
                 model.mkdir()
-                controller = Controller(root, str(model), 1, pbm_size_term=term)
+                controller = Controller(root, str(model), 1, pbm_size_term=term, pbm_final_size_samples=9)
                 coordinator = ExperimentCoordinator()
                 coordinator.set_controller(controller)
                 coordinator.begin_campaign(campaign)
@@ -44,6 +44,7 @@ class LoopRecordingTests(unittest.TestCase):
                     self.assertEqual(controller.current_stage, Stage.MODEL)
                     manifest = json.loads((Path(controller.current_model_folder)/"campaign_input.json").read_text())
                     self.assertEqual(manifest["pbm_fitting"]["size_term"], term)
+                    self.assertEqual(manifest["pbm_fitting"]["final_size_samples"], 9)
                     experiment = {"TemperatureData": [[0., 10.], [20., 20.]], "FinalD10D50D90": [10., 20., 30.]}
                     objective = FitObjective([experiment], [{"ShapeFactor": 1}], {}, {"N": 3}, [0, 0, 1],
                                              manifest["pbm_fitting"]["size_term"])

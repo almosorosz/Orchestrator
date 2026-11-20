@@ -10,6 +10,7 @@ import pandas as pd
 
 from experiment.models import Campaign, ControlModePoint, DeviceProfile, ExperimentDefinition, ProfilePoint
 from hardware_devices.capabilities import is_monitor_only
+from hardware_devices.limits import target_limits
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,19 @@ def convert_profile(storage, assignment, config, values):
     if role.unit != "g/h":
         return values, role.unit, "identity"
     if config.get("pump_calibration"):
-        from experiment.pump_calibration_files import convert_flow, OUTPUT_UNITS
+        from experiment.pump_calibration_files import convert_flow
         calibration = config["pump_calibration"]
-        return (convert_flow(calibration, config["type"], values), OUTPUT_UNITS[config["type"]],
-                f"Loaded calibration: {calibration['source_name']} (g/h → {OUTPUT_UNITS[config['type']]})")
+        unit = calibration["output_unit"]
+        if unit != target_limits(config)["unit"]:
+            raise ValueError("Review this Ismatec calibration in Define pump profile and confirm the recorded command units.")
+        return (convert_flow(calibration, config["type"], values), unit,
+                f"Loaded calibration: {calibration['source_name']} (g/h → {unit})")
     if config["type"] == "ismatec":
-        return values / 60, "mL/min", "g/h ÷ 60 (assumed density 1 g/mL)"
+        if config.get("simulated"):
+            return values / 60, "RPM", "Simulated delivery (g/min → virtual RPM)"
+        if np.any(values):
+            raise ValueError("Load the Ismatec antisolvent mass-flow calibration in RPM before generating pump commands.")
+        return values, "RPM", "Pump stays off"
     converter_names = {"AS": "as_rate_converter", "solution": "solution_rate_converter",
                        "solvent": "solvent_rate_converter", "clean_sol": "cleaning_sol_rate_converter"}
     converter = getattr(storage, converter_names[assignment.role])
@@ -96,6 +104,7 @@ class DoeCampaignService:
         # but keep source flow units until the assigned driver is known.
         self.return_ramps_applied = (not self.imed_simulations and not self.recipe_lanes
                                      and hasattr(creator.exp_storage, "add_backwards_ramp"))
+        self.nominal_frames = self.frames
         if self.return_ramps_applied:
             self.frames = {key: creator.exp_storage.add_backwards_ramp(
                 frame, creator.exp_storage.COLUMNS_W_BACKPROFILE
@@ -129,8 +138,14 @@ class DoeCampaignService:
             if device_id not in configs or not is_monitor_only(configs[device_id]):
                 raise ValueError(f"Monitor must be a read-only device: {device_id}")
         role_devices = dict(zip(roles, device_ids))
+        frames = self.frames
+        if self.return_ramps_applied and any("pump_corrections" in configs[device] for device in device_ids):
+            legacy_columns = [column for column in self.creator.exp_storage.COLUMNS_W_BACKPROFILE
+                              if column not in role_devices or "pump_corrections" not in configs[role_devices[column]]]
+            frames = {name: self.creator.exp_storage.add_backwards_ramp(frame.copy(), legacy_columns)
+                      for name, frame in self.nominal_frames.items()}
         experiments = []
-        for name, frame in self.frames.items():
+        for name, frame in frames.items():
             # Disabled zero-duration generator sections can repeat an identical
             # boundary row. Remove only exact duplicates; conflicting targets
             # at the same instant remain an error.
@@ -140,6 +155,25 @@ class DoeCampaignService:
             times = frame["t"].to_numpy(dtype=float) * 3600
             if not np.all(np.isfinite(times)) or np.any(times < 0) or np.any(np.diff(times) <= 0):
                 raise ValueError(f"{name}: times must be finite, nonnegative and strictly increasing")
+            snapshot = self.creator.parameter_snapshots.get(name, {})
+            seed = snapshot.get("seed")
+            planned_seed = float(seed["value"]) if isinstance(seed, dict) and snapshot.get("if_seed") else None
+            if snapshot.get("if_seed") is False:
+                planned_seed = 0.
+            seed_doses = snapshot.get("seed_doses", ())
+            if seed_doses:
+                planned_seed = sum(dose["mass_g"] for dose in seed_doses)
+            seed_config = configs.get(role_devices.get("seed"), {})
+            if not self.recipe_lanes and planned_seed and seed_config.get("seed_calibration"):
+                from experiment.pump_calibration_files import seed_dose_command
+
+                rpm, seconds = seed_dose_command(seed_config, None, planned_seed)
+                positive = np.flatnonzero(frame["seed"].to_numpy() > 0)
+                if positive.size < 2:
+                    raise ValueError(f"{name}: the legacy seed profile needs a positive pumping interval.")
+                start, stop = times[positive[[0, -1]]]
+                times = np.interp(np.minimum(times, stop), [0., start, stop], [0., start, start + seconds]) + np.maximum(times - stop, 0.)
+                frame = frame.assign(seed=np.sign(frame["seed"]) * rpm)
             profiles = []
             for assignment in assignments:
                 if assignment.role not in frame:
@@ -147,22 +181,35 @@ class DoeCampaignService:
                 values = frame[assignment.role].to_numpy(dtype=float)
                 semantic = self.recipe_lanes.get(assignment.role, {}).get("role", assignment.role)
                 conversion = ProfileAssignment(semantic, assignment.device_id, assignment.density_g_ml)
-                converted, unit, _ = convert_profile(self.creator.exp_storage, conversion, configs[assignment.device_id], values)
+                config = configs[assignment.device_id]
                 profile_times = times
-                if times[0] > 0:
-                    profile_times = np.insert(times, 0, 0.)
+                if ROLES[semantic].unit == "g/h" and config.get("pump_calibration"):
+                    from experiment.pump_calibration_files import calibration_knots
+
+                    profile_times, values = calibration_knots(config, profile_times, values)
+                converted, unit, _ = convert_profile(self.creator.exp_storage, conversion, config, values)
+                if profile_times[0] > 0:
+                    profile_times = np.insert(profile_times, 0, 0.)
                     converted = np.insert(converted, 0, converted[0])
-                profiles.append(DeviceProfile(
+                profile = DeviceProfile(
                     assignment.device_id,
                     tuple(ProfilePoint(float(t), float(v)) for t, v in zip(profile_times, converted)),
                     "step" if semantic == "valve_state" else "linear", unit,
-                ))
+                )
+                if semantic == "seed" and seed_doses:
+                    doses = [dose for dose in seed_doses if dose["lane"] == assignment.role and dose["mass_g"] > 0]
+                    if doses:
+                        profile = calibrated_doses(profile, doses, config, snapshot.get("model_window"))
+                liquid_doses = [dose for dose in snapshot.get("liquid_doses", ())
+                                if dose["lane"] == assignment.role and dose["mass_g"] > 0]
+                if liquid_doses:
+                    profile = calibrated_doses(profile, liquid_doses, config)
+                profiles.append(profile)
             simulation = self.imed_simulations.get(name)
             if simulation is not None:
                 from imed_python.demo_campaign import compile_simulation
                 simulation = compile_simulation(simulation, role_devices, configs,
                                                 monitor_device_ids, imed_monitors, profiles)
-            snapshot = self.creator.parameter_snapshots.get(name, {})
             stages = snapshot.get("run_stages", ())
             if not stages and self.recipe_lanes:
                 from experiment.run_stages import recipe_run_stages
@@ -174,7 +221,7 @@ class DoeCampaignService:
                           for item in snapshot.get("control_modes", []) if item["lane"] in role_devices)
             definition = ExperimentDefinition(name, tuple(profiles), source="doe", imed_simulation=simulation,
                                               control_modes=modes, model_window=snapshot.get("model_window"),
-                                              run_stages=stages)
+                                              run_stages=stages, seed_mass_g=planned_seed)
             # The shared validator applies the currently configured device limits.
             ExperimentDefinition.from_frame(definition.to_frame(), configs)
             experiments.append(definition)
@@ -247,6 +294,9 @@ class DoeCampaignService:
                         "kind": "planned_profiles", "experiment_count": len(self.frames)}
             metadata["return_pump_segments"] = self.return_ramps_applied
             if campaign is not None:
+                from experiment.pump_corrections import corrected_campaign
+
+                campaign = corrected_campaign(campaign, configs or {})
                 assigned_rows = []
                 for experiment in campaign.experiments:
                     for profile in experiment.profiles:
@@ -275,3 +325,41 @@ class DoeCampaignService:
             (directory / "EXPORT_FAILED.txt").write_text("Export did not complete. Do not use this directory as a complete campaign.", encoding="utf-8")
             raise
         return directory
+
+
+def calibrated_doses(profile, doses, config, window=None):
+    """Insert device-unit pulses into the allotted sections of a pump profile."""
+    from experiment.pump_calibration_files import seed_dose_command
+    from experiment.pump_profile_data import dose_duration
+
+    points = {point.time_s: point.target for point in profile.points}
+    for dose in doses:
+        start = dose["start_s"]
+        if setting := dose.get("setting"):
+            target = setting["target"]
+            if setting["unit"] != profile.unit:
+                raise ValueError(f"{dose['name']}: the selected pump setting uses {setting['unit']}. The assigned pump uses {profile.unit}.")
+            seconds, rate = dose_duration(config, target, dose["mass_g"])
+            if rate > dose["limit_g_h"] + 1e-9:
+                raise ValueError(f"{dose['name']}: {target:g} {profile.unit} exceeds the System settings delivery rate limit.")
+        else:
+            if not config.get("seed_calibration"):
+                raise ValueError(f"Load a dry-seed dose calibration for {profile.device_id} to convert the planned grams.")
+            target, seconds = seed_dose_command(config, None, dose["mass_g"])
+        end = start + seconds
+        limit = min(dose["end_s"], window[0]) if window else dose["end_s"]
+        if end > limit + 1e-7:
+            raise ValueError(f"{dose['name']}: {dose['mass_g']:g} g needs {seconds:g} s at {target:g} {profile.unit}, "
+                             f"but the dosing stage has {limit - start:g} s available.")
+        # Round-off in the generated hours grid can land a boundary on either side of start.
+        restore = next((value for time, value in points.items() if abs(time - end) < 1e-8), 0.)
+        edge = min(1e-6, seconds / 4., start / 2.)
+        if edge:
+            times = sorted(points)
+            before = float(np.interp(start - edge, times, [points[time] for time in times]))
+        points = {time: value for time, value in points.items() if not start - 1e-8 <= time <= end + 1e-8}
+        if edge:
+            points[start - edge] = before
+        points.update({start: target, end - min(1e-6, seconds / 4.): target, end: restore})
+    return DeviceProfile(profile.device_id, tuple(ProfilePoint(t, v) for t, v in sorted(points.items())),
+                         profile.interpolation, profile.unit)

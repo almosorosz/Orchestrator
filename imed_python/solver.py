@@ -199,6 +199,14 @@ def equilibrium_relaxation_times(settings, primary, secondary, growth, dissoluti
             relaxation_time if limit_dissolution else None)
 
 
+def log_solubility(temperature_kelvin, antisolvent_fraction, coefficients):
+    a, b, c, d, e, f, g, h = coefficients
+    temperature, anti = temperature_kelvin, antisolvent_fraction
+    exp_anti = np.exp(anti)
+    return (a + b / temperature + c * np.log(temperature) + d * anti + e * exp_anti + f * anti**2
+            + g * anti / temperature + h * exp_anti / temperature)
+
+
 def equilibrium_rate_scale(dissolved_rate, dissolved, carrier, saturation, relaxation_time):
     """Bound phase transfer by the available API surplus or deficit per second."""
     if not 0 <= saturation < 1 or dissolved_rate == 0:
@@ -282,7 +290,7 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
         (None, None) if matlab_pe else
         equilibrium_relaxation_times(settings, primary, secondary, growth, dissolution)
     )
-    a, b, c, d, e, f, g, h = (solubility[key] for key in "abcdefgh")
+    solubility_coefficients = tuple(solubility[key] for key in "abcdefgh")
     temperature = profile(experiment["TemperatureData"])
     flow_data = experiment.get("FlowRateData", [])
     flow = profile(flow_data, default=0)
@@ -337,9 +345,7 @@ def _simulate_numpy(parameters, experiment, process, solubility, settings,
         temperature_k = float(temperature(t)) + 273.15
         inflow = float(flow(t))
         anti = 1 - solvent
-        saturation = np.exp(a + b / temperature_k + c * np.log(temperature_k)
-                            + d * anti + e * np.exp(anti) + f * anti**2
-                            + g * anti / temperature_k + h * np.exp(anti) / temperature_k)
+        saturation = np.exp(log_solubility(temperature_k, anti, solubility_coefficients))
         supersat = ratio / (1 + ratio) / saturation - 1
         liquid_volume = liquid_mass * (solvent / rho_solvent + anti / rho_anti)
         number = density * width

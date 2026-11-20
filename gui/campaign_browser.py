@@ -41,6 +41,8 @@ def render_recorded(campaigns, device_keys, dark, time_range=(None, None)):
             for column, values in data.items():
                 device, field = column.rsplit(".", 1)
                 config = configs.get(device, {})
+                if config.get("type") == "ismatec" and field == "flow" and f"{device}.speed_rpm" in data:
+                    continue
                 _, traces = devices.setdefault((device, config.get("type", "")), (config, []))
                 traces.append((series, label, field, values))
             series += 1
@@ -57,7 +59,7 @@ def render_recorded(campaigns, device_keys, dark, time_range=(None, None)):
             axis = fig.add_subplot(len(devices), 1, index)
             axis.set_facecolor(bg)
             primary_unit = DEFAULT_LIMITS.get(kind, {}).get("unit", "value")
-            units = {"speed_rpm": "RPM", "flow": "mL/min", "setpoint": "°C", "temp_internal": "°C",
+            units = {"speed_rpm": "RPM", "flow": "RPM" if kind == "ismatec" else "mL/min", "setpoint": "°C", "temp_internal": "°C",
                      "temp_external": "°C", "weight_g": "g", "measured_voltage": "V", "torque_ozin": "oz·in",
                      "target_state": "0/1", "target": primary_unit}
             secondary = None

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QComboBox,
+    QSpinBox,
     QFormLayout,
     QScrollArea,
     QFrame,
@@ -18,7 +19,9 @@ from PySide6.QtWidgets import (
 )
 
 from PySide6.QtCore import Qt, Signal
-from imed_python.size_data import SIZE_SAMPLE_OPTIONS
+from imed_python.size_data import (
+    FINAL_SIZE_TERM, FINAL_SIZE_SAMPLE_TOOLTIP, MAX_FINAL_SIZE_SAMPLES, SIZE_SAMPLE_OPTIONS,
+)
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -99,6 +102,9 @@ class SettingsPage(SettingsWorkflow, QWidget):
         for label, value in SIZE_SAMPLE_OPTIONS:
             self.pbm_size_samples.addItem(label, value)
         self.pbm_size_samples.setToolTip("Choose which recorded size measurements the LOOP MODEL stage uses for PBM fitting.")
+        self.pbm_final_size_samples = QSpinBox()
+        self.pbm_final_size_samples.setRange(1, MAX_FINAL_SIZE_SAMPLES)
+        self.pbm_final_size_samples.setToolTip(FINAL_SIZE_SAMPLE_TOOLTIP)
 
         self.define_button = QPushButton(
             "Apply output locations"
@@ -627,8 +633,6 @@ class SettingsPage(SettingsWorkflow, QWidget):
         self.exp_number_input.clear()
 
     def edit_loop_setup(self):
-        from gui.loop_setup_dialog import LoopSetupDialog
-
         if self.loop_setup_dialog is not None:
             if self.loop_setup_dialog.backend != self.loop_backend.currentData():
                 self.loop_setup_dialog.reject()
@@ -639,9 +643,15 @@ class SettingsPage(SettingsWorkflow, QWidget):
             return self.loop_setup_dialog
 
         try:
+            from gui.loop_setup_dialog import LoopSetupDialog
+
             configs = self.loop_devices() if self.loop_devices is not None else {}
             dialog = LoopSetupDialog(self.loop_setup, self.loop_backend.currentData(), configs, self,
-                                     preview=self.loop_preview)
+                                     preview=self.loop_preview,
+                                     size_preferences=(self.pbm_size_samples, self.pbm_final_size_samples))
+        except ImportError as error:
+            QMessageBox.warning(self, "Could not open loop setup", f"Restart CrystalLoop after updating the source.\n\n{error}")
+            return
         except (TypeError, ValueError) as error:
             QMessageBox.warning(self, "Check loop setup", str(error))
             return
@@ -654,6 +664,10 @@ class SettingsPage(SettingsWorkflow, QWidget):
             self.update_workflow_checklist()
         dialog.finished.connect(finished)
         def navigate(key):
+            if key in {"objectives", "solubility", "bo_settings", "imed_candidate", "imed_models", "imed_fit", "imed_runtime"}:
+                self.loop_navigation_requested.emit(key)
+                dialog.refresh_checklist()
+                return
             dialog.hide()
             if key == "folders":
                 self.workflow_tabs.setCurrentIndex(3)
@@ -681,6 +695,13 @@ class SettingsPage(SettingsWorkflow, QWidget):
     def update_loop_setup_button(self):
         self.loop_setup_button.setEnabled(self.loop_backend.isEnabled() and self.loop_backend.currentData() != "external")
 
+    def uses_final_size_samples(self, mode=None):
+        mode = mode or self.loop_backend.currentData()
+        return mode == "bo" or self.pbm_size_samples.currentData() == FINAL_SIZE_TERM
+
+    def final_size_sample_count(self, mode=None):
+        return self.pbm_final_size_samples.value() if self.uses_final_size_samples(mode) else 1
+
 
     def reset_ui(self):
         if self.loop_setup_dialog is not None:
@@ -690,6 +711,7 @@ class SettingsPage(SettingsWorkflow, QWidget):
         from experiment.adaptive_loop import default_setup
 
         self.loop_backend.setCurrentIndex(0)
+        self.pbm_final_size_samples.setValue(1)
         self.loop_setup = default_setup()
         self.variable_table.setRowCount(0)
 
@@ -713,10 +735,9 @@ class SettingsPage(SettingsWorkflow, QWidget):
             button.setEnabled(enabled)
         if self.loop_setup_dialog is not None:
             self.loop_setup_dialog.setEnabled(enabled)
-        self.load_preset_button.setEnabled(enabled)
         self.define_button.setEnabled(enabled)
         for control in (self.exp_path_input, self.MODEL_path_input, self.exp_number_input, self.pbm_size_samples,
-                        self.loop_backend):
+                        self.pbm_final_size_samples, self.loop_backend):
             control.setEnabled(enabled)
         self.update_loop_setup_button()
         self.generate_button.setEnabled(enabled)
@@ -726,12 +747,18 @@ class SettingsPage(SettingsWorkflow, QWidget):
         self.export_doe_button.setEnabled(enabled and getattr(self, "_doe_available", False))
         self.start_independent_doe_button.setEnabled(enabled and getattr(self, "_assignment_available", False))
 
+    def set_session_notice(self, message):
+        self.session_notice.setText(message)
+        self.session_notice.setVisible(bool(message))
+
     def set_doe_available(self, available):
         self._doe_available = bool(available)
         if not available:
             self._workflow_creator = None
             self.experiment_choice.clear()
             self._workflow_profile_figures = []
+            self.sampling_3d_button.setEnabled(False)
+            self.sampling_3d_dialog.close()
         enabled = available and getattr(self, "_controls_enabled", True)
         self.assign_doe_button.setEnabled(enabled)
         self.export_doe_button.setEnabled(enabled)
@@ -805,6 +832,8 @@ class SettingsPage(SettingsWorkflow, QWidget):
 
                 ax.xaxis.label.set_color(fg)
                 ax.yaxis.label.set_color(fg)
+                if hasattr(ax, "zaxis"):
+                    ax.zaxis.label.set_color(fg)
                 ax.title.set_color(fg)
 
                 for spine in ax.spines.values():

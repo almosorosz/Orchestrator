@@ -149,7 +149,7 @@ class BOControlTests(unittest.TestCase):
             for row in range(window.variables.rowCount()):
                 item = window.variables.item(row, 0)
                 self.assertEqual(item.text(), "Fixed")
-                self.assertIn("Selected in Edit stages", item.toolTip())
+                self.assertIn("Fixed in the starting DoE", item.toolTip())
             window.channel_choice.setCurrentIndex(window.channel_choice.findData("temperature"))
             temperature = window.stage_editor.editors["temperature"]
             self.assertIs(window.stage_editor.tabs.currentWidget(), temperature)
